@@ -60,6 +60,9 @@ pub const Ast = struct {
         len: usize = 0,
         // raised by php's parser itself (a modifier list): no stack trace
         trace: bool = true,
+        // the `new` token of the anonymous class the message names as
+        // "class@anonymous", whose full name only the compiler knows; 0 when none
+        anon_tok: u32 = 0,
 
         pub fn message(self: *const CompileErrorNote) []const u8 {
             return self.text[0..self.len];

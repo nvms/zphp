@@ -261,12 +261,6 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
         }
     };
 
-    // an error php's compiler raises that the parser already found
-    if (ast.compile_error) |note| {
-        if (!note.trace) return c.failParse(note.token, "{s}", .{note.message()});
-        return c.fail(note.token, note.message());
-    }
-
     try c.checkEncodingDeclares();
 
     const root = ast.nodes[0];
@@ -288,6 +282,21 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
         anon_class_keys = outer_keys;
     }
     try compiler_class.assignRtdKeys(&c, ast.extraSlice(root.data.lhs), &anon_class_keys);
+
+    // an error php's compiler raises that the parser already found
+    if (ast.compile_error) |note| {
+        var msg = note.message();
+        var buf: [512]u8 = undefined;
+        if (note.anon_tok != 0) if (compiler_class.anonymousClassNode(&c, note.anon_tok)) |anon| {
+            // the anonymous class the parser could only call class@anonymous
+            if (std.mem.indexOf(u8, msg, "class@anonymous")) |at| {
+                const name = try compiler_class.anonymousClassName(&c, anon);
+                msg = std.fmt.bufPrint(&buf, "{s}{s}{s}", .{ msg[0..at], name, msg[at + "class@anonymous".len ..] }) catch msg;
+            }
+        };
+        if (!note.trace) return c.failParse(note.token, "{s}", .{msg});
+        return c.fail(note.token, msg);
+    }
     // php runs the prepended file before it compiles the script, so before
     // anything of the script is declared
     if (origin.auto_prepend.len > 0) try emitAutoRequire(&c, origin.auto_prepend);
@@ -828,12 +837,6 @@ pub const Compiler = struct {
                 var d: Diagnostic = .{ .token = token };
                 // a message too long for the buffer keeps what fits
                 d.len = if (std.fmt.bufPrint(&d.text, fmt, args)) |written| written.len else |_| d.text.len;
-                var buf: [1024]u8 = undefined;
-                var fba = std.heap.FixedBufferAllocator.init(&buf);
-                if (class_names.stripAnonymous(fba.allocator(), d.text[0..d.len]) catch null) |shown| {
-                    @memcpy(d.text[0..shown.len], shown);
-                    d.len = shown.len;
-                }
                 slot.* = d;
             }
         }

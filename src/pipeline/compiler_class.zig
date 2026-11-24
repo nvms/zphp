@@ -351,7 +351,7 @@ fn checkHookAttributes(self: *Compiler, attrs: []const ParsedAttr, at: u32) Erro
 // the validators php runs for an internal attribute on a class
 fn validateClassAttribute(self: *Compiler, attribute: []const u8, class: @FieldType(AttrTarget, "class"), at: u32) Error!void {
     const kind = classAttributeRefusal(attribute, class.kind, class.modifiers & 1 != 0, class.modifiers & 4 != 0) orelse return;
-    const shown = class_names.display(class.name);
+    const shown = class.name;
     return self.failFmt(at, "Cannot apply #[\\{s}] to {s} {s}", .{ attribute, kind, shown });
 }
 
@@ -2926,7 +2926,7 @@ fn checkDuplicateMembers(self: *Compiler, class_name: []const u8, members: []con
     const arena = arena_state.allocator();
     var methods: std.StringHashMapUnmanaged(void) = .{};
     var props: std.StringHashMapUnmanaged(void) = .{};
-    const class = class_names.display(class_name);
+    const class = class_name;
     for (members) |m_idx| {
         const m = self.ast.nodes[m_idx];
         switch (m.tag) {
@@ -3678,6 +3678,29 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     }
 }
 
+// the anonymous class node whose `new` is `new_tok`
+pub fn anonymousClassNode(self: *Compiler, new_tok: u32) ?Ast.Node {
+    for (self.ast.nodes) |n| if (n.tag == .anonymous_class and n.main_token == new_tok) return n;
+    return null;
+}
+
+// zend_generate_anon_class_name: the parent or first interface, a NUL, then
+// the file, the line of `class` and the runtime definition number. a message
+// that formats it with %s reads `Foo@anonymous`
+pub fn anonymousClassName(self: *Compiler, node: Ast.Node) Error![]const u8 {
+    const rhs_base = node.data.rhs;
+    const parent_at = rhs_base + 1 + self.ast.extra_data[rhs_base];
+    const impl_count = self.ast.extra_data[parent_at + 1];
+    const prefix_node = if (self.ast.extra_data[parent_at] != 0) self.ast.extra_data[parent_at] else if (impl_count > 0) self.ast.extra_data[parent_at + 2] else 0;
+    const prefix = if (prefix_node != 0) try resolveNodeClassName(self, self.ast.nodes[prefix_node]) else "class";
+    var class_tok = node.main_token;
+    while (class_tok < self.ast.tokens.len and self.ast.tokens[class_tok].tag != .kw_class) class_tok += 1;
+    const key = compiler.anon_class_keys.get(node.main_token) orelse compiler.reserveRtdKeys(1);
+    const anon_name = try std.fmt.allocPrint(self.allocator, "{s}@anonymous\x00{s}:{d}${x}", .{ prefix, self.file_path, lineForToken(self, class_tok), key });
+    try self.string_allocs.append(self.allocator, anon_name);
+    return anon_name;
+}
+
 pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     self.closure_count += 1;
 
@@ -3688,16 +3711,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     const parent_at = ctor_args_start + ctor_arg_count;
     const impl_count = self.ast.extra_data[parent_at + 1];
 
-    // zend_generate_anon_class_name: the parent or first interface, a NUL,
-    // then the file, the line of `class` and the runtime definition number,
-    // so messages, which stop at the NUL, read `Foo@anonymous`
-    const prefix_node = if (self.ast.extra_data[parent_at] != 0) self.ast.extra_data[parent_at] else if (impl_count > 0) self.ast.extra_data[parent_at + 2] else 0;
-    const prefix = if (prefix_node != 0) try resolveNodeClassName(self, self.ast.nodes[prefix_node]) else "class";
-    var class_tok = node.main_token;
-    while (class_tok < self.ast.tokens.len and self.ast.tokens[class_tok].tag != .kw_class) class_tok += 1;
-    const key = compiler.anon_class_keys.get(node.main_token) orelse compiler.reserveRtdKeys(1);
-    const anon_name = try std.fmt.allocPrint(self.allocator, "{s}@anonymous\x00{s}:{d}${x}", .{ prefix, self.file_path, lineForToken(self, class_tok), key });
-    try self.string_allocs.append(self.allocator, anon_name);
+    const anon_name = try anonymousClassName(self, node);
     // attributes written after `new` precede the class keyword
     var attributes_at = node.main_token;
     for (self.ast.attr_ranges) |ar| {
@@ -4774,7 +4788,7 @@ fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m
     var lower_buf: [16]u8 = undefined;
     if (name.len > lower_buf.len) return;
     const rule = rules.get(std.ascii.lowerString(&lower_buf, name)) orelse return;
-    const class = class_names.display(class_name);
+    const class = class_name;
     const token = member.main_token;
 
     var arg_count: u32 = 0;

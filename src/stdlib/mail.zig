@@ -36,11 +36,6 @@ fn iniBool(ctx: *NativeContext, name: []const u8) bool {
     return (std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch 0) != 0;
 }
 
-// php formats header names with %s, which ends at a nul byte
-fn cstr(s: []const u8) []const u8 {
-    return s[0 .. std.mem.indexOfScalar(u8, s, 0) orelse s.len];
-}
-
 fn throw(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError {
     const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
     defer ctx.allocator.free(msg);
@@ -82,13 +77,13 @@ fn checkFieldName(k: []const u8) bool {
 fn buildElem(ctx: *NativeContext, out: *std.ArrayListUnmanaged(u8), key: []const u8, val: Value) RuntimeError!void {
     switch (val) {
         .string => |s| {
-            if (!checkFieldName(key)) return throw(ctx, "ValueError", "Header name \"{s}\" contains invalid characters", .{cstr(key)});
+            if (!checkFieldName(key)) return throw(ctx, "ValueError", "Header name \"{s}\" contains invalid characters", .{key});
             switch (checkFieldValue(s.bytes())) {
                 .none => {},
-                .lf_only => return throw(ctx, "ValueError", "Header \"{s}\" contains LF character that is not allowed in the header", .{cstr(key)}),
-                .cr_only => return throw(ctx, "ValueError", "Header \"{s}\" contains CR character that is not allowed in the header", .{cstr(key)}),
-                .crlf => return throw(ctx, "ValueError", "Header \"{s}\" contains CRLF characters that are used as a line separator and are not allowed in the header", .{cstr(key)}),
-                .nul => return throw(ctx, "ValueError", "Header \"{s}\" contains NULL character that is not allowed in the header", .{cstr(key)}),
+                .lf_only => return throw(ctx, "ValueError", "Header \"{s}\" contains LF character that is not allowed in the header", .{key}),
+                .cr_only => return throw(ctx, "ValueError", "Header \"{s}\" contains CR character that is not allowed in the header", .{key}),
+                .crlf => return throw(ctx, "ValueError", "Header \"{s}\" contains CRLF characters that are used as a line separator and are not allowed in the header", .{key}),
+                .nul => return throw(ctx, "ValueError", "Header \"{s}\" contains NULL character that is not allowed in the header", .{key}),
             }
             try out.appendSlice(ctx.allocator, key);
             try out.appendSlice(ctx.allocator, ": ");
@@ -98,15 +93,15 @@ fn buildElem(ctx: *NativeContext, out: *std.ArrayListUnmanaged(u8), key: []const
             try out.appendSlice(ctx.allocator, "\r\n");
         },
         .array => |arr| try buildElems(ctx, out, key, arr),
-        else => return throw(ctx, "TypeError", "Header \"{s}\" must be of type array|string, {s} given", .{ cstr(key), phpTypeName(val) }),
+        else => return throw(ctx, "TypeError", "Header \"{s}\" must be of type array|string, {s} given", .{ key, phpTypeName(val) }),
     }
 }
 
 fn buildElems(ctx: *NativeContext, out: *std.ArrayListUnmanaged(u8), key: []const u8, arr: *PhpArray) RuntimeError!void {
     for (arr.entries.items) |entry| {
-        if (entry.key == .string) return throw(ctx, "TypeError", "Header \"{s}\" must only contain numeric keys, \"{s}\" found", .{ cstr(key), cstr(entry.key.string.bytes()) });
+        if (entry.key == .string) return throw(ctx, "TypeError", "Header \"{s}\" must only contain numeric keys, \"{s}\" found", .{ key, entry.key.string.bytes() });
         const v = entry.value;
-        if (v != .string) return throw(ctx, "TypeError", "Header \"{s}\" must only contain values of type string, {s} found", .{ cstr(key), phpTypeName(v) });
+        if (v != .string) return throw(ctx, "TypeError", "Header \"{s}\" must only contain values of type string, {s} found", .{ key, phpTypeName(v) });
         try buildElem(ctx, out, key, v);
     }
 }
@@ -132,7 +127,7 @@ fn buildHeaders(ctx: *NativeContext, headers: *PhpArray) RuntimeError![]u8 {
                 if (target) |t| return throw(ctx, "TypeError", "Header \"{s}\" must be of type string, array given", .{t});
                 try buildElems(ctx, &out, key, arr);
             },
-            else => return throw(ctx, "TypeError", "Header \"{s}\" must be of type array|string, {s} given", .{ cstr(key), phpTypeName(val) }),
+            else => return throw(ctx, "TypeError", "Header \"{s}\" must be of type array|string, {s} given", .{ key, phpTypeName(val) }),
         }
     }
     if (out.items.len >= 2) out.items.len -= 2;

@@ -18472,11 +18472,9 @@ pub const VM = struct {
     }
 
     pub fn raiseErrorAt(self: *VM, level: i64, raw_msg: []const u8, at: SourcePosition) RuntimeError!void {
-        // an engine message names classes with %s, which stops at an
-        // anonymous class's NUL
-        const stripped = try class_names.stripAnonymous(self.allocator, raw_msg);
-        defer if (stripped) |s| self.allocator.free(s);
-        const msg = stripped orelse raw_msg;
+        // php 8.6 formats the class names in engine messages with %pS, so an
+        // anonymous class's name is written whole, NUL and all
+        const msg = raw_msg;
         // php_error_docref names the running function's arguments under
         // error_include_args ("unlink('/'): ...")
         if (self.native_call) |call| if (level & (E_WARNING | 8 | E_DEPRECATED) != 0 and
@@ -19329,10 +19327,9 @@ pub const VM = struct {
         return self.throwObject(try self.newBuiltinException(class_name, message, at));
     }
 
-    // a message the engine formatted: php writes the class names in it with
-    // %s, so an anonymous class's stops at its NUL
+    // a message the engine formatted: php 8.6 writes the class names in it
+    // with %pS, an anonymous class's whole
     fn engineMessage(self: *VM, message: []const u8) !Value.String {
-        if (try class_names.stripAnonymous(self.allocator, message)) |shown| return Value.String.adopt(self.allocator, shown);
         return Value.String.create(self.allocator, message);
     }
 
@@ -21534,7 +21531,7 @@ pub const VM = struct {
             const func = self.functions.get(class_names.memberKey(&key_buf, class_name, method));
             var shown_buf: [512]u8 = undefined;
             const shown = if (hook_at) |at| std.fmt.bufPrint(&shown_buf, "${s}::{s}", .{ method[0..at], method[at + "$hook_".len ..] }) catch method else method;
-            const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_names.display(class_name), shown });
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_name, shown });
             defer self.allocator.free(msg);
             const at: SourcePosition = if (func) |f| .{ .file = if (f.file_path.len > 0) f.file_path else def.file_path, .line = f.start_line } else .{ .file = def.file_path, .line = def.start_line };
             return self.raiseCompileFatal(msg, at);
@@ -21543,7 +21540,7 @@ pub const VM = struct {
         while (pit.next()) |entry| {
             if (!hasOverrideAttribute(entry.value_ptr.*)) continue;
             if (self.inheritsProperty(def, entry.key_ptr.*)) continue;
-            const msg = try std.fmt.allocPrint(self.allocator, "{s}::${s} has #[\\Override] attribute, but no matching parent property exists", .{ class_names.display(class_name), entry.key_ptr.* });
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}::${s} has #[\\Override] attribute, but no matching parent property exists", .{ class_name, entry.key_ptr.* });
             defer self.allocator.free(msg);
             return self.raiseCompileFatal(msg, .{ .file = def.file_path, .line = def.start_line });
         }
@@ -29352,10 +29349,9 @@ pub const VM = struct {
         }
         const raw_param = if (index < func.params.len) func.params[index] else "";
         const param_name = if (raw_param.len > 0 and raw_param[0] == '$') raw_param[1..] else raw_param;
-        // php formats the method's name as one "Class::method" string, which
-        // an anonymous class's name cuts short at its NUL
-        const shown_name = try self.callableDisplayName(func.name, func);
-        const fn_name = if (std.mem.indexOfScalar(u8, shown_name, 0)) |nul| shown_name[0..nul] else shown_name;
+        // php 8.6 formats the method's name as one "Class::method" string
+        // with %pS, an anonymous class's whole
+        const fn_name = try self.callableDisplayName(func.name, func);
         const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given, called in {s} on line {d}", .{ fn_name, index + 1, param_name, try self.resolvedTypeText(type_str, self.functionScope(func.name)), valueTypeName(value), cs_file, cs_line });
         defer self.allocator.free(msg);
         const at: ?SourcePosition = if (func.file_path.len > 0) SourcePosition{ .file = func.file_path, .line = func.start_line } else null;
@@ -30280,10 +30276,9 @@ pub const VM = struct {
             const cip: usize = if (caller.ip > 0) caller.ip - 1 else 0;
             if (self.sourceLocation(caller.chunk, cip)) |loc| cs_line = loc.line;
         }
-        // php formats the method's name as one "Class::method" string, which
-        // an anonymous class's name cuts short at its NUL
-        const full_shown = try self.callableDisplayName(name, func);
-        const shown = if (std.mem.indexOfScalar(u8, full_shown, 0)) |nul| full_shown[0..nul] else full_shown;
+        // php 8.6 formats the method's name as one "Class::method" string
+        // with %pS, an anonymous class's whole
+        const shown = try self.callableDisplayName(name, func);
         const type_shown = try self.resolvedTypeText(failure.type_str, self.functionScope(name));
         const site = if (failure.internal_caller) "" else std.fmt.allocPrint(self.allocator, ", called in {s} on line {d}", .{ cs_file, cs_line }) catch return error.RuntimeError;
         defer if (!failure.internal_caller) self.allocator.free(site);
@@ -30344,7 +30339,12 @@ pub const VM = struct {
         }
         const accepted = if (std.mem.eql(u8, ret_type, "void")) (if (val.* == .null) val.* else null) else try self.verifyDeclaredType(val.*, ret_type, self.functionScope(func_name), fn_strict);
         if (accepted == null) {
-            const shown = if (frame.func) |f| try self.returnFunctionLabel(frame, f) else func_name;
+            const label = if (frame.func) |f| try self.returnFunctionLabel(frame, f) else func_name;
+            // the class and method are C strings here: an anonymous class's
+            // name ends at its NUL
+            const stripped = try class_names.stripAnonymous(self.allocator, label);
+            defer if (stripped) |s| self.allocator.free(s);
+            const shown = stripped orelse label;
             const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ shown, try self.resolvedTypeText(shown_type, self.functionScope(func_name)), valueTypeName(val.*) }) catch return error.RuntimeError;
             defer self.allocator.free(msg);
             // raised inside the function, as php's VERIFY_RETURN_TYPE is
@@ -30474,7 +30474,10 @@ pub const VM = struct {
         defer t.deinit(self.allocator);
         const text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
         defer self.allocator.free(text);
-        return self.internName(text);
+        // resolve_class_name cuts an anonymous class's name at its NUL
+        const stripped = try class_names.stripAnonymous(self.allocator, text);
+        defer if (stripped) |s| self.allocator.free(s);
+        return self.internName(stripped orelse text);
     }
 
     // a property's type in errors (zend_type_to_string): a named class's
@@ -31283,7 +31286,7 @@ pub const VM = struct {
         const class: []const u8, const msg = switch (problem) {
             .unknown => |name| .{ "Error", try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{name}) },
             .overwrites => |name| .{ "Error", try std.fmt.allocPrint(self.allocator, "Named parameter ${s} overwrites previous argument", .{name}) },
-            .variadic_named => .{ "ArgumentCountError", try std.fmt.allocPrint(self.allocator, "{s}() does not accept unknown named parameters", .{func_name}) },
+            .variadic_named => .{ "ArgumentCountError", try std.fmt.allocPrint(self.allocator, "Internal function {s}() does not accept named variadic arguments", .{func_name}) },
             .not_passed => |i| .{ "ArgumentCountError", try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) not passed", .{ func_name, i + 1, params[i].name }) },
             .default_unknown => |i| .{ "ArgumentCountError", try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be passed explicitly, because the default value is not known", .{ func_name, i + 1, params[i].name }) },
         };

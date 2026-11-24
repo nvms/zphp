@@ -72,11 +72,8 @@ pub fn formatRuntimeError(alloc: std.mem.Allocator, vm: *const VM) []const u8 {
     var buf: Writer = .empty;
 
     if (vm.error_msg) |raw_msg| {
-        // the engine's messages name classes with %s, which stops at an
-        // anonymous class's NUL
-        const stripped = class_names.stripAnonymous(alloc, raw_msg) catch null;
-        defer if (stripped) |s| alloc.free(s);
-        const msg = stripped orelse raw_msg;
+        // php 8.6 writes an anonymous class's name whole in engine messages
+        const msg = raw_msg;
         // some error_msg values already have a leading 'Fatal error:' or
         // similar prefix (set via setErrorMsg("Fatal error: ..."). detect
         // and pass through; otherwise treat as a bare message and add PHP's

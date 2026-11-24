@@ -1762,7 +1762,9 @@ pub const Value = union(enum) {
             .float => "float",
             .string => "string",
             .array => "array",
-            .object => |o| o.class_name,
+            // zend_zval_value_name gives a C string: an anonymous class's
+            // name ends at its NUL
+            .object => |o| o.class_name[0 .. std.mem.indexOfScalar(u8, o.class_name, 0) orelse o.class_name.len],
             .generator => "Generator",
             .fiber => "Fiber",
             .resource => "resource",

@@ -54,7 +54,7 @@ const Direction = enum { serialize, unserialize };
 fn refuseNotSerializable(ctx: *NativeContext, class_name: []const u8, direction: Direction) RuntimeError!void {
     const rule = notSerializable(ctx.vm, class_name) orelse return;
     const verb = if (direction == .serialize) "Serialization" else "Unserialization";
-    const shown = class_names.display(class_name);
+    const shown = class_name;
     const msg = switch (rule) {
         .always => try std.fmt.allocPrint(ctx.allocator, "{s} of '{s}' is not allowed", .{ verb, shown }),
         .unless_methods => blk: {
@@ -428,7 +428,7 @@ fn serializeObject(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: 
         defer ctx.vm.releaseValue(result);
         if (ctx.vm.pending_exception != null) return;
         if (result != .array) {
-            const msg = try std.fmt.allocPrint(a, "{s}::__serialize() must return an array", .{class_names.display(class_name)});
+            const msg = try std.fmt.allocPrint(a, "{s}::__serialize() must return an array", .{class_name});
             defer a.free(msg);
             try ctx.vm.setPendingException("TypeError", msg);
             return;
@@ -449,7 +449,7 @@ fn serializeObject(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: 
         VM.retainValue(result);
         defer ctx.vm.releaseValue(result);
         if (ctx.vm.pending_exception == null and result != .string and result != .null) {
-            const msg = try std.fmt.allocPrint(a, "{s}::serialize() must return a string or NULL", .{class_names.display(class_name)});
+            const msg = try std.fmt.allocPrint(a, "{s}::serialize() must return a string or NULL", .{class_name});
             defer a.free(msg);
             try ctx.vm.setPendingException("Exception", msg);
         }
@@ -479,7 +479,7 @@ fn serializeObject(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: 
         defer ctx.vm.releaseValue(result);
         if (ctx.vm.pending_exception != null) return;
         if (result != .array) {
-            try docrefSerialize(ctx, "{s}::__sleep() should return an array only containing the names of instance-variables to serialize", .{class_names.display(class_name)});
+            try docrefSerialize(ctx, "{s}::__sleep() should return an array only containing the names of instance-variables to serialize", .{class_name});
             try buf.appendSlice(a, "N;");
             return;
         }
@@ -563,7 +563,7 @@ fn serializeSleepProps(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sc
     }
     for (names.entries.items) |entry| {
         const name_val = entryValue(entry);
-        if (name_val != .string) try docrefSerialize(ctx, "{s}::__sleep() should return an array only containing the names of instance-variables to serialize", .{class_names.display(class_name)});
+        if (name_val != .string) try docrefSerialize(ctx, "{s}::__sleep() should return an array only containing the names of instance-variables to serialize", .{class_name});
         var tmp: [64]u8 = undefined;
         const name: []const u8 = switch (name_val) {
             .string => |s| s.bytes(),
@@ -878,8 +878,8 @@ fn typedReferenceFits(ctx: *NativeContext, target: Loc, dest: Loc) RuntimeError!
     const msg = if (target == .property and target.property.type_str.len > 0 and conflict) blk: {
         const t = target.property;
         const source_type = try ctx.vm.propertyTypeText(t.type_str, t.defining);
-        break :blk try std.fmt.allocPrint(a, "Reference with value of type {s} held by property {s}::${s} of type {s} is not compatible with property {s}::${s} of type {s}", .{ types.phpTypeName(v), class_names.display(t.defining), t.name, source_type, class_names.display(d.defining), d.name, type_text });
-    } else try std.fmt.allocPrint(a, "Cannot assign {s} to property {s}::${s} of type {s}", .{ types.phpTypeName(v), class_names.display(d.defining), d.name, type_text });
+        break :blk try std.fmt.allocPrint(a, "Reference with value of type {s} held by property {s}::${s} of type {s} is not compatible with property {s}::${s} of type {s}", .{ types.phpTypeName(v), t.defining, t.name, source_type, d.defining, d.name, type_text });
+    } else try std.fmt.allocPrint(a, "Cannot assign {s} to property {s}::${s} of type {s}", .{ types.phpTypeName(v), d.defining, d.name, type_text });
     defer a.free(msg);
     try ctx.vm.setPendingException("TypeError", msg);
     return false;
@@ -1262,7 +1262,7 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
 
     const has_unserialize = !incomplete and ctx.vm.hasMethod(class_name, "__unserialize");
     if (!incomplete and !has_unserialize and ctx.vm.isInstanceOf(class_name, "Serializable") and ctx.vm.hasMethod(class_name, "unserialize")) {
-        try plainError(ctx, e_warning, "Erroneous data format for unserializing '{s}'", .{class_names.display(class_name)});
+        try plainError(ctx, e_warning, "Erroneous data format for unserializing '{s}'", .{class_name});
         return false;
     }
     const obj = (try instantiate(ctx, class_name)) orelse return false;
@@ -1312,7 +1312,7 @@ fn instantiate(ctx: *NativeContext, class_name: []const u8) RuntimeError!?*PhpOb
     else
         null;
     if (kind) |k| {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate {s} {s}", .{ k, class_names.display(class_name) });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate {s} {s}", .{ k, class_name });
         defer ctx.allocator.free(msg);
         try ctx.vm.setPendingException("Error", msg);
         return null;
@@ -1396,7 +1396,7 @@ fn readCustomObject(ctx: *NativeContext, u: *UnserCtx, sc: *Scan, dest: Loc, cla
     if (!incomplete and std.mem.eql(u8, class_name, "GMP")) {
         if (!try readGmpPayload(ctx, u, dest, payload)) return false;
     } else if (!serializable) {
-        try plainError(ctx, e_warning, "Class {s} has no unserializer", .{class_names.display(class_name)});
+        try plainError(ctx, e_warning, "Class {s} has no unserializer", .{class_name});
         const obj = (try instantiate(ctx, class_name)) orelse return false;
         try storeLoc(ctx, dest, .{ .object = obj });
         if (incomplete) try obj.setCopiedString(ctx.allocator, magic_member, raw_name);
@@ -1486,20 +1486,20 @@ fn readProperties(ctx: *NativeContext, u: *UnserCtx, sc: *Scan, obj: *PhpObject,
         else
             try propertySlot(ctx, obj, key);
         if (slot.virtual) {
-            try docref(ctx, e_warning, "Cannot unserialize value for virtual property {s}::${s}", .{ class_names.display(slot.defining), slot.name });
+            try docref(ctx, e_warning, "Cannot unserialize value for virtual property {s}::${s}", .{ slot.defining, slot.name });
             return false;
         }
         if (!slot.declared and !incomplete and obj.properties.get(slot.name) == null) {
             switch (ctx.vm.dynamicPropertyRule(obj)) {
                 .allowed => {},
                 .forbidden => {
-                    const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot create dynamic property {s}::${s}", .{ class_names.display(obj.class_name), slot.shown });
+                    const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot create dynamic property {s}::${s}", .{ obj.class_name, slot.shown });
                     defer ctx.allocator.free(msg);
                     try ctx.vm.setPendingException("Error", msg);
                     return false;
                 },
                 .deprecated => {
-                    try plainError(ctx, e_deprecated, "Creation of dynamic property {s}::${s} is deprecated", .{ class_names.display(obj.class_name), slot.shown });
+                    try plainError(ctx, e_deprecated, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, slot.shown });
                     if (ctx.vm.pending_exception != null) return false;
                 },
             }
@@ -1513,7 +1513,7 @@ fn readProperties(ctx: *NativeContext, u: *UnserCtx, sc: *Scan, obj: *PhpObject,
             const v = locValue(loc);
             if (!try ctx.vm.unserializedPropertyFits(v, slot.type_str, slot.defining)) {
                 const type_text = try ctx.vm.propertyTypeText(slot.type_str, slot.defining);
-                const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ types.phpTypeName(v), class_names.display(slot.defining), slot.name, type_text });
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ types.phpTypeName(v), slot.defining, slot.name, type_text });
                 defer ctx.allocator.free(msg);
                 try obj.setForScope(ctx.allocator, slot.name, .undef, slot.scope);
                 try ctx.vm.setPendingException("TypeError", msg);
@@ -1662,7 +1662,7 @@ fn applyOptions(ctx: *NativeContext, uctx: *UnserCtx, opts: *PhpArray) RuntimeEr
                 }
                 const name = if (v == .string) v.string.bytes() else blk: {
                     if (!ctx.vm.hasMethod(v.object.class_name, "__toString")) {
-                        const msg = try std.fmt.allocPrint(a, "Object of class {s} could not be converted to string", .{class_names.display(v.object.class_name)});
+                        const msg = try std.fmt.allocPrint(a, "Object of class {s} could not be converted to string", .{v.object.class_name});
                         defer a.free(msg);
                         try ctx.vm.setPendingException("Error", msg);
                         return false;

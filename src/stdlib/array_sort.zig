@@ -194,7 +194,7 @@ fn toDouble(ctx: *NativeContext, v: Value) RuntimeError!f64 {
         .array => |arr| if (arr.entries.items.len > 0) 1.0 else 0.0,
         .object => |o| {
             if (value_mod.nativeCast(o, .number)) |n| return Value.toFloat(n);
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Object of class {s} could not be converted to float", .{class_names.display(o.class_name)});
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Object of class {s} could not be converted to float", .{o.class_name});
             defer ctx.allocator.free(msg);
             try ctx.vm.emitWarning(msg);
             return 1.0;

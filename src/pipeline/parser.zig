@@ -118,6 +118,8 @@ const Parser = struct {
     compile_error: ?Ast.CompileErrorNote = null,
     // the class whose members are being parsed, for compile error messages
     current_class_name: []const u8 = "",
+    // the `new` token of the anonymous class being parsed, 0 outside one
+    anon_class_tok: u32 = 0,
     // whether the abstract or interface method just parsed had a body
     method_had_body: bool = false,
 
@@ -1604,6 +1606,9 @@ const Parser = struct {
         defer members.deinit(self.allocator);
         const outer_class = self.current_class_name;
         self.current_class_name = "class@anonymous";
+        const outer_anon = self.anon_class_tok;
+        self.anon_class_tok = new_tok;
+        defer self.anon_class_tok = outer_anon;
         const outer_readonly = self.class_readonly;
         self.class_readonly = false;
         var t = new_tok + 1;
@@ -4207,6 +4212,7 @@ const Parser = struct {
         if (self.compile_error != null) return;
         var note: Ast.CompileErrorNote = .{ .token = @min(token, @as(u32, @intCast(self.tokens.len - 1))) };
         note.len = if (std.fmt.bufPrint(&note.text, fmt, args)) |written| written.len else |_| note.text.len;
+        if (std.mem.eql(u8, self.current_class_name, "class@anonymous")) note.anon_tok = self.anon_class_tok;
         self.compile_error = note;
     }
 
