@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 D=$(CDPATH= cd -- "$(dirname "$0")" && pwd); Z=${ZPHP:-"$D/../../zig-out/bin/zphp"}; P="$D/phpunit.phar"
-[ -x "$Z" ] || { echo "zphp not found at $Z"; exit 1; }; [ -f "$P" ] || { echo "run tests/phpunit/setup first"; exit 1; }; command -v php >/dev/null
+[ -x "$Z" ] || { echo "zphp not found at $Z"; exit 1; }; [ -f "$P" ] || { echo "run tests/phpunit/setup first"; exit 1; }; PHP=${PHP:-php}; command -v "$PHP" >/dev/null
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout 120 "$@"; elif command -v gtimeout >/dev/null 2>&1; then gtimeout 120 "$@"; else "$@"; fi; }
 cd "$D"; rm -rf .cache
-bounded php "$P" --configuration=phpunit.xml suite/RuntimeTest.php
+bounded "$PHP" "$P" --configuration=phpunit.xml suite/RuntimeTest.php
 rm -rf .cache
 bounded "$Z" run "$P" --configuration=phpunit.xml suite/RuntimeTest.php
 rm -rf .cache

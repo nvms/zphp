@@ -1,0 +1,129 @@
+#!/bin/bash
+# runs the target php release (src/php_version.zig) as if it were a local php:
+# arguments, stdin, stdout, stderr, the working directory, the environment and
+# the exit status pass through. the harnesses run it through PHP:
+#
+#   PHP=scripts/php-ref make compat
+#
+# php runs in one long-lived container (docker exec per call, about 0.1s each)
+# of an image built from scripts/php-ref.d/Dockerfile: php's official cli image
+# plus the extensions the suites touch. the container shares the host network
+# and sees the checkout (the main one, which holds the worktrees), /tmp and the
+# PHP_REF_MOUNTS directories (colon-separated) at their own paths; php runs as
+# the calling user. the container is made on first use and kept:
+#
+#   scripts/php-ref --ref-stop     removes the container
+#   scripts/php-ref --ref-build    rebuilds the image (after editing the Dockerfile)
+#
+# PHP_REF_VERSION=8.5.13 runs another release instead of the target
+#
+# a signal sent to this script is passed to php inside the container. a
+# SIGKILL can't be, so php keeps running there until it ends
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd "$here/.." && pwd)"
+# worktrees live inside the main checkout, so mounting it covers them all
+common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+case "$common" in */.git) root="${common%/.git}" ;; *) root="$repo" ;; esac
+
+version_file="$repo/src/php_version.zig"
+major=$(sed -n 's/^pub const major = \([0-9]*\);/\1/p' "$version_file")
+minor=$(sed -n 's/^pub const minor = \([0-9]*\);/\1/p' "$version_file")
+patch=$(sed -n 's/^pub const release = \([0-9]*\);/\1/p' "$version_file")
+version="${PHP_REF_VERSION:-$major.$minor.$patch}"
+image="zphp-php-ref:$version"
+name="zphp-php-ref-$version"
+
+build_image() {
+    echo "php-ref: building $image (once)..." >&2
+    docker build --build-arg PHP_VERSION="$version" -t "$image" "$here/php-ref.d" >&2
+}
+
+case "${1:-}" in
+--ref-stop)
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    exit 0
+    ;;
+--ref-build)
+    build_image
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    exit 0
+    ;;
+esac
+
+ensure_container() {
+    [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)" = true ] && return 0
+    # two harness calls may race to make it
+    exec 9>"/tmp/zphp-php-ref-$version.lock"
+    flock 9
+    if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)" != true ]; then
+        docker image inspect "$image" >/dev/null 2>&1 || build_image
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        local mounts=(-v "$root:$root" -v /tmp:/tmp)
+        local extra
+        IFS=: read -ra extra <<<"${PHP_REF_MOUNTS:-}"
+        for d in "${extra[@]}"; do
+            [ -n "$d" ] && mounts+=(-v "$d:$d")
+        done
+        docker run -d --name "$name" --network host --init "${mounts[@]}" \
+            --entrypoint sleep "$image" infinity >/dev/null
+    fi
+    flock -u 9
+    exec 9>&-
+}
+
+ensure_container
+
+cwd="$PWD"
+case "$cwd/" in
+"$root"/* | /tmp/*) ;;
+*)
+    covered=0
+    IFS=: read -ra extra <<<"${PHP_REF_MOUNTS:-}"
+    for d in "${extra[@]}"; do
+        case "$cwd/" in "$d"/*) [ -n "$d" ] && covered=1 ;; esac
+    done
+    if [ "$covered" = 0 ]; then
+        echo "php-ref: $cwd is not visible in the container (add it to PHP_REF_MOUNTS and run --ref-stop)" >&2
+        exit 1
+    fi
+    ;;
+esac
+
+# the caller's environment, except what belongs to the host
+envs=()
+while IFS='=' read -r key _; do
+    case "$key" in
+    PATH | HOME | HOSTNAME | PWD | OLDPWD | SHLVL | _ | LD_* | TMPDIR | '' | *[!A-Za-z0-9_]*) ;;
+    *) envs+=(-e "$key") ;;
+    esac
+done < <(env -0 | tr '\0' '\n' | grep -a '^[A-Za-z_][A-Za-z0-9_]*=' || true)
+home="/tmp/zphp-php-ref-home-$(id -u)"
+mkdir -p "$home"
+
+pidfile="$(mktemp /tmp/zphp-php-ref.XXXXXX)"
+forward() {
+    local pid
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    [ -n "$pid" ] && docker exec "$name" sh -c "kill -$1 $pid" >/dev/null 2>&1 || true
+}
+trap 'forward TERM' TERM
+trap 'forward INT' INT
+trap 'forward HUP' HUP
+
+tty=()
+[ -t 0 ] && [ -t 1 ] && tty=(-t)
+# a background job's stdin is /dev/null unless it is redirected explicitly
+exec 8<&0
+docker exec -i "${tty[@]}" -u "$(id -u):$(id -g)" -w "$cwd" -e HOME="$home" "${envs[@]}" "$name" \
+    sh -c 'echo $$ > "$0"; exec php "$@"' "$pidfile" "$@" <&8 &
+child=$!
+status=0
+while :; do
+    wait "$child" && status=0 || status=$?
+    # a trapped signal interrupts wait; keep waiting for php to end
+    kill -0 "$child" 2>/dev/null || break
+done
+rm -f "$pidfile"
+exit "$status"

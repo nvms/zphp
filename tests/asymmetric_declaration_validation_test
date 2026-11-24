@@ -30,14 +30,14 @@ with tempfile.TemporaryDirectory(dir=os.environ.get('PICO_SCRATCHPAD')) as tmp:
     for i, (source, message) in enumerate(programs):
         path = Path(tmp) / f'case{i}.php'
         path.write_text('<?php ' + source)
-        for command in ([os.environ.get('PHP_BIN', 'php')], [str(ROOT / 'zig-out/bin/zphp'), 'run']):
+        for command in ([os.environ.get('PHP_BIN', os.environ.get('PHP', 'php'))], [str(ROOT / 'zig-out/bin/zphp'), 'run']):
             result = subprocess.run(command + [str(path)], capture_output=True, text=True, timeout=15)
             output = result.stdout + result.stderr
             assert result.returncode == 255, (i, command, result.returncode, output)
             if message:
                 assert message in output, (i, command, output)
     path = ROOT / 'tests/asymmetric_declaration_metadata.php'
-    php = subprocess.run([os.environ.get('PHP_BIN', 'php'), str(path)], capture_output=True, timeout=15)
+    php = subprocess.run([os.environ.get('PHP_BIN', os.environ.get('PHP', 'php')), str(path)], capture_output=True, timeout=15)
     zphp = subprocess.run([str(ROOT / 'zig-out/bin/zphp'), 'run', str(path)], capture_output=True, timeout=15)
     assert php.returncode == zphp.returncode == 0, (php, zphp)
     assert php.stdout == zphp.stdout, (php.stdout, zphp.stdout)

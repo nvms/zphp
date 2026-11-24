@@ -3,6 +3,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZPHP="${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}"
 [ -f "$ZPHP" ] || { echo "zphp not found at $ZPHP"; exit 1; }
+PHP="${PHP:-php}"
 [ -d "$SCRIPT_DIR/app/vendor" ] || { echo "run tests/doctrine/setup first"; exit 1; }
 bounded() {
     python3 - "$@" <<'PY'
@@ -22,7 +23,7 @@ failed=0
 errors=""
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
-    php_out="$(bounded php -d 'error_reporting=E_ALL & ~E_DEPRECATED' "$f" 2>&1)" && php_exit=0 || php_exit=$?
+    php_out="$(bounded "$PHP" -d 'error_reporting=E_ALL & ~E_DEPRECATED' "$f" 2>&1)" && php_exit=0 || php_exit=$?
     zphp_out="$(bounded "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
     if [ "$php_exit" -eq 0 ] && [ "$zphp_exit" -eq 0 ] && [ "$php_out" = "$zphp_out" ]; then
         passed=$((passed + 1)); echo "  pass  $name"

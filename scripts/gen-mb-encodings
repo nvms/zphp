@@ -6,7 +6,7 @@
 # the data comes from a php with mbstring (the target version, or any 8.5):
 #
 #   make mb-encodings
-#   scripts/gen-mb-encodings --php ./php     (php in docker)
+#   scripts/gen-mb-encodings --php scripts/php-ref     (the target php in docker)
 
 import os, subprocess, sys
 

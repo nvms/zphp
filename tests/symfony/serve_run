@@ -7,7 +7,8 @@ APP_DIR="$SCRIPT_DIR/app"
 ZPHP_PORT=19900
 PHP_PORT=19901
 
-if ! command -v php &>/dev/null; then echo "php not in PATH"; exit 1; fi
+PHP="${PHP:-php}"
+if ! command -v "$PHP" &>/dev/null; then echo "$PHP not found (PHP names the reference php)"; exit 1; fi
 if [ ! -x "$ZPHP" ]; then echo "zphp not built (make build)"; exit 1; fi
 if [ ! -f "$APP_DIR/var/cache/AppContainer.php" ]; then echo "run tests/symfony/setup first"; exit 1; fi
 
@@ -32,7 +33,7 @@ trap cleanup EXIT
 
 "$ZPHP" serve "$APP_DIR/public/index.php" --port "$ZPHP_PORT" --workers 2 >/tmp/zphp_symfony_serve.log 2>&1 &
 ZPHP_PID=$!
-php -S "localhost:$PHP_PORT" -t "$APP_DIR/public" "$ROUTER" >/tmp/php_symfony_serve.log 2>&1 &
+"$PHP" -S "localhost:$PHP_PORT" -t "$APP_DIR/public" "$ROUTER" >/tmp/php_symfony_serve.log 2>&1 &
 PHP_PID=$!
 
 for _ in $(seq 1 60); do

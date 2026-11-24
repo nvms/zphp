@@ -6,8 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ON_WINDOWS=1 ;; *) ON_WINDOWS=0 ;; esac
 ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
 
-if ! command -v php &>/dev/null; then
-    echo "php not found in PATH"
+PHP="${PHP:-php}"
+if ! command -v "$PHP" &>/dev/null; then
+    echo "$PHP not found (PHP names the reference php)"
     exit 1
 fi
 
@@ -43,7 +44,7 @@ for f in "$SCRIPT_DIR"/*.php; do
     if [ "$ON_WINDOWS" = 1 ] && grep -q "^$name" "$SCRIPT_DIR/windows-skip.txt"; then continue; fi
     php_status=0
     zphp_status=0
-    bounded php -d error_reporting='E_ALL & ~E_DEPRECATED' -d display_errors=0 -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" >"$capture_dir/php.stdout" 2>"$capture_dir/php.stderr" || php_status=$?
+    bounded "$PHP" -d error_reporting='E_ALL & ~E_DEPRECATED' -d display_errors=0 -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" >"$capture_dir/php.stdout" 2>"$capture_dir/php.stderr" || php_status=$?
     # both sides report the same error levels; deprecations are left out of the comparison
     bounded "$ZPHP" -d error_reporting='E_ALL & ~E_DEPRECATED' run "$f" >"$capture_dir/zphp.stdout" 2>"$capture_dir/zphp.stderr" || zphp_status=$?
 

@@ -4,8 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$SCRIPT_DIR/app"
 
-if ! command -v php &>/dev/null; then
-    echo "php not found in PATH"
+PHP="${PHP:-php}"
+if ! command -v "$PHP" &>/dev/null; then
+    echo "$PHP not found (PHP names the reference php)"
     exit 1
 fi
 
@@ -17,6 +18,6 @@ fi
 cd "$APP_DIR"
 composer install --no-interaction --no-progress
 rm -rf "$APP_DIR/var/cache"
-php "$APP_DIR/bin/build-cache.php"
+"$PHP" "$APP_DIR/bin/build-cache.php"
 
 echo "setup complete"

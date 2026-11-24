@@ -20,7 +20,7 @@ class CompatRunnerTest(unittest.TestCase):
                 executable.write_text("#!/bin/sh\n" + body + "\n")
                 executable.chmod(0o755)
             env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
-                       ZPHP=str(root / "zphp"), TMPDIR=str(captures))
+                       ZPHP=str(root / "zphp"), PHP=str(root / "php"), TMPDIR=str(captures))
             result = subprocess.run(["bash", str(root / "run")], env=env,
                                     capture_output=True, timeout=10)
             self.assertEqual(result.returncode, expected_status, result.stdout)
