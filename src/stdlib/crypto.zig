@@ -75,7 +75,7 @@ const Algo = enum {
     // php_password_bcrypt_valid; the argon2 algorithms have no check
     fn valid(self: Algo, hash: []const u8) bool {
         return switch (self) {
-            .bcrypt => hash.len == 60 and hash[0] == '$' and hash[1] == '2' and hash[2] == 'y',
+            .bcrypt => bcryptCost(hash) != null,
             else => true,
         };
     }
@@ -190,11 +190,13 @@ fn scanLong(s: []const u8, pos: *usize) ?i64 {
     return if (neg) -%v else v;
 }
 
-// sscanf(hash, "$2y$%ld$", &cost)
-fn bcryptCost(hash: []const u8) i64 {
-    if (!std.mem.startsWith(u8, hash, "$2y$")) return bcrypt_default_cost;
-    var pos: usize = 4;
-    return scanLong(hash, &pos) orelse bcrypt_default_cost;
+// php_password_bcrypt_get_cost: "$2y$" and two digits then "$" in a hash of
+// 60 bytes, a cost of 4 to 31; null for anything else (php 8.5.13)
+fn bcryptCost(hash: []const u8) ?i64 {
+    if (hash.len != 60 or !std.mem.startsWith(u8, hash, "$2y$")) return null;
+    if (!std.ascii.isDigit(hash[4]) or !std.ascii.isDigit(hash[5]) or hash[6] != '$') return null;
+    const cost: i64 = (hash[4] - '0') * 10 + (hash[5] - '0');
+    return if (cost >= 4 and cost <= 31) cost else null;
 }
 
 const Argon2Params = struct { v: i64, m: i64, t: i64, p: i64 };
@@ -380,7 +382,7 @@ fn native_password_get_info(ctx: *NativeContext, args: []const Value) RuntimeErr
     try info.set(ctx.allocator, .{ .string = Value.String.borrowed("algo") }, .{ .string = algo_name });
     try info.set(ctx.allocator, .{ .string = Value.String.borrowed("algoName") }, .{ .string = Value.String.borrowed(algo.?.name()) });
     switch (algo.?) {
-        .bcrypt => try options.set(ctx.allocator, .{ .string = Value.String.borrowed("cost") }, .{ .int = bcryptCost(hash) }),
+        .bcrypt => try options.set(ctx.allocator, .{ .string = Value.String.borrowed("cost") }, .{ .int = bcryptCost(hash).? }),
         .argon2i, .argon2id => {
             const p = argon2Params(hash, .{ .v = 0, .m = argon2_default_memory, .t = argon2_default_time, .p = argon2_default_threads });
             try options.set(ctx.allocator, .{ .string = Value.String.borrowed("memory_cost") }, .{ .int = p.m });
@@ -409,7 +411,7 @@ fn native_password_needs_rehash(ctx: *NativeContext, args: []const Value) Runtim
         .bcrypt => blk: {
             var new_cost: i64 = bcrypt_default_cost;
             if (option(options, "cost")) |c| new_cost = c.toInt();
-            break :blk bcryptCost(hash) != new_cost;
+            break :blk bcryptCost(hash).? != new_cost;
         },
         .argon2i, .argon2id => blk: {
             var want = Argon2Params{ .v = 0, .m = argon2_default_memory, .t = argon2_default_time, .p = argon2_default_threads };
