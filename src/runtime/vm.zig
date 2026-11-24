@@ -3675,6 +3675,7 @@ pub const VM = struct {
         for (self.fibers.items) |f| if (!f.pooled) {
             self.releaseFiberNative(f);
             self.releaseValue(f.callable);
+            self.releaseFiberEntry(f);
             self.releaseValue(f.suspend_value);
             self.releaseValue(f.return_value);
             f.callable = .null;
@@ -12230,8 +12231,8 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         const callable = self.stack[self.sp - ac];
-                        switch (try callables.resolveCallback(self, callable, .{})) {
-                            .callee => {},
+                        const entry_callee = switch (try callables.resolveCallback(self, callable, .{})) {
+                            .callee => |c| c,
                             .failure => |failure| {
                                 var msg: std.ArrayListUnmanaged(u8) = .empty;
                                 defer msg.deinit(self.allocator);
@@ -12241,7 +12242,7 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("TypeError", msg.items)) continue;
                                 return error.RuntimeError;
                             },
-                        }
+                        };
                         const reserved = self.takeReservedHandle(ac);
                         self.dropN(ac);
                         const fiber = if (!self.serve_mode) self.free_fibers.pop() orelse blk: {
@@ -12256,6 +12257,19 @@ pub const VM = struct {
                         // the fiber owns its callable until it is released
                         retainValue(callable);
                         fiber.* = .{ .callable = callable, .handle = if (reserved != 0) reserved else try self.allocHandle() };
+                        switch (entry_callee) {
+                            .method => |m| {
+                                fiber.entry_name = m.registered orelse try self.resolveMethod(m.object.class_name, m.name);
+                                fiber.entry_this = m.object;
+                                fiber.entry_class = m.object.class_name;
+                                objRetain(m.object);
+                            },
+                            .static_method => |m| {
+                                fiber.entry_name = m.registered;
+                                fiber.entry_class = m.called_class;
+                            },
+                            else => {},
+                        }
                         self.push(.{ .fiber = fiber });
                         continue;
                     }
@@ -32243,6 +32257,7 @@ pub const VM = struct {
             const callable = fiber.callable;
             fiber.callable = .null;
             self.releaseValue(callable);
+            self.releaseFiberEntry(fiber);
             return err;
         };
 
@@ -32267,11 +32282,21 @@ pub const VM = struct {
         return .null;
     }
 
+    // what the fiber held of its callable: the inferred $this too
+    fn releaseFiberEntry(self: *VM, fiber: *Fiber) void {
+        const this = fiber.entry_this;
+        fiber.entry_name = null;
+        fiber.entry_this = null;
+        fiber.entry_class = null;
+        if (this) |obj| self.objRelease(obj);
+    }
+
     fn releaseFiberCallable(self: *VM, fiber: *Fiber) bool {
         const callable = fiber.callable;
         if (callable == .null) return false;
         fiber.callable = .null;
         self.releaseValue(callable);
+        self.releaseFiberEntry(fiber);
         if (self.hasPendingReleases()) self.drainPendingDestruct();
         self.collectCyclesIfNeeded();
         return self.drainRaised();
@@ -33270,6 +33295,10 @@ pub const VM = struct {
     // to its end instead
     fn pushFiberEntryFrame(self: *VM, fiber: *Fiber, args: []const Value) RuntimeError!bool {
         const callable = fiber.callable;
+        // a method resolved when the fiber was made runs as resolved then
+        if (fiber.entry_name) |name| if (self.functions.get(name)) |func| {
+            return self.pushFiberTarget(.{ .name = name, .this = fiber.entry_this, .called_class = fiber.entry_class }, func, args);
+        };
         const fiber_fn: ?[]const u8 = if (callable.closureName()) |closure| closure else if (callable == .string) callable.string.bytes() else null;
         if (fiber_fn) |fn_name| {
             for (args) |arg| self.push(arg);
@@ -33285,7 +33314,7 @@ pub const VM = struct {
                 return false;
             },
         };
-        const target: ?struct { name: []const u8, this: ?*PhpObject, called_class: ?[]const u8 } = switch (callee) {
+        const target: ?FiberTarget = switch (callee) {
             .function => |name| if (self.functions.get(name) != null) .{ .name = name, .this = null, .called_class = null } else null,
             .invoke => |obj| .{ .name = try self.resolveMethod(obj.class_name, "__invoke"), .this = obj, .called_class = obj.class_name },
             .method => |m| .{ .name = m.registered orelse try self.resolveMethod(m.object.class_name, m.name), .this = m.object, .called_class = m.object.class_name },
@@ -33300,6 +33329,12 @@ pub const VM = struct {
             _ = try callables.invoke(self, callee, args);
             return false;
         };
+        return self.pushFiberTarget(t, func, args);
+    }
+
+    const FiberTarget = struct { name: []const u8, this: ?*PhpObject, called_class: ?[]const u8 };
+
+    fn pushFiberTarget(self: *VM, t: FiberTarget, func: *const ObjFunction, args: []const Value) RuntimeError!bool {
         if (t.this == null) {
             for (args) |arg| self.push(arg);
             try self.callNamedFunction(t.name, @intCast(args.len));
@@ -34197,6 +34232,7 @@ pub const VM = struct {
                 self.releaseFiberNative(fiber);
                 if (self.hasPendingReleases()) self.drainPendingDestruct();
                 self.releaseValue(fiber.callable);
+                self.releaseFiberEntry(fiber);
                 self.releaseValue(fiber.suspend_value);
                 self.releaseValue(fiber.return_value);
                 if (fiber.handle != 0) {
@@ -34863,6 +34899,7 @@ pub const VM = struct {
         for (self.fibers.items) |f| {
             if (f.pooled) continue;
             if (gcTargetMatches(t, f.callable)) gcNote(&c, false, "fiber callable", .{});
+            if (f.entry_this) |this| if (gcTargetMatches(t, .{ .object = this })) gcNote(&c, false, "fiber callable's $this", .{});
             if (gcTargetMatches(t, f.suspend_value)) gcNote(&c, false, "fiber suspend_value", .{});
             if (gcTargetMatches(t, f.return_value)) gcNote(&c, false, "fiber return_value", .{});
             if (f.native) |np| {
@@ -35448,6 +35485,7 @@ pub const VM = struct {
     fn cycleFiberEdges(self: *VM, f: *Fiber, action: CycleEdgeAction, vo: anytype, va: anytype) bool {
         var changed = false;
         changed = self.cycleEdge(f.callable, true, action, vo, va) or changed;
+        if (f.entry_this) |this| changed = self.cycleEdge(.{ .object = this }, true, action, vo, va) or changed;
         changed = self.cycleEdge(f.return_value, true, action, vo, va) or changed;
         if (f.state != .suspended) return changed;
         changed = self.cycleEdge(f.suspend_value, true, action, vo, va) or changed;

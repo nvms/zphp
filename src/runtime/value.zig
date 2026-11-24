@@ -1107,6 +1107,13 @@ pub const Fiber = struct {
     handle: u32 = 0,
     state: State = .created,
     callable: Value = .null,
+    // the method the callable named, resolved in the scope that made the
+    // fiber (zend_fcall_info_init): its function, the $this it inferred for
+    // [A::class, 'm'] or "A::m" inside a method of A (held by the fiber, as
+    // php 8.5.13's fci.object is), and the class static:: names
+    entry_name: ?[]const u8 = null,
+    entry_this: ?*PhpObject = null,
+    entry_class: ?[]const u8 = null,
 
     suspend_value: Value = .null,
     return_value: Value = .null,
