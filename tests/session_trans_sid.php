@@ -5,6 +5,9 @@ ob_start();
 $errors = [];
 set_error_handler(function ($no, $msg) use (&$errors) { $errors[] = $msg; return true; });
 session_save_path(sys_get_temp_dir());
+// php 8.6 turned session.use_strict_mode on: the fixed id below has no data,
+// so strict mode would replace it with a random one
+ini_set('session.use_strict_mode', '0');
 ini_set('session.use_cookies', '0');
 ini_set('session.use_only_cookies', '0');
 ini_set('session.use_trans_sid', '1');

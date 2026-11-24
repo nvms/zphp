@@ -379,6 +379,19 @@ fn native_session_start(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
         is_new = true;
     }
 
+    // session.use_strict_mode (on by default since php 8.6): an id the
+    // files handler has no data for is not adopted, a new one replaces it
+    if (!is_new and iniBool(iniValue(ctx, "session.use_strict_mode", "1"))) {
+        const path = try sessionPath(ctx, sid);
+        defer ctx.allocator.free(path);
+        const known = if (std.Io.Dir.cwd().statFile(platform.io, path, .{})) |_| true else |_| false;
+        if (!known) {
+            generated = try generateId(ctx);
+            sid = generated.?.bytes();
+            is_new = true;
+        }
+    }
+
     const stored_sid = try Value.String.create(ctx.allocator, sid);
     defer stored_sid.release();
     sid = stored_sid.bytes();

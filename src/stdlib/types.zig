@@ -1877,12 +1877,12 @@ pub fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "session.gc_maxlifetime")) return "1440";
     if (std.mem.eql(u8, name, "session.cookie_lifetime")) return "0";
     if (std.mem.eql(u8, name, "session.use_cookies")) return "1";
-    if (std.mem.eql(u8, name, "session.cookie_httponly")) return "0";
+    if (std.mem.eql(u8, name, "session.cookie_httponly")) return "1";
     if (std.mem.eql(u8, name, "session.cookie_secure")) return "0";
-    if (std.mem.eql(u8, name, "session.cookie_samesite")) return "";
+    if (std.mem.eql(u8, name, "session.cookie_samesite")) return "Lax";
     if (std.mem.eql(u8, name, "session.name")) return "PHPSESSID";
     if (std.mem.eql(u8, name, "session.use_only_cookies")) return "1";
-    if (std.mem.eql(u8, name, "session.use_strict_mode")) return "0";
+    if (std.mem.eql(u8, name, "session.use_strict_mode")) return "1";
     if (std.mem.eql(u8, name, "session.use_trans_sid")) return "0";
     if (std.mem.eql(u8, name, "session.referer_check")) return "";
     if (std.mem.eql(u8, name, "session.trans_sid_tags")) return "a=href,area=href,frame=src,form=";
