@@ -1052,7 +1052,7 @@ fn argIteratorClass(ctx: *NativeContext, lbl: []const u8, args: []const Value, i
     if (vm.classes.getKey(name)) |k| {
         if (vm.isInstanceOf(k, "ArrayIterator")) return k;
     }
-    try sic.raise(ctx, "TypeError", "{s}(): Argument #{d} ($iteratorClass) must be a class name derived from ArrayIterator, {s} given", .{ lbl, i + 1, raw });
+    try sic.raise(ctx, "TypeError", "{s}(): Argument #{d} ($iteratorClass) must be a class name derived from ArrayIterator, \"{s}\" given", .{ lbl, i + 1, raw });
     return error.RuntimeError;
 }
 
@@ -1280,34 +1280,42 @@ fn requireSortFunction(ctx: *NativeContext, comptime name: []const u8) RuntimeEr
 }
 
 fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    // php 8.6 reads the arguments before it looks the function up
+    const arg = try sortFlags(ctx, args, "ksort");
     try requireSortFunction(ctx, "ksort");
-    return splSort(ctx, .{ .keys = try sortFlags(ctx, args, "ksort") });
+    return splSort(ctx, .{ .keys = arg });
 }
 
 fn aoAsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    // php 8.6 reads the arguments before it looks the function up
+    const arg = try sortFlags(ctx, args, "asort");
     try requireSortFunction(ctx, "asort");
-    return splSort(ctx, .{ .values = try sortFlags(ctx, args, "asort") });
+    return splSort(ctx, .{ .values = arg });
 }
 
 fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    // php 8.6 reads the arguments before it looks the function up
+    const arg = try sortCallback(ctx, args, "uasort");
     try requireSortFunction(ctx, "uasort");
-    return splSort(ctx, .{ .user_values = try sortCallback(ctx, args, "uasort") });
+    return splSort(ctx, .{ .user_values = arg });
 }
 
 fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    // php 8.6 reads the arguments before it looks the function up
+    const arg = try sortCallback(ctx, args, "uksort");
     try requireSortFunction(ctx, "uksort");
-    return splSort(ctx, .{ .user_keys = try sortCallback(ctx, args, "uksort") });
+    return splSort(ctx, .{ .user_keys = arg });
 }
 
 fn aoNatsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    try requireSortFunction(ctx, "natsort");
     try noSortArgs(ctx, args, "natsort");
+    try requireSortFunction(ctx, "natsort");
     return splSort(ctx, .{ .natural = false });
 }
 
 fn aoNatcasesort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    try requireSortFunction(ctx, "natcasesort");
     try noSortArgs(ctx, args, "natcasesort");
+    try requireSortFunction(ctx, "natcasesort");
     return splSort(ctx, .{ .natural = true });
 }
 
