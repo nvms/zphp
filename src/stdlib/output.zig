@@ -610,6 +610,12 @@ fn varExportString(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []
 }
 
 fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, ctx: *NativeContext) !void {
+    // php_var_export_ex checks the native stack before every value; the
+    // failure ends the whole export with nothing written
+    if (stack_limit.overflowed()) {
+        try ctx.vm.raiseStackLimit();
+        return error.RuntimeError;
+    }
     switch (val) {
         .null, .undef => try out.appendSlice(a, "NULL"),
         .bool => |b| try out.appendSlice(a, if (b) "true" else "false"),
