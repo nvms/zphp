@@ -911,7 +911,7 @@ pub const Compiler = struct {
         // zend_compile_stmt: a tick after each statement while declare(ticks)
         // is in effect (the declaration itself included)
         // (zend_emit_tick: never two ticks in a row)
-        if (self.ticks != 0 and isTickedStatement(self.ast.nodes[idx].tag) and self.chunk.offset() != self.tick_end and !self.endsInTick(idx)) {
+        if (self.ticks != 0 and self.ticksAfter(idx) and self.chunk.offset() != self.tick_end and !self.endsInTick(idx)) {
             try self.emitOp(.tick);
             try self.emitU16(self.ticks);
             self.tick_end = self.chunk.offset();
@@ -933,9 +933,20 @@ pub const Compiler = struct {
             const stmts = self.ast.extraSlice(branch.data.lhs);
             if (stmts.len == 0) return false;
             const last = stmts[stmts.len - 1];
-            return isTickedStatement(self.ast.nodes[last].tag) or self.endsInTick(last);
+            return self.ticksAfter(last) or self.endsInTick(last);
         }
-        return isTickedStatement(branch.tag) or self.endsInTick(last_branch);
+        return self.ticksAfter(last_branch) or self.endsInTick(last_branch);
+    }
+
+    // php 8.6's zend_compile_stmt returns before the tick for a statement
+    // that is an `=` or `=&` assignment (compound assignments still tick)
+    fn ticksAfter(self: *Compiler, idx: u32) bool {
+        const node = self.ast.nodes[idx];
+        if (!isTickedStatement(node.tag)) return false;
+        if (node.tag != .expression_stmt or node.data.lhs == 0) return true;
+        var expr = self.ast.nodes[node.data.lhs];
+        while (expr.tag == .grouped_expr) expr = self.ast.nodes[expr.data.lhs];
+        return !(expr.tag == .assign and self.ast.tokens[expr.main_token].tag == .equal);
     }
 
     fn isTickedStatement(tag: Ast.Node.Tag) bool {
