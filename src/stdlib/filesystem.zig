@@ -593,19 +593,21 @@ fn notice(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeE
 
 // php_error_docref: the message after the running function's name
 pub fn warnDocref(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError!void {
-    return docref(ctx, 2, null, fmt, args);
+    return docref(ctx, 2, fmt, args);
 }
 
 pub fn noticeDocref(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError!void {
-    return docref(ctx, 8, null, fmt, args);
+    return docref(ctx, 8, fmt, args);
 }
 
-// php_error_docref1: the function's name with a parameter, "fopen(x): ..."
+// what was php_error_docref1 ("fopen(x): ..."): php 8.6 names no parameter,
+// unless error_include_args lists all of them (VM.raiseErrorAt)
 pub fn warnDocrefParam(ctx: *NativeContext, param: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError!void {
-    return docref(ctx, 2, param, fmt, args);
+    _ = param;
+    return docref(ctx, 2, fmt, args);
 }
 
-fn docref(ctx: *NativeContext, level: i64, param: ?[]const u8, comptime fmt: []const u8, args: anytype) RuntimeError!void {
+fn docref(ctx: *NativeContext, level: i64, comptime fmt: []const u8, args: anytype) RuntimeError!void {
     const body = try std.fmt.allocPrint(ctx.allocator, fmt, args);
     defer ctx.allocator.free(body);
     var name = ctx.call_name orelse docref_fallback;
@@ -614,7 +616,7 @@ fn docref(ctx: *NativeContext, level: i64, param: ?[]const u8, comptime fmt: []c
     const msg = if (ctx.call_name == null and std.mem.eql(u8, name, "Unknown"))
         try std.fmt.allocPrint(ctx.allocator, "{s}: {s}", .{ name, body })
     else
-        try std.fmt.allocPrint(ctx.allocator, "{s}({s}): {s}", .{ name, param orelse "", body });
+        try std.fmt.allocPrint(ctx.allocator, "{s}(): {s}", .{ name, body });
     defer ctx.allocator.free(msg);
     if (level == 2) try ctx.vm.emitWarning(msg) else try ctx.vm.raiseError(level, msg);
 }
@@ -1177,7 +1179,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         .remote => {
             if (func) |name| {
                 try warn(ctx, name ++ "(): Remote host file access not supported, {s}", .{path});
-                try warn(ctx, name ++ "({s}): Failed to open stream: no suitable wrapper could be found", .{path});
+                try warn(ctx, name ++ "(): Failed to open stream: no suitable wrapper could be found", .{});
             }
             return null;
         },
@@ -1225,7 +1227,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
     if (std.mem.startsWith(u8, path, "data:")) {
         const payload = parseDataUri(ctx.allocator, path) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            if (func) |name| try warn(ctx, name ++ "({s}): Failed to open stream: {s}", .{ path, dataUriErrorText(err) });
+            if (func) |name| try warn(ctx, name ++ "(): Failed to open stream: {s}", .{dataUriErrorText(err)});
             return null;
         };
         return try Value.String.adopt(ctx.allocator, payload);
@@ -1256,7 +1258,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
     if (open_basedir.setting(ctx.vm) != null and isPlainPath(path)) {
         if (func) |name| {
             if (!try open_basedir.allows(ctx.vm, name, path)) {
-                try warn(ctx, name ++ "({s}): Failed to open stream: Operation not permitted", .{raw_path});
+                try warn(ctx, name ++ "(): Failed to open stream: Operation not permitted", .{});
                 return null;
             }
         } else if (!try open_basedir.check(ctx.vm, "", path, false)) return null;
@@ -1273,7 +1275,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
                 read_failed = true;
                 return try Value.String.create(ctx.allocator, "");
             }
-            try warn(ctx, name ++ "({s}): Failed to open stream: {s}", .{ raw_path, errorText(err) });
+            try warn(ctx, name ++ "(): Failed to open stream: {s}", .{errorText(err)});
             return null;
         },
     };
@@ -1415,19 +1417,19 @@ fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]con
         .local => |local| target = local,
         .remote => {
             try warn(ctx, "file_put_contents(): Remote host file access not supported, {s}", .{spelled_path});
-            try warn(ctx, "file_put_contents({s}): Failed to open stream: no suitable wrapper could be found", .{spelled_path});
+            try warn(ctx, "file_put_contents(): Failed to open stream: no suitable wrapper could be found", .{});
             return NativeResult.scalar(.{ .bool = false });
         },
     }
     if (try basedirDenies(ctx, "file_put_contents", target)) {
-        try warn(ctx, "file_put_contents({s}): Failed to open stream: Operation not permitted", .{spelled_path});
+        try warn(ctx, "file_put_contents(): Failed to open stream: Operation not permitted", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
     const append = flags & FILE_APPEND != 0;
     const lock = !append and flags & LOCK_EX != 0;
     // "a", "c" (truncated once the lock is held), or "w"
     const file = openWithMode(target, if (append) "ab" else if (lock) "cb" else "wb") catch |err| {
-        try warn(ctx, "file_put_contents({s}): Failed to open stream: {s}", .{ spelled_path, errorText(err) });
+        try warn(ctx, "file_put_contents(): Failed to open stream: {s}", .{errorText(err)});
         return NativeResult.scalar(.{ .bool = false });
     };
     defer file.close(platform.io);
@@ -1770,7 +1772,7 @@ fn native_rmdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     path = localPath(path) orelse path;
     if (try basedirDenies(ctx, "rmdir", path)) return NativeResult.scalar(.{ .bool = false });
     removeDirectory(path) catch |err| {
-        try warn(ctx, "rmdir({s}): {s}", .{ path, errorText(err) });
+        try warn(ctx, "rmdir(): {s}", .{errorText(err)});
         return NativeResult.scalar(.{ .bool = false });
     };
     return NativeResult.scalar(.{ .bool = true });
@@ -1804,7 +1806,7 @@ fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     path = localPath(path) orelse path;
     if (try basedirDenies(ctx, "unlink", path)) return NativeResult.scalar(.{ .bool = false });
     deletePath(path) catch |err| {
-        try warn(ctx, "unlink({s}): {s}", .{ path, errorText(err) });
+        try warn(ctx, "unlink(): {s}", .{errorText(err)});
         return NativeResult.scalar(.{ .bool = false });
     };
     return NativeResult.scalar(.{ .bool = true });
@@ -1943,12 +1945,12 @@ fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         .dir => unreachable,
     } else if (!plain_source) {
         wrapped = (try readPath(ctx, source)) orelse {
-            try warn(ctx, "copy({s}): Failed to open stream: operation failed", .{source});
+            try warn(ctx, "copy(): Failed to open stream: operation failed", .{});
             return NativeResult.scalar(.{ .bool = false });
         };
     } else {
         source_file = openPlain(source) catch |err| {
-            try warn(ctx, "copy({s}): Failed to open stream: {s}", .{ source, errorText(err) });
+            try warn(ctx, "copy(): Failed to open stream: {s}", .{errorText(err)});
             return NativeResult.scalar(.{ .bool = false });
         };
     }
@@ -1956,12 +1958,12 @@ fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     try requirePath(ctx, dest);
     if (dest_hidden) {
         _ = try open_basedir.allows(ctx.vm, "copy", shown_dest);
-        try warn(ctx, "copy({s}): Failed to open stream: Operation not permitted", .{shown_dest});
+        try warn(ctx, "copy(): Failed to open stream: Operation not permitted", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
     bundle.prepareWrite(dest, .create);
     const dest_file = createPlain(dest) catch |err| {
-        try warn(ctx, "copy({s}): Failed to open stream: {s}", .{ dest, errorText(err) });
+        try warn(ctx, "copy(): Failed to open stream: {s}", .{errorText(err)});
         return NativeResult.scalar(.{ .bool = false });
     };
     defer dest_file.close(platform.io);
@@ -2020,7 +2022,7 @@ fn native_rename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     bundle.prepareWrite(to, .create);
     bundle.prepareWrite(from, .edit);
     renamePath(from, to) catch |err| {
-        try warn(ctx, "rename({s},{s}): {s}", .{ from, to, errorText(err) });
+        try warn(ctx, "rename(): {s}", .{errorText(err)});
         return NativeResult.scalar(.{ .bool = false });
     };
     _ = bundle.remove(from);
@@ -2048,15 +2050,15 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     defer names.deinit(ctx.allocator);
     defer for (names.items) |name| name.release();
     if (try basedirDenies(ctx, "scandir", args[0].string.bytes())) {
-        try warn(ctx, "scandir({s}): Failed to open directory: Operation not permitted", .{args[0].string.bytes()});
+        try warn(ctx, "scandir(): Failed to open directory: Operation not permitted", .{});
         try warn(ctx, "scandir(): (errno 1): Operation not permitted", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
     if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
         const err = dirOpenError(args[0].string.bytes());
         if (userWrapperFor(ctx.vm, args[0].string.bytes()) == null) {
-            try warnWindowsDirFailure(ctx, "scandir", args[0].string.bytes(), err);
-            try warn(ctx, "scandir({s}): Failed to open directory: {s}", .{ args[0].string.bytes(), err.text });
+            try warnWindowsDirFailure(ctx, "scandir", err);
+            try warn(ctx, "scandir(): Failed to open directory: {s}", .{err.text});
         }
         try warn(ctx, "scandir(): (errno {d}): {s}", .{ err.errno, err.text });
         return NativeResult.scalar(.{ .bool = false });
@@ -2106,10 +2108,10 @@ fn dirOpenError(path: []const u8) DirOpenError {
 
 // php's windows plain wrapper reports the system's own error before the
 // generic failure
-fn warnWindowsDirFailure(ctx: *NativeContext, comptime func: []const u8, path: []const u8, err: DirOpenError) RuntimeError!void {
+fn warnWindowsDirFailure(ctx: *NativeContext, comptime func: []const u8, err: DirOpenError) RuntimeError!void {
     if (!platform.is_windows) return;
     var buf: [1100]u8 = undefined;
-    try warn(ctx, func ++ "({s}): {s}", .{ path, @import("filesystem_win.zig").docrefFromError(&buf, err.win32) });
+    try warn(ctx, func ++ "(): {s}", .{@import("filesystem_win.zig").docrefFromError(&buf, err.win32)});
 }
 
 fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUnmanaged(Value.String)) RuntimeError!bool {
@@ -2224,7 +2226,7 @@ fn openDirectory(ctx: *NativeContext, args: []const Value, comptime func: []cons
     }
     try useContext(ctx, args, 1);
     if (try basedirDenies(ctx, func, localPath(args[0].string.bytes()) orelse args[0].string.bytes())) {
-        try warn(ctx, func ++ "({s}): Failed to open directory: Operation not permitted", .{args[0].string.bytes()});
+        try warn(ctx, func ++ "(): Failed to open directory: Operation not permitted", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
     var names = std.ArrayListUnmanaged(Value.String).empty;
@@ -2232,8 +2234,8 @@ fn openDirectory(ctx: *NativeContext, args: []const Value, comptime func: []cons
     defer for (names.items) |name| name.release();
     if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
         const err = dirOpenError(args[0].string.bytes());
-        try warnWindowsDirFailure(ctx, func, args[0].string.bytes(), err);
-        try warn(ctx, func ++ "({s}): Failed to open directory: {s}", .{ args[0].string.bytes(), err.text });
+        try warnWindowsDirFailure(ctx, func, err);
+        try warn(ctx, func ++ "(): Failed to open directory: {s}", .{err.text});
         return NativeResult.scalar(.{ .bool = false });
     }
     const names_arr = try ctx.vm.allocArray();
@@ -5221,7 +5223,7 @@ fn procDescriptorFromArray(ctx: *NativeContext, item: *PhpArray, earlier: []cons
         const path = try procSpecString(ctx, item, 1, "file name parameter for 'file'");
         const mode = try procSpecString(ctx, item, 2, "mode parameter for 'file'");
         const file = openWithMode(path, mode) catch |err| {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "proc_open({s}): Failed to open stream: {s}", .{ path, if (err == error.RuntimeError) "Invalid argument" else spawnFailureMessage(err) });
+            const msg = try std.fmt.allocPrint(ctx.allocator, "proc_open(): Failed to open stream: {s}", .{if (err == error.RuntimeError) "Invalid argument" else spawnFailureMessage(err)});
             defer ctx.allocator.free(msg);
             try ctx.vm.emitWarning(msg);
             return null;

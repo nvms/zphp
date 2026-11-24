@@ -1899,6 +1899,7 @@ pub fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "include_path")) return includes.default_include_path;
     if (std.mem.eql(u8, name, "log_errors")) return "1";
     if (std.mem.eql(u8, name, "fatal_error_backtraces")) return "1";
+    if (std.mem.eql(u8, name, "error_include_args")) return "0";
     if (std.mem.eql(u8, name, "error_log")) return "";
     if (std.mem.eql(u8, name, "html_errors")) return "0";
     if (std.mem.eql(u8, name, "ignore_repeated_errors")) return "0";
@@ -2865,7 +2866,7 @@ fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const path = paths.streamPath(&path_buf, args[2].string.bytes());
             if (open_basedir.setting(ctx.vm) != null and !paths.hasScheme(path) and !try open_basedir.allows(ctx.vm, "error_log", path)) {
-                const msg = try std.fmt.allocPrint(ctx.allocator, "error_log({s}): Failed to open stream: Operation not permitted", .{args[2].string.bytes()});
+                const msg = try std.fmt.allocPrint(ctx.allocator, "error_log(): Failed to open stream: Operation not permitted", .{});
                 defer ctx.allocator.free(msg);
                 try ctx.vm.emitWarning(msg);
                 return NativeResult.scalar(.{ .bool = false });

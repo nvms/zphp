@@ -553,7 +553,10 @@ fn dirOpenPath(ctx: *NativeContext, obj: *PhpObject, path: []const u8, label: []
         switch (try listDirectory(ctx, path, names, dtypes)) {
             .ok => opened = true,
             .failed => |reason| {
-                try sic.raise(ctx, "UnexpectedValueException", "{s}({s}): Failed to open directory: {s}", .{ label, path, reason });
+                // a docref warning turned exception: error_include_args names the arguments
+                const shown = if (ctx.vm.native_call) |call| try ctx.vm.docrefArgsText(call.label, call.args) else null;
+                defer if (shown) |s| ctx.vm.allocator.free(s);
+                try sic.raise(ctx, "UnexpectedValueException", "{s}({s}): Failed to open directory: {s}", .{ label, shown orelse "", reason });
             },
         }
     }

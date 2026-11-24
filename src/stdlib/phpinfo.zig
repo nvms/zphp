@@ -506,6 +506,7 @@ const boolean_directives = [_][]const u8{
     "allow_url_fopen",               "allow_url_include",               "assert.active",                   "assert.bail",
     "assert.exception",              "assert.warning",                  "auto_detect_line_endings",        "auto_globals_jit",
     "display_startup_errors",        "enable_dl",                       "enable_post_data_reading",        "expose_php",
+    "error_include_args",
     "fatal_error_backtraces",        "file_uploads",                    "gd.jpeg_ignore_warning",          "html_errors",
     "ignore_repeated_errors",        "ignore_repeated_source",          "ignore_user_abort",               "implicit_flush",
     "intl.use_exceptions",           "log_errors",                      "mail.add_x_header",               "mail.mixed_lf_and_crlf",

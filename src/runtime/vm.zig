@@ -17631,7 +17631,7 @@ pub const VM = struct {
         if (try includes.resolve(self, path)) |found| {
             // the plain files opener checks open_basedir on the resolved path
             if (open_basedir.setting(self) != null and !includes.hasScheme(found) and !try open_basedir.allows(self, @tagName(kind), found)) {
-                try self.includeNotOpenedAs(kind, path, found, "Operation not permitted");
+                try self.includeNotOpenedAs(kind, path, "Operation not permitted");
                 return null;
             }
             return found;
@@ -17640,9 +17640,19 @@ pub const VM = struct {
         return null;
     }
 
+    // "include(): ..." as php 8.6 words an include's warnings: the file name
+    // is shown only under error_include_args, as a trace argument
+    fn includeWarningText(self: *VM, kind: IncludeKind, path: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError![]u8 {
+        const body = try std.fmt.allocPrint(self.allocator, fmt, args);
+        defer self.allocator.free(body);
+        const shown = try self.docrefArgsText("", &.{.{ .string = Value.String.borrowed(path) }});
+        defer if (shown) |s| self.allocator.free(s);
+        return std.fmt.allocPrint(self.allocator, "{s}({s}): {s}", .{ @tagName(kind), shown orelse "", body });
+    }
+
     // an include warns and evaluates to false; a require throws
     fn includeNotOpened(self: *VM, kind: IncludeKind, path: []const u8, reason: []const u8) RuntimeError!void {
-        return self.includeNotOpenedAs(kind, path, path, reason);
+        return self.includeNotOpenedAs(kind, path, reason);
     }
 
     // the include's own failure after the stream reported why it failed
@@ -17653,17 +17663,17 @@ pub const VM = struct {
             try self.setPendingException("Error", msg);
             return error.RuntimeError;
         }
-        const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Failed opening '{s}' for inclusion (include_path='{s}')", .{ @tagName(kind), path, includes.includePath(self) });
+        const msg = try self.includeWarningText(kind, path, "Failed opening '{s}' for inclusion (include_path='{s}')", .{ path, includes.includePath(self) });
         defer self.allocator.free(msg);
         try self.emitWarning(msg);
     }
 
-    // `opened` is the path the open failed on, which the stream warning names
-    fn includeNotOpenedAs(self: *VM, kind: IncludeKind, path: []const u8, opened: []const u8, reason: []const u8) RuntimeError!void {
+    // the warning no longer names the path the open failed on (php 8.6)
+    fn includeNotOpenedAs(self: *VM, kind: IncludeKind, path: []const u8, reason: []const u8) RuntimeError!void {
         const nul = std.mem.indexOfScalar(u8, path, 0);
         const shown = path[0 .. nul orelse path.len];
         if (nul == null) {
-            const msg = try std.fmt.allocPrint(self.allocator, "{s}({s}): Failed to open stream: {s}", .{ @tagName(kind), opened, reason });
+            const msg = try self.includeWarningText(kind, path, "Failed to open stream: {s}", .{reason});
             defer self.allocator.free(msg);
             try self.emitWarning(msg);
         }
@@ -17673,7 +17683,7 @@ pub const VM = struct {
             try self.setPendingException("Error", msg);
             return error.RuntimeError;
         }
-        const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Failed opening '{s}' for inclusion (include_path='{s}')", .{ @tagName(kind), shown, includes.includePath(self) });
+        const msg = try self.includeWarningText(kind, path, "Failed opening '{s}' for inclusion (include_path='{s}')", .{ shown, includes.includePath(self) });
         defer self.allocator.free(msg);
         try self.emitWarning(msg);
     }
@@ -18466,7 +18476,63 @@ pub const VM = struct {
         // anonymous class's NUL
         const stripped = try class_names.stripAnonymous(self.allocator, raw_msg);
         defer if (stripped) |s| self.allocator.free(s);
-        return self.raiseMessageAt(level, stripped orelse raw_msg, at);
+        const msg = stripped orelse raw_msg;
+        // php_error_docref names the running function's arguments under
+        // error_include_args ("unlink('/'): ...")
+        if (self.native_call) |call| if (level & (E_WARNING | 8 | E_DEPRECATED) != 0 and
+            msg.len > call.label.len + 4 and std.mem.startsWith(u8, msg, call.label) and std.mem.startsWith(u8, msg[call.label.len..], "(): "))
+        {
+            if (try self.docrefArgsText(call.label, call.args)) |args| {
+                defer self.allocator.free(args);
+                const with = try std.fmt.allocPrint(self.allocator, "{s}({s}){s}", .{ call.label, args, msg[call.label.len + 2 ..] });
+                defer self.allocator.free(with);
+                return self.raiseMessageAt(level, with, at);
+            }
+        };
+        return self.raiseMessageAt(level, msg, at);
+    }
+
+    // php 8.6's error_include_args: the arguments a php_error_docref message
+    // names, as a stack trace prints them; null while the setting is off
+    pub fn docrefArgsText(self: *VM, label: []const u8, args: []const Value) RuntimeError!?[]u8 {
+        if (!self.iniFlagOn("error_include_args", "0")) return null;
+        const error_format = @import("../error_format.zig");
+        const sensitive = deprecations.sensitive_parameters.get(label) orelse 0;
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+        const signature = native_params.get(label);
+        for (args, 0..) |a, i| {
+            if (i > 0) try buf.appendSlice(self.allocator, ", ");
+            if (i < 64 and sensitive & (@as(u64, 1) << @intCast(i)) != 0) {
+                try buf.appendSlice(self.allocator, "Object(SensitiveParameterValue)");
+                continue;
+            }
+            // zpp converts a scalar argument in the call frame, so php lists
+            // it as the parameter's type took it
+            var text: std.ArrayListUnmanaged(u8) = .empty;
+            defer text.deinit(self.allocator);
+            var shown = a;
+            if (signature) |sig| if (sig.params.len > 0) {
+                const param = sig.params[@min(i, sig.params.len - 1)];
+                if (i < sig.params.len or param.variadic) {
+                    const nullable = param.type.len > 0 and param.type[0] == '?';
+                    const t = if (nullable) param.type[1..] else param.type;
+                    const scalar = a == .int or a == .float or a == .bool or (a == .null and !nullable);
+                    if (std.mem.eql(u8, t, "string") and scalar) {
+                        if (a != .null) try a.format(&text, self.allocator);
+                        shown = .{ .string = Value.String.borrowed(text.items) };
+                    } else if (std.mem.eql(u8, t, "int") and (a == .bool or (a == .float and a.float == @trunc(a.float) and @abs(a.float) < 9.2e18) or (a == .string and Value.isNumericString(a.string.bytes())))) {
+                        shown = .{ .int = a.toInt() };
+                    } else if (std.mem.eql(u8, t, "float") and (a == .int or a == .bool or (a == .string and Value.isNumericString(a.string.bytes())))) {
+                        shown = .{ .float = a.toFloat() };
+                    } else if (std.mem.eql(u8, t, "bool") and (a == .int or a == .float or a == .string)) {
+                        shown = .{ .bool = a.isTruthy() };
+                    }
+                }
+            };
+            error_format.writeTraceArg(&buf, self.allocator, shown);
+        }
+        return try buf.toOwnedSlice(self.allocator);
     }
 
     // raiseErrorAt for a message written by the script, which trigger_error
