@@ -1397,6 +1397,8 @@ fn readCustomObject(ctx: *NativeContext, u: *UnserCtx, sc: *Scan, dest: Loc, cla
         if (!try readGmpPayload(ctx, u, dest, payload)) return false;
     } else if (!serializable) {
         try plainError(ctx, e_warning, "Class {s} has no unserializer", .{class_name});
+        // php 8.6 makes an empty instance only of __PHP_Incomplete_Class
+        if (!incomplete) return false;
         const obj = (try instantiate(ctx, class_name)) orelse return false;
         try storeLoc(ctx, dest, .{ .object = obj });
         if (incomplete) try obj.setCopiedString(ctx.allocator, magic_member, raw_name);
@@ -1714,7 +1716,7 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const p = @import("string_ports.zig").Args.init(ctx, "unserialize", args);
     const s = try p.str(0, "data");
     if (args.len >= 2 and args[1] != .array) return p.typeError(1, "options", "array");
-    if (s.len == 0) return NativeResult.scalar(.{ .bool = false });
+    // php 8.6 parses an empty string too, failing at offset 0 with a warning
     // nested in a Serializable::unserialize() method, the call shares the
     // outer call's table (php's BG(unserialize)) with its own options
     var own = UnserCtx{ .max_depth = iniMaxDepth(ctx) };

@@ -1525,7 +1525,7 @@ test "unserialize malformed returns false" {
     try expectOutput(
         \\<?php
         \\var_dump(@unserialize("garbage"));
-        \\var_dump(unserialize(""));
+        \\var_dump(@unserialize(""));
     , "bool(false)\nbool(false)\n");
 }
 
