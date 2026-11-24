@@ -812,7 +812,58 @@ fn array_udiff_uassoc(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 }
 
 fn array_intersect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return sortedIntersect(ctx, "array_intersect", args, .normal, .internal, .internal);
+    // a single array keeps the generic path and its conversions
+    if (args.len < 2) return sortedIntersect(ctx, "array_intersect", args, .normal, .internal, .internal);
+    return hashIntersect(ctx, args);
+}
+
+// php 8.6's php_array_intersect_hash: every argument is checked first, an
+// empty one ends it without converting anything, then each value is converted
+// to a string once, the second array's first, the first array's last
+fn hashIntersect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const name = "array_intersect";
+    for (args, 1..) |arg, pos| if (arg != .array) return throwNotArray(ctx, name, pos, arg);
+    const src = args[0].array;
+    for (args) |arg| if (arg.array.entries.items.len == 0) {
+        const none = try ctx.allocator.alloc(bool, src.entries.items.len);
+        defer ctx.allocator.free(none);
+        @memset(none, false);
+        return keptResult(ctx, src, none);
+    };
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    // each value of the second array, and how many arguments in a row from
+    // the second on hold it
+    var seen: std.StringHashMapUnmanaged(usize) = .{};
+    defer seen.deinit(ctx.allocator);
+    var buf: [128]u8 = undefined;
+    for (args[1].array.entries.items) |e| {
+        const s = try tmpString(ctx, entryValue(e), &buf);
+        defer s.release(ctx);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        const gop = try seen.getOrPut(ctx.allocator, s.bytes);
+        if (!gop.found_existing) gop.key_ptr.* = try arena.allocator().dupe(u8, s.bytes);
+        gop.value_ptr.* = 1;
+    }
+    for (args[2..], 2..) |arg, i| {
+        for (arg.array.entries.items) |e| {
+            const s = try tmpString(ctx, entryValue(e), &buf);
+            defer s.release(ctx);
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            if (seen.getPtr(s.bytes)) |count| if (count.* == i - 1) {
+                count.* = i;
+            };
+        }
+    }
+    const keep = try ctx.allocator.alloc(bool, src.entries.items.len);
+    defer ctx.allocator.free(keep);
+    for (src.entries.items, keep) |e, *k| {
+        const s = try tmpString(ctx, entryValue(e), &buf);
+        defer s.release(ctx);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        k.* = if (seen.get(s.bytes)) |count| count == args.len - 1 else false;
+    }
+    return keptResult(ctx, src, keep);
 }
 
 fn array_intersect_ukey(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
