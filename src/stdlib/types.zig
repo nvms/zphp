@@ -2680,6 +2680,10 @@ fn native_ini_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         const entry = try ctx.createArray();
         try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("global_value") }, global);
         try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("local_value") }, local);
+        // php 8.6: the default the directive is built with, whatever the ini said
+        const builtin: Value = if (iniDefault(name)) |v| .{ .string = try Value.String.create(ctx.allocator, v) } else .null;
+        defer if (builtin == .string) builtin.string.release();
+        try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("builtin_default_value") }, builtin);
         const system = std.mem.eql(u8, name, "max_memory_limit") or @import("mail.zig").isSystemIni(name) or std.mem.eql(u8, name, "syslog.facility") or std.mem.eql(u8, name, "syslog.ident");
         try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("access") }, .{ .int = if (system) 4 else 7 });
         try result.set(ctx.allocator, key, .{ .array = entry });
