@@ -1311,9 +1311,6 @@ pub const PhpObject = struct {
         proxy: bool = false,
         backing: ?*PhpObject = null,
         pending: []bool,
-        // lazy slots a failed proxy factory wrote: still lazy (php's
-        // IS_PROP_LAZY), but listings show the value
-        written: ?[]bool = null,
         skip_serialize: bool = false,
         running: bool = false,
     };
@@ -1373,13 +1370,6 @@ pub const PhpObject = struct {
         return state.pending[index];
     }
 
-    // a lazy slot a failed proxy factory wrote, which listings show
-    pub fn isLazyWrittenSlot(self: *const PhpObject, name: []const u8, scope: ?[]const u8) bool {
-        const state = self.lazy orelse return false;
-        const written = state.written orelse return false;
-        const index = self.getSlotIndexForScope(name, scope) orelse return false;
-        return index < written.len and written[index];
-    }
     pub const SlotLayout = struct {
         names: []const []const u8,
         // mutable: set_prop_default patches an instance-property default after
@@ -1402,7 +1392,6 @@ pub const PhpObject = struct {
     pub fn deinit(self: *PhpObject, allocator: std.mem.Allocator) void {
         if (self.lazy) |state| {
             allocator.free(state.pending);
-            if (state.written) |w| allocator.free(w);
             allocator.destroy(state);
         }
         for (self.properties.keys()) |name| allocator.free(name);

@@ -27523,19 +27523,9 @@ pub const VM = struct {
         state.running = true;
         defer state.running = false;
         var ctx = self.makeContext(null);
-        // a failed ghost initializer's changes are reverted
-        // (zend_lazy_object_revert_init); a proxy keeps what its factory did,
-        // its properties still lazy but listed with what it wrote
-        errdefer if (state.proxy) record: {
-            const written = state.written orelse (self.allocator.alloc(bool, state.pending.len) catch break :record);
-            if (state.written == null) {
-                @memset(written, false);
-                state.written = written;
-            }
-            for (slots, saved, 0..) |slot, v, i| {
-                if (i < written.len and !Value.identical(v, slot)) written[i] = true;
-            }
-        } else {
+        // a failed initializer's changes are reverted, a proxy's as a
+        // ghost's (php 8.6's zend_lazy_object_revert_init on both)
+        errdefer {
             for (slots, saved, 0..) |*slot, v, i| {
                 if (self.ref_index) |ri| {
                     if (obj.slot_layout) |layout| {
@@ -27554,7 +27544,7 @@ pub const VM = struct {
             }
             var restored = unset.keyIterator();
             while (restored.next()) |name| obj.markUnset(self.allocator, name.*) catch {};
-        };
+        }
         if (state.proxy) {
             const result = try ctx.invokeCallable(state.initializer, &.{.{ .object = obj }});
             if (result != .object) {

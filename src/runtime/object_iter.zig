@@ -133,7 +133,7 @@ pub const Step = struct {
 fn slotValue(vm: *VM, obj: *PhpObject, index: usize, name: []const u8, declaring: []const u8) ?Value {
     const slots = obj.slots orelse return null;
     if (index >= slots.len) return null;
-    if (obj.lazy != null and obj.isLazySlot(name, declaring) and !obj.isLazyWrittenSlot(name, declaring)) return null;
+    if (obj.lazy != null and obj.isLazySlot(name, declaring)) return null;
     if (obj.isUnset(name)) return null;
     const v = slots[index];
     if (v == .undef) return null;

@@ -1428,7 +1428,7 @@ fn objectIap(ctx: *NativeContext, comptime func: []const u8, obj: *PhpObject) Ru
                 .protected => try std.fmt.allocPrint(a, "\x00*\x00{s}", .{name}),
                 .private => try std.fmt.allocPrint(a, "\x00{s}\x00{s}", .{ declared.defining_class, name }),
             };
-            const absent = obj.isUnset(name) or (obj.isLazySlot(name, layout.declaring_classes[i]) and !obj.isLazyWrittenSlot(name, layout.declaring_classes[i]));
+            const absent = obj.isUnset(name) or obj.isLazySlot(name, layout.declaring_classes[i]);
             try table.entries.append(a, .{ .key = key, .value = if (absent) .undef else slots[i] });
         }
     };
