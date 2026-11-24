@@ -786,41 +786,13 @@ fn phpOperandKind(self: *Compiler, idx: u32) u8 {
             if (std.mem.eql(u8, name, "$this") or isSuperglobalName(name)) return operand_tmp;
             return operand_cv;
         },
-        .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .new_expr, .new_expr_dynamic, .anonymous_class => return operand_var,
-        .call => {
-            // the functions php compiles to their own opcodes (or frameless
-            // calls) give a temporary; any other call a var
-            const callee = self.ast.nodes[node.data.lhs];
-            if (callee.tag != .identifier and callee.tag != .qualified_name) return operand_var;
-            const name = self.ast.tokenSlice(callee.main_token);
-            if (callee.tag == .qualified_name) {
-                // only `\f`: one part, absolute
-                const raw = callee.data.rhs & ~((@as(u32, 1) << 31) | (@as(u32, 1) << 30));
-                if (callee.data.rhs & (1 << 31) == 0) return operand_var;
-                if (raw != 0 and self.ast.extraSlice(raw).len > 1) return operand_var;
-            } else if (self.namespace.len > 0) return operand_var;
-            var lower_buf: [32]u8 = undefined;
-            if (name.len > lower_buf.len) return operand_var;
-            const lower = std.ascii.lowerString(&lower_buf, name);
-            for (tmp_result_functions) |f| {
-                if (std.mem.eql(u8, lower, f)) return operand_tmp;
-            }
-            return operand_var;
-        },
+        // php 8.6 gives a call read as a value a temporary
+        // (zend_compile_call_common); new still makes a var
+        .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .call => return operand_tmp,
+        .new_expr, .new_expr_dynamic, .anonymous_class => return operand_var,
         else => return operand_tmp,
     }
 }
-
-// zend_try_compile_special_func's functions and the frameless ones
-const tmp_result_functions = [_][]const u8{
-    "strlen",       "is_null",      "is_bool",          "is_long",          "is_int",          "is_integer",     "is_float",    "is_double",
-    "is_string",    "is_array",     "is_object",        "is_resource",      "is_scalar",       "boolval",        "intval",      "floatval",
-    "doubleval",    "strval",       "defined",          "chr",              "ord",             "in_array",       "count",       "sizeof",
-    "get_class",    "get_called_class", "gettype",      "func_num_args",    "func_get_args",   "array_slice",    "array_key_exists", "sprintf",
-    "class_exists", "dechex",       "dirname",          "implode",          "is_numeric",      "max",            "min",         "preg_match",
-    "preg_replace", "property_exists", "str_contains",  "str_replace",      "str_starts_with", "strpos",         "strstr",      "strtr",
-    "substr",       "trim",
-};
 
 fn isSuperglobalName(name: []const u8) bool {
     for ([_][]const u8{ "$GLOBALS", "$_SERVER", "$_GET", "$_POST", "$_FILES", "$_COOKIE", "$_SESSION", "$_REQUEST", "$_ENV" }) |g| {
