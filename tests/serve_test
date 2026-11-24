@@ -66,7 +66,7 @@ check_contains() {
     local needle="$2"
     local haystack="$3"
 
-    if echo "$haystack" | grep -q "$needle"; then
+    if grep -q "$needle" <<< "$haystack"; then
         passed=$((passed + 1))
         echo "  pass  $name"
     else
@@ -127,7 +127,7 @@ check_contains "header no-replace second" "X-Multi: two" "$noreplace_hdrs"
 # test: header_remove specific
 remove_hdrs=$(curl -si http://localhost:$PORT/header-remove 2>&1)
 check_contains "header_remove keeps X-Keep" "X-Keep: yes" "$remove_hdrs"
-if echo "$remove_hdrs" | grep -q "X-Drop:"; then
+if grep -q "X-Drop:" <<< "$remove_hdrs"; then
     failed=$((failed + 1))
     echo "  FAIL  header_remove drops X-Drop"
     errors="$errors${nl}--- header_remove drops X-Drop ---${nl}expected X-Drop to be absent${nl}got: $remove_hdrs${nl}"
@@ -138,7 +138,7 @@ fi
 
 # test: header_remove all
 removeall_hdrs=$(curl -si http://localhost:$PORT/header-remove-all 2>&1)
-if echo "$removeall_hdrs" | grep -q "X-A:\|X-B:"; then
+if grep -q "X-A:\|X-B:" <<< "$removeall_hdrs"; then
     failed=$((failed + 1))
     echo "  FAIL  header_remove all"
     errors="$errors${nl}--- header_remove all ---${nl}expected no X-A/X-B headers${nl}got: $removeall_hdrs${nl}"
@@ -628,7 +628,7 @@ limited() { if command -v timeout >/dev/null 2>&1; then timeout 20 "$@"; else "$
 pass() { passed=$((passed + 1)); echo "  pass  $1"; }
 fail() { failed=$((failed + 1)); echo "  FAIL  $1"; errors="$errors${nl}--- $1 ---${nl}$2${nl}"; }
 check_absent() {
-    if echo "$3" | grep -qi -- "$2"; then fail "$1" "expected no: $2${nl}got: $3"; else pass "$1"; fi
+    if grep -qi -- "$2" <<< "$3"; then fail "$1" "expected no: $2${nl}got: $3"; else pass "$1"; fi
 }
 wait_ready() {
     for i in $(seq 1 100); do
@@ -669,7 +669,7 @@ config_error() {
     local name="$1" needle="$2" out st=0
     shift 2
     out=$(limited "$ZPHP" serve "$APP" --port $OBS_PORT "$@" 2>&1 >/dev/null) || st=$?
-    if [ "$st" -eq 1 ] && echo "$out" | grep -q -- "$needle"; then pass "$name"; else fail "$name" "exit $st, got: $out"; fi
+    if [ "$st" -eq 1 ] && grep -q -- "$needle" <<< "$out"; then pass "$name"; else fail "$name" "exit $st, got: $out"; fi
 }
 config_error "admin port zero rejected" "needs a port" --admin-port 0
 config_error "admin port text rejected" "needs a port" --admin-port nope
@@ -818,7 +818,7 @@ for k in json=ok fields=ok startup=ok exception=ok exception_access=ok rejected=
     check_contains "log ${k%%=*}" "$k" "$log_result"
 done
 check_contains "every request logged once" "count=214" "$log_result"
-if echo "$log_result" | grep -q "workers=[2-4]"; then pass "log shows several workers"; else fail "log shows several workers" "$log_result"; fi
+if grep -q "workers=[2-4]" <<< "$log_result"; then pass "log shows several workers"; else fail "log shows several workers" "$log_result"; fi
 
 # repeated start and stop with everything on leaves nothing behind
 cycle_ok=1

@@ -112,7 +112,7 @@ check_body_contains() {
     local name="$1" path="$2" needle="$3"
     local zb
     zb=$(curl -s -m "$TMO" "http://127.0.0.1:$ZPHP_PORT$path" 2>&1)
-    if echo "$zb" | grep -qF "$needle"; then
+    if grep -qF "$needle" <<< "$zb"; then
         passed=$((passed + 1)); echo "  pass  $name (contains '$needle')"
     else
         failed=$((failed + 1)); echo "  FAIL  $name (missing '$needle')"
