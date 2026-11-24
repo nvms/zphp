@@ -643,6 +643,10 @@ pub const OpCode = enum(u16) {
     // callable_closure for a function named in the code (`strlen(...)`):
     // php 8.6 shares one Closure per function for the request
     callable_closure_cached,
+    // closure_new for a stateless closure (static, nothing captured, no
+    // static variables) declared in a function: php 8.6 makes it once per
+    // call site for the first called scope and keeps it for the request
+    closure_new_cached,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

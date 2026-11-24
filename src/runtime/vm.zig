@@ -988,6 +988,9 @@ pub const VM = struct {
     // first-class callable got this request, by its registered name; each
     // holds a reference, dropped in reset()
     fcc_cache: std.StringHashMapUnmanaged(*PhpObject) = .{},
+    // php 8.6's stateless closures (EG(lambda_cache)), by the compiled
+    // closure, each held with one reference until the request ends
+    lambda_cache: std.StringHashMapUnmanaged(struct { scope: ?[]const u8, closure: *PhpObject }) = .{},
     // the frame depth a running call_user_func(_array) was called at: a
     // native it calls is called by an internal function, never strictly
     forwarding_depth: usize = std.math.maxInt(usize),
@@ -3856,6 +3859,7 @@ pub const VM = struct {
     pub fn deinit(self: *VM) void {
         self.sensitive_params.deinit(self.allocator);
         self.fcc_cache.deinit(self.allocator);
+        self.lambda_cache.deinit(self.allocator);
         if (self.unwind_marker) |marker| {
             self.allocator.destroy(marker);
             self.unwind_marker = null;
@@ -4122,6 +4126,9 @@ pub const VM = struct {
         var fcc_it = self.fcc_cache.valueIterator();
         while (fcc_it.next()) |closure| self.releaseValue(.{ .object = closure.* });
         self.fcc_cache.clearRetainingCapacity();
+        var lambda_it = self.lambda_cache.valueIterator();
+        while (lambda_it.next()) |entry| self.releaseValue(.{ .object = entry.closure });
+        self.lambda_cache.clearRetainingCapacity();
         self.iap_positions.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();
         if (self.ic) |ic| {
@@ -11127,6 +11134,7 @@ pub const VM = struct {
                 },
 
                 .closure_new => try self.newClosureFromTop(),
+                .closure_new_cached => try self.newCachedClosureFromTop(),
 
                 .const_expr_fcc_check => {
                     const fully_qualified = self.readByte() != 0;
@@ -22762,6 +22770,41 @@ pub const VM = struct {
     // closure_new: the compiled closure named on top becomes a Closure
     // object. its scope belongs to the instance, not to a particular use
     // capture, so even a static closure without captures records it
+    // the class a closure made here is scoped to: the called class, or the
+    // class of $this, inside a class's code
+    fn closureCalledScope(self: *VM) ?[]const u8 {
+        const lexical_class = self.currentDefiningClass() orelse return null;
+        const this_val = self.getLocalByName("$this");
+        return self.currentFrame().called_class orelse
+            (if (this_val == .object) this_val.object.class_name else lexical_class);
+    }
+
+    // closure_new_cached: php's cache slot for a stateless closure holds the
+    // first one made at the site with the called scope it was made for; a
+    // later scope gets a closure of its own, which isn't kept
+    fn newCachedClosureFromTop(self: *VM) !void {
+        const compile_name = self.peek().string.bytes();
+        const scope = self.closureCalledScope();
+        if (self.lambda_cache.get(compile_name)) |entry| {
+            const same = if (entry.scope) |a| (if (scope) |b| std.mem.eql(u8, a, b) else false) else scope == null;
+            if (same) {
+                // the operand stack holds a count of a closure, as
+                // newClosureInstance's starts with
+                entry.closure.retain();
+                self.stack[self.sp - 1] = .{ .object = entry.closure };
+                return;
+            }
+            return self.newClosureFromTop();
+        }
+        const key = try self.internName(compile_name);
+        const kept_scope = if (scope) |s| try self.internName(s) else null;
+        try self.newClosureFromTop();
+        const made = self.stack[self.sp - 1].object;
+        // the cache's reference, released when the request ends
+        made.retain();
+        try self.lambda_cache.put(self.allocator, key, .{ .scope = kept_scope, .closure = made });
+    }
+
     fn newClosureFromTop(self: *VM) !void {
         const compile_name = self.peek().string.bytes();
         const func = self.functions.get(compile_name) orelse return error.RuntimeError;
@@ -22769,12 +22812,7 @@ pub const VM = struct {
         self.stack[self.sp - 1] = instance;
         const name = instance.object.closureName().?;
         const lexical_class = self.currentDefiningClass();
-        const this_val = self.getLocalByName("$this");
-        const scope = if (lexical_class != null)
-            self.currentFrame().called_class orelse
-                (if (this_val == .object) this_val.object.class_name else lexical_class)
-        else
-            null;
+        const scope = self.closureCalledScope();
         if (scope) |class_name| {
             try self.captures.append(self.allocator, .{
                 .closure_name = name,

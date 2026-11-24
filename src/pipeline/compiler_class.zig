@@ -2470,9 +2470,18 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
 
     try self.adopt(&sub);
 
+    // php 8.6 caches a closure that is static, captures nothing and has no
+    // static variables, when a function declares it (not the main script,
+    // not a constant expression). an arrow function captures every variable
+    // its body names that isn't a parameter
+    const stateless = is_static_closure and use_count == 0 and !self.const_expr and
+        self.current_function.len > 0 and self.current_function[0] != 0 and
+        self.functions.items[self.functions.items.len - 1].static_vars.len == 0 and
+        !(is_arrow and arrowCaptures(slot_names, param_names));
+
     const idx = try self.addConstant(.{ .string = Value.String.borrowed(owned_name) });
     try self.emitConstant(idx);
-    try self.emitOp(.closure_new);
+    try self.emitOp(if (stateless) .closure_new_cached else .closure_new);
 
     for (use_vars) |use_var_node| {
         const use_node = self.ast.nodes[use_var_node];
@@ -2514,6 +2523,17 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.closure_bind);
         try self.emitU16(this_idx);
     }
+}
+
+// whether an arrow function's body names a variable other than its
+// parameters and $this, which php binds into it
+fn arrowCaptures(slot_names: []const []const u8, param_names: []const []const u8) bool {
+    outer: for (slot_names) |sn| {
+        if (std.mem.eql(u8, sn, "$this")) continue;
+        for (param_names) |pn| if (std.mem.eql(u8, sn, pn)) continue :outer;
+        return true;
+    }
+    return false;
 }
 
 // a class/interface declaration default is "hoist-safe" only when it folds to
