@@ -1195,6 +1195,8 @@ pub const ObjFunction = struct {
     start_line: u32 = 0,
     end_line: u32 = 0,
     doc_comment: []const u8 = "",
+    // each parameter's doc comment ("" for none), or empty when none has one
+    param_docs: []const []const u8 = &.{},
     // php's name for a closure, `{closure:<scope>:<line>}`, empty otherwise
     display_name: []const u8 = "",
     // #[\NoDiscard]: the attribute's message ("" without one), null when the

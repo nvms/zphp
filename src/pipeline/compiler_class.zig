@@ -1382,6 +1382,94 @@ pub fn isAutoGlobal(name: []const u8) bool {
     return false;
 }
 
+// each parameter's doc comment, as php 8.6 keeps it (backup_doc_comment
+// after the parameter's variable, or after its default): the last doc
+// comment from the end of the previous parameter to the token that ends this
+// one. empty when none of them has one
+fn paramDocComments(self: *Compiler, param_nodes: []const u32) Error![]const []const u8 {
+    var any = false;
+    for (param_nodes) |p| if (paramDocComment(self, self.ast.nodes[p].main_token).len > 0) {
+        any = true;
+        break;
+    };
+    if (!any) return &.{};
+    const docs = try self.allocator.alloc([]const u8, param_nodes.len);
+    for (param_nodes, 0..) |p, i| docs[i] = paramDocComment(self, self.ast.nodes[p].main_token);
+    return docs;
+}
+
+fn paramDocComment(self: *Compiler, var_tok: u32) []const u8 {
+    const tokens = self.ast.tokens;
+    if (var_tok >= tokens.len) return "";
+    // back to the separator before the parameter: its modifiers, type (a
+    // DNF type's parentheses too) and attributes are part of it
+    var first = var_tok;
+    var depth: usize = 0;
+    while (first > 0) {
+        const tag = tokens[first - 1].tag;
+        if (tag == .r_bracket) {
+            var nest: usize = 0;
+            var j = first - 1;
+            const opener: ?u32 = while (true) {
+                switch (tokens[j].tag) {
+                    .r_bracket => nest += 1,
+                    .l_bracket, .hash_bracket => {
+                        nest -= 1;
+                        if (nest == 0) break if (tokens[j].tag == .hash_bracket) j else null;
+                    },
+                    else => {},
+                }
+                if (j == 0) break null;
+                j -= 1;
+            };
+            first = opener orelse return "";
+            continue;
+        }
+        if (tag == .r_paren) depth += 1 else if (tag == .l_paren) {
+            if (depth == 0) break;
+            depth -= 1;
+        } else if (tag == .comma and depth == 0) break;
+        first -= 1;
+    }
+    // on to the token that ends it: the next parameter's comma, the list's
+    // closing parenthesis, or a promoted property's hook list
+    var end = var_tok + 1;
+    depth = 0;
+    while (end < tokens.len) : (end += 1) {
+        switch (tokens[end].tag) {
+            .comma, .r_paren, .l_brace => if (depth == 0) break,
+            else => {},
+        }
+        switch (tokens[end].tag) {
+            .l_paren, .l_bracket, .hash_bracket, .l_brace => depth += 1,
+            .r_paren, .r_bracket, .r_brace => depth -|= 1,
+            else => {},
+        }
+    }
+    if (end >= tokens.len) end = @intCast(tokens.len - 1);
+    var found: []const u8 = "";
+    var attribute_depth: usize = 0;
+    var k = first;
+    while (k <= end) : (k += 1) {
+        const tok_start = tokens[k].start;
+        const trivia_start: usize = if (k > 0) tokens[k - 1].end else 0;
+        if (attribute_depth == 0 and trivia_start < tok_start) {
+            if (lastDocComment(self.ast.source[trivia_start..tok_start])) |doc| found = doc;
+        }
+        switch (tokens[k].tag) {
+            .hash_bracket => attribute_depth += 1,
+            .l_bracket => if (attribute_depth > 0) {
+                attribute_depth += 1;
+            },
+            .r_bracket => if (attribute_depth > 0) {
+                attribute_depth -= 1;
+            },
+            else => {},
+        }
+    }
+    return found;
+}
+
 fn paramName(self: *Compiler, p: u32) []const u8 {
     const raw = self.ast.tokenSlice(self.ast.nodes[p].main_token);
     return if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
@@ -2195,6 +2283,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,
         .ref_params = ref_flags,
+        .param_docs = try paramDocComments(self, param_nodes),
         .chunk = sub.takeChunk(),
         .static_vars = try sub.takeStaticVars(),
         .local_count = local_count,
@@ -2433,6 +2522,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .is_static = is_static_closure,
         .locals_only = closure_lo,
         .ref_params = ref_params,
+        .param_docs = try paramDocComments(self, param_nodes),
         .local_count = local_count,
         .slot_names = slot_names,
         .file_path = self.file_path,
@@ -3397,7 +3487,8 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
                 try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(type_str) }));
             }
             // a promoted property takes its parameter's doc comment
-            try self.emitU16(try docCommentConst(self, pnode.main_token));
+            const param_doc = paramDocComment(self, pnode.main_token);
+            try self.emitU16(if (param_doc.len == 0) 0xffff else @intCast(try self.addConstant(.{ .string = Value.String.borrowed(param_doc) })));
         }
     }
 
@@ -4728,6 +4819,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,
         .ref_params = ref_flags,
+        .param_docs = try paramDocComments(self, param_nodes),
         .chunk = sub.takeChunk(),
         .static_vars = try sub.takeStaticVars(),
         .local_count = local_count,
@@ -5310,6 +5402,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,
         .ref_params = ref_flags,
+        .param_docs = try paramDocComments(self, param_nodes),
         .file_path = self.file_path,
         .start_line = lineForToken(self, member.main_token),
         .end_line = endLineForBlockStartingAt(self, member.main_token),

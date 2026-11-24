@@ -19197,7 +19197,7 @@ pub const VM = struct {
 
     // a readonly property of a clone that __clone (or clone()'s properties)
     // may still write once
-    fn readonlyReinitable(self: *VM, obj: *PhpObject, name: []const u8) bool {
+    pub fn readonlyReinitable(self: *VM, obj: *PhpObject, name: []const u8) bool {
         var i = self.reinit_windows.items.len;
         while (i > 0) {
             i -= 1;

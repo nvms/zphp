@@ -141,6 +141,7 @@ pub fn freeFunction(allocator: Allocator, f: *ObjFunction) void {
     allocator.free(f.params);
     freeDefaults(allocator, f.defaults);
     if (f.ref_params.len > 0) allocator.free(f.ref_params);
+    if (f.param_docs.len > 0) allocator.free(f.param_docs);
     if (f.slot_names.len > 0) allocator.free(f.slot_names);
     if (f.static_vars.len > 0) {
         for (f.static_vars) |sv| freeDefaultValue(allocator, sv.initial);

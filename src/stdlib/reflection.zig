@@ -185,7 +185,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var rconst_def = ClassDef{ .name = "ReflectionConstant" };
     try rconst_def.interfaces.append(a, "Reflector");
     try rconst_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
-    inline for (.{ .{ "__construct", 1 }, .{ "getName", 0 }, .{ "getValue", 0 }, .{ "getShortName", 0 }, .{ "getNamespaceName", 0 }, .{ "isDeprecated", 0 }, .{ "getAttributes", 2 }, .{ "getFileName", 0 }, .{ "__toString", 0 }, .{ "getExtension", 0 }, .{ "getExtensionName", 0 } }) |m| {
+    inline for (.{ .{ "__construct", 1 }, .{ "getName", 0 }, .{ "getValue", 0 }, .{ "getShortName", 0 }, .{ "getNamespaceName", 0 }, .{ "inNamespace", 0 }, .{ "isDeprecated", 0 }, .{ "getAttributes", 2 }, .{ "getFileName", 0 }, .{ "__toString", 0 }, .{ "getExtension", 0 }, .{ "getExtensionName", 0 } }) |m| {
         try rconst_def.methods.put(a, m[0], .{ .name = m[0], .arity = m[1] });
     }
     try vm.classes.put(a, "ReflectionConstant", rconst_def);
@@ -194,6 +194,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionConstant::getValue", rconstGetValue);
     try vm.native_fns.put(a, "ReflectionConstant::getShortName", rconstGetShortName);
     try vm.native_fns.put(a, "ReflectionConstant::getNamespaceName", rconstGetNamespaceName);
+    try vm.native_fns.put(a, "ReflectionConstant::inNamespace", rconstInNamespace);
     try vm.native_fns.put(a, "ReflectionConstant::isDeprecated", rconstIsDeprecated);
     try vm.native_fns.put(a, "ReflectionConstant::getAttributes", rconstGetAttributes);
     try vm.native_fns.put(a, "ReflectionConstant::getFileName", rconstGetFileName);
@@ -441,6 +442,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rp_def.methods.put(a, "canBePassedByValue", .{ .name = "canBePassedByValue", .arity = 0 });
     try rp_def.methods.put(a, "hasType", .{ .name = "hasType", .arity = 0 });
     try rp_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
+    try rp_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rp_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
     try rp_def.methods.put(a, "getDeclaringFunction", .{ .name = "getDeclaringFunction", .arity = 0 });
     try rp_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
@@ -464,6 +466,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::canBePassedByValue", rpCanBePassedByValue);
     try vm.native_fns.put(a, "ReflectionParameter::hasType", rpHasType);
     try vm.native_fns.put(a, "ReflectionParameter::getAttributes", rpGetAttributes);
+    try vm.native_fns.put(a, "ReflectionParameter::getDocComment", rpGetDocComment);
     try vm.native_fns.put(a, "ReflectionParameter::getDeclaringClass", rpGetDeclaringClass);
     try vm.native_fns.put(a, "ReflectionParameter::getDeclaringFunction", rpGetDeclaringFunction);
     try vm.native_fns.put(a, "ReflectionParameter::isVariadic", rpIsVariadic);
@@ -591,6 +594,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rprop_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rprop_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
     try rprop_def.methods.put(a, "isVirtual", .{ .name = "isVirtual", .arity = 0 });
+    try rprop_def.methods.put(a, "isReadable", .{ .name = "isReadable", .arity = 2 });
+    try rprop_def.methods.put(a, "isWritable", .{ .name = "isWritable", .arity = 2 });
     // php8.4 asymmetric visibility methods
     try rprop_def.methods.put(a, "isPrivateSet", .{ .name = "isPrivateSet", .arity = 0 });
     try rprop_def.methods.put(a, "isProtectedSet", .{ .name = "isProtectedSet", .arity = 0 });
@@ -653,6 +658,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::getAttributes", rpropGetAttributes);
     try vm.native_fns.put(a, "ReflectionProperty::getDocComment", rpropGetDocComment);
     try vm.native_fns.put(a, "ReflectionProperty::isVirtual", rpropIsVirtual);
+    try vm.native_fns.put(a, "ReflectionProperty::isReadable", rpropIsReadable);
+    try vm.native_fns.put(a, "ReflectionProperty::isWritable", rpropIsWritable);
 
     var ra_def = ClassDef{ .name = "ReflectionAttribute" };
     try ra_def.constants.put(a, "IS_INSTANCEOF", .{ .int = 2 });
@@ -664,6 +671,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ra_def.methods.put(a, "newInstance", .{ .name = "newInstance", .arity = 0 });
     try ra_def.methods.put(a, "getTarget", .{ .name = "getTarget", .arity = 0 });
     try ra_def.methods.put(a, "isRepeated", .{ .name = "isRepeated", .arity = 0 });
+    try ra_def.methods.put(a, "inNamespace", .{ .name = "inNamespace", .arity = 0 });
+    try ra_def.methods.put(a, "getNamespaceName", .{ .name = "getNamespaceName", .arity = 0 });
+    try ra_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
     try vm.classes.put(a, "ReflectionAttribute", ra_def);
 
     try vm.native_fns.put(a, "ReflectionAttribute::__construct", raConstruct);
@@ -672,6 +682,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionAttribute::newInstance", raNewInstance);
     try vm.native_fns.put(a, "ReflectionAttribute::getTarget", raGetTarget);
     try vm.native_fns.put(a, "ReflectionAttribute::isRepeated", raIsRepeated);
+    try vm.native_fns.put(a, "ReflectionAttribute::inNamespace", raInNamespace);
+    try vm.native_fns.put(a, "ReflectionAttribute::getNamespaceName", raGetNamespaceName);
+    try vm.native_fns.put(a, "ReflectionAttribute::getShortName", raGetShortName);
 
     var rcc_def = ClassDef{ .name = "ReflectionClassConstant" };
     try rcc_def.interfaces.append(a, "Reflector");
@@ -3751,6 +3764,25 @@ fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     return buildAttributeArrayWithFlags(ctx, attrs, filter, 32, flags, class_name);
 }
 
+// php 8.6: the doc comment written with the parameter; an internal
+// function's parameters have none
+fn rpGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const position = this.get("__position");
+    if (position != .int or position.int < 0) return NativeResult.scalar(.{ .bool = false });
+    var key_buf: [512]u8 = undefined;
+    const func = if (this.get("__declaring_class") == .string and this.get("__method_name") == .string)
+        ctx.vm.functions.get(class_names.memberKey(&key_buf, this.get("__declaring_class").string.bytes(), this.get("__method_name").string.bytes()))
+    else if (this.get("__function") == .string)
+        ctx.vm.functions.get(this.get("__function").string.bytes())
+    else
+        null;
+    const f = func orelse return NativeResult.scalar(.{ .bool = false });
+    const index: usize = @intCast(position.int);
+    if (index >= f.param_docs.len or f.param_docs[index].len == 0) return NativeResult.scalar(.{ .bool = false });
+    return try NativeResult.copyString(ctx.allocator, f.param_docs[index]);
+}
+
 fn rpGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const declaring = this.get("__declaring_class");
@@ -5813,6 +5845,165 @@ fn rpropGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     return NativeResult.scalar(.{ .bool = false });
 }
 
+// what ReflectionProperty::isReadable() and isWritable() judge: the
+// property as the reflector describes it, or, given an object of a subclass,
+// the declaration the object's class has (reflection_property_get_effective_prop)
+const AccessProp = struct {
+    owner: []const u8,
+    vis: ClassDef.Visibility,
+    set_vis: ClassDef.Visibility,
+    readonly: bool,
+    static: bool,
+};
+
+const AccessCheck = struct {
+    scope: ?[]const u8,
+    object: ?*PhpObject,
+    prop: ?AccessProp,
+    name: []const u8,
+    // the class whose magic methods answer: the object's, or the reflected one
+    class: []const u8,
+};
+
+fn visibilityFromInt(v: Value, default: ClassDef.Visibility) ClassDef.Visibility {
+    return if (v == .int and v.int >= 0 and v.int <= 2) @enumFromInt(v.int) else default;
+}
+
+fn accessCheck(ctx: *NativeContext, args: []const Value, comptime label: []const u8) RuntimeError!?AccessCheck {
+    const this = getThis(ctx) orelse return null;
+    const scope_name = try zpp.strOrNull(ctx, label, args, 0, "scope");
+    const object = try zpp.optObject(ctx, label, args, 1, "object");
+    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return null;
+    const reflected = reflectedClass(this) orelse (if (this.get("class") == .string) this.get("class").string.bytes() else return null);
+    var prop: ?AccessProp = null;
+    if (this.get("__dynamic") != .bool) {
+        const vis = visibilityFromInt(this.get("__visibility"), .public);
+        const ro = this.get("__is_readonly");
+        const readonly = ro == .bool and ro.bool;
+        const has_set = this.get("__has_set_visibility");
+        const explicit_set = has_set == .bool and has_set.bool;
+        // a public readonly property is protected(set) unless it says otherwise
+        const set_vis = if (explicit_set) visibilityFromInt(this.get("__set_visibility"), vis) else if (readonly and vis == .public) .protected else visibilityFromInt(this.get("__set_visibility"), vis);
+        const st = this.get("__is_static");
+        const dc = this.get("__declaring_class");
+        prop = .{ .owner = if (dc == .string) dc.string.bytes() else reflected, .vis = vis, .set_vis = set_vis, .readonly = readonly, .static = st == .bool and st.bool };
+    }
+    if (prop) |declared| if (object) |obj| {
+        if (declared.static) return throwReflection(ctx, "null is expected as object argument for static properties");
+        if (!ctx.vm.isInstanceOf(obj.class_name, declared.owner))
+            return throwReflection(ctx, "Given object is not an instance of the class this property was declared in");
+        if (!std.ascii.eqlIgnoreCase(reflected, obj.class_name) and declared.vis != .private) {
+            const decl = ctx.vm.propertyDeclaration(obj.class_name, name);
+            prop = if (decl.declared) .{ .owner = decl.defining_class, .vis = decl.visibility, .set_vis = decl.set_visibility, .readonly = decl.is_readonly, .static = false } else null;
+        }
+    };
+    return .{ .scope = scope_name, .object = object, .prop = prop, .name = name, .class = if (object) |o| o.class_name else reflected };
+}
+
+// the scope argument, a class that must exist (get_ce_from_scope_name)
+fn accessScope(ctx: *NativeContext, scope_name: ?[]const u8) RuntimeError!?[]const u8 {
+    const raw = scope_name orelse return null;
+    if (try lookupClass(ctx, raw)) |found| return found;
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" not found", .{raw});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("Error", msg);
+    return error.RuntimeError;
+}
+
+// php's check_visibility for reflection: a protected member is visible from a
+// class related to its declaring one either way
+fn accessVisible(vm: *VM, vis: ClassDef.Visibility, owner: []const u8, scope: ?[]const u8) bool {
+    if (vis == .public) return true;
+    const from = scope orelse return false;
+    if (std.ascii.eqlIgnoreCase(from, owner)) return true;
+    if (vis == .private) return false;
+    return vm.isInstanceOf(from, owner) or vm.isInstanceOf(owner, from);
+}
+
+// the declared property's slot holds a value: false when it is
+// uninitialized, null when it was unset (magic methods answer for it then)
+fn accessSlotSet(ctx: *NativeContext, obj_in: *PhpObject, owner: []const u8, name: []const u8) RuntimeError!?bool {
+    const vm = ctx.vm;
+    const decl = vm.propertyDeclaration(obj_in.class_name, name);
+    const slot_scope = privateScopeFor(vm, obj_in.class_name, name, owner) orelse decl.defining_class;
+    try vm.triggerLazyProperty(obj_in, name, slot_scope);
+    const obj = obj_in.storage();
+    if (obj.isUnset(name)) return null;
+    const val = obj.rawForScope(name, slot_scope);
+    if (val == .undef) return false;
+    return !(val == .null and vm.typedPropForbidsNull(decl.type_str));
+}
+
+// the property has the hook, its own or inherited (hasPropHook also answers
+// yes for a get on a write-only virtual property, which reads refuse)
+fn accessHasHook(vm: *VM, class_name: []const u8, prop_name: []const u8, comptime kind: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const method = std.fmt.bufPrint(&buf, "{s}$hook_" ++ kind, .{prop_name}) catch return false;
+    const cls = vm.classes.getPtr(class_name) orelse return false;
+    return vm.resolvePropertyHook(cls, method) != null;
+}
+
+fn accessMagicGet(ctx: *NativeContext, check: AccessCheck) RuntimeError!NativeResult {
+    if (ctx.vm.hasMethod(check.class, "__get")) {
+        if (check.object) |obj| if (ctx.vm.magicApplies(obj, check.name, .isset)) {
+            const answer = try ctx.vm.callMagicProperty(obj, .isset, check.name, .null);
+            defer ctx.vm.releaseValue(answer);
+            return NativeResult.scalar(.{ .bool = answer.isTruthy() });
+        };
+        return NativeResult.scalar(.{ .bool = true });
+    }
+    return NativeResult.scalar(.{ .bool = false });
+}
+
+fn rpropIsReadable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const check = (try accessCheck(ctx, args, "ReflectionProperty::isReadable")) orelse return NativeResult.scalar(.{ .bool = false });
+    const prop = check.prop orelse {
+        if (check.object) |obj| if (obj.storage().properties.contains(check.name) and !obj.storage().isUnset(check.name)) return NativeResult.scalar(.{ .bool = true });
+        return accessMagicGet(ctx, check);
+    };
+    const scope = try accessScope(ctx, check.scope);
+    if (!accessVisible(ctx.vm, prop.vis, prop.owner, scope)) {
+        if (!prop.static) return accessMagicGet(ctx, check);
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (prop.static) {
+        const v = (try staticPropertyRaw(ctx, check.class, check.name)) orelse .undef;
+        return NativeResult.scalar(.{ .bool = v != .undef });
+    }
+    const has_get = accessHasHook(ctx.vm, check.class, check.name, "get");
+    if (ctx.vm.propertyIsVirtual(prop.owner, check.name)) return NativeResult.scalar(.{ .bool = has_get });
+    if (check.object) |obj| if (!has_get) {
+        const set = (try accessSlotSet(ctx, obj, prop.owner, check.name)) orelse return accessMagicGet(ctx, check);
+        return NativeResult.scalar(.{ .bool = set });
+    };
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn rpropIsWritable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const check = (try accessCheck(ctx, args, "ReflectionProperty::isWritable")) orelse return NativeResult.scalar(.{ .bool = false });
+    const magic_set = NativeResult.scalar(.{ .bool = ctx.vm.hasMethod(check.class, "__set") });
+    const prop = check.prop orelse {
+        const cls = ctx.vm.classes.get(check.class);
+        if (cls == null or !(cls.?.is_readonly or cls.?.no_dynamic_properties)) return NativeResult.scalar(.{ .bool = true });
+        return magic_set;
+    };
+    const scope = try accessScope(ctx, check.scope);
+    if (!accessVisible(ctx.vm, prop.vis, prop.owner, scope)) {
+        if (!prop.static) return magic_set;
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (!accessVisible(ctx.vm, prop.set_vis, prop.owner, scope)) return NativeResult.scalar(.{ .bool = false });
+    if (!prop.static and ctx.vm.propertyIsVirtual(prop.owner, check.name)) {
+        return NativeResult.scalar(.{ .bool = accessHasHook(ctx.vm, check.class, check.name, "set") });
+    }
+    if (prop.readonly) if (check.object) |obj| {
+        if ((try accessSlotSet(ctx, obj, prop.owner, check.name)) orelse false) {
+            if (!ctx.vm.readonlyReinitable(obj.storage(), check.name)) return NativeResult.scalar(.{ .bool = false });
+        }
+    };
+    return NativeResult.scalar(.{ .bool = true });
+}
+
 fn rpropIsVirtual(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const dc = this.get("__declaring_class");
@@ -6171,6 +6362,29 @@ fn raConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 fn raGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     return NativeResult.share(this.get("name"));
+}
+
+// php 8.6: the attribute's name split at its last backslash
+fn raInNamespace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const name = this.get("name");
+    return NativeResult.scalar(.{ .bool = name == .string and std.mem.lastIndexOfScalar(u8, name.string.bytes(), '\\') != null });
+}
+
+fn raGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.literal("");
+    const name = this.get("name");
+    if (name != .string) return NativeResult.literal("");
+    const pos = std.mem.lastIndexOfScalar(u8, name.string.bytes(), '\\') orelse return NativeResult.literal("");
+    return try NativeResult.copyString(ctx.allocator, name.string.bytes()[0..pos]);
+}
+
+fn raGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.literal("");
+    const name = this.get("name");
+    if (name != .string) return NativeResult.literal("");
+    const pos = std.mem.lastIndexOfScalar(u8, name.string.bytes(), '\\') orelse return NativeResult.shareString(name.string);
+    return try NativeResult.copyString(ctx.allocator, name.string.bytes()[pos + 1 ..]);
 }
 
 fn raGetArguments(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -6990,6 +7204,12 @@ fn rconstGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     const name = name_v.string.bytes();
     const pos = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return NativeResult.shareString(name_v.string);
     return try NativeResult.copyString(ctx.allocator, name[pos + 1 ..]);
+}
+
+fn rconstInNamespace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const name_v = constName(this);
+    return NativeResult.scalar(.{ .bool = name_v == .string and std.mem.lastIndexOfScalar(u8, name_v.string.bytes(), '\\') != null });
 }
 
 fn rconstGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
