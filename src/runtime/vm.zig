@@ -22235,12 +22235,17 @@ pub const VM = struct {
         }
     }
 
+    // an interface's own parents come before it: php 8.6's
+    // do_interface_implementation inherits them first, so their checks run
+    // first ("cannot implement interface UnitEnum" for a BackedEnum)
     fn collectInterface(self: *VM, all: *std.ArrayListUnmanaged([]const u8), name: []const u8) !void {
         for (all.items) |seen| if (std.ascii.eqlIgnoreCase(seen, name)) return;
+        if (self.interfaces.getPtr(name)) |idef| {
+            for (idef.parents.items) |p| try self.collectInterface(all, p);
+            if (idef.parent) |p| try self.collectInterface(all, p);
+        }
+        for (all.items) |seen| if (std.ascii.eqlIgnoreCase(seen, name)) return;
         try all.append(self.allocator, name);
-        const idef = self.interfaces.get(name) orelse return;
-        for (idef.parents.items) |p| try self.collectInterface(all, p);
-        if (idef.parent) |p| try self.collectInterface(all, p);
     }
 
     // whether a class being declared extends the named class
