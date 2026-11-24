@@ -1231,22 +1231,21 @@ fn cachingNext(ctx: *NativeContext, d: Dual) RuntimeError!void {
         }
         if (d.kind() == DIT.recursive_caching) {
             const inner = d.get(D_INNER).object;
-            const catch_child = d.int(D_CFLAGS) & CIT_CATCH_GET_CHILD != 0;
             const has = try callOn(ctx, inner, "hasChildren", &.{});
             if (pending(ctx)) {
-                if (!catch_child) return;
+                if (!canCatch(ctx, d.int(D_CFLAGS))) return;
                 ctx.vm.discardPending();
             } else if (has.isTruthy()) {
                 const children = try callOn(ctx, inner, "getChildren", &.{});
                 if (pending(ctx)) {
-                    if (!catch_child) return;
+                    if (!canCatch(ctx, d.int(D_CFLAGS))) return;
                     ctx.vm.discardPending();
                 } else {
                     VM.retainValue(children);
                     defer ctx.vm.releaseValue(children);
                     const r = try construct(ctx, "RecursiveCachingIterator", &.{ children, .{ .int = d.int(D_CFLAGS) & CIT_PUBLIC } });
                     if (r == .undef) {
-                        if (!catch_child) return;
+                        if (!canCatch(ctx, d.int(D_CFLAGS))) return;
                         ctx.vm.discardPending();
                     } else {
                         try d.put(ctx, D_CHILDREN, r);
@@ -1827,10 +1826,18 @@ fn recValid(ctx: *NativeContext, r: Rec) RuntimeError!bool {
     return false;
 }
 
+// spl_can_catch_exception: CATCH_GET_CHILD swallows an exception, but never
+// the graceful exit that destroys a suspended fiber (php 8.5.13)
+fn canCatch(ctx: *NativeContext, flags: i64) bool {
+    if (flags & CIT_CATCH_GET_CHILD == 0) return false;
+    const ex = ctx.vm.pending_exception orelse return true;
+    return !ctx.vm.isUnwindMarker(ex);
+}
+
 // RIT_CATCH_GET_CHILD swallows an exception; false when php returns
 fn caught(ctx: *NativeContext, r: Rec) bool {
     if (!pending(ctx)) return true;
-    if (r.int(R_FLAGS) & RIT_CATCH_GET_CHILD == 0) return false;
+    if (!canCatch(ctx, r.int(R_FLAGS))) return false;
     ctx.vm.discardPending();
     return true;
 }
@@ -1850,7 +1857,7 @@ fn recMoveForward(ctx: *NativeContext, r: Rec) RuntimeError!void {
             RS_NEXT => {
                 try r.iter(lvl).next(ctx);
                 if (pending(ctx)) {
-                    if (r.int(R_FLAGS) & RIT_CATCH_GET_CHILD == 0) return;
+                    if (!canCatch(ctx, r.int(R_FLAGS))) return;
                     ctx.vm.discardPending();
                 }
                 if (r.levels() == null) return;
@@ -1880,7 +1887,7 @@ fn recMoveForward(ctx: *NativeContext, r: Rec) RuntimeError!void {
                     break :blk if (z == .object) try callOn(ctx, z.object, "hasChildren", &.{}) else Value.undef;
                 };
                 if (pending(ctx)) {
-                    if (r.int(R_FLAGS) & RIT_CATCH_GET_CHILD == 0) {
+                    if (!canCatch(ctx, r.int(R_FLAGS))) {
                         try r.setState(ctx, lvl, RS_NEXT);
                         return;
                     }
@@ -1903,7 +1910,7 @@ fn recMoveForward(ctx: *NativeContext, r: Rec) RuntimeError!void {
                 }
                 if (r.hook(H_NEXT_ELEMENT)) _ = try callHook(ctx, r, "nextElement");
                 try r.setState(ctx, lvl, RS_NEXT);
-                if (pending(ctx) and r.int(R_FLAGS) & RIT_CATCH_GET_CHILD != 0) ctx.vm.discardPending();
+                if (pending(ctx) and canCatch(ctx, r.int(R_FLAGS))) ctx.vm.discardPending();
                 return;
             },
             RS_SELF => {
@@ -1921,7 +1928,7 @@ fn recMoveForward(ctx: *NativeContext, r: Rec) RuntimeError!void {
                     break :blk if (z == .object) try callOn(ctx, z.object, "getChildren", &.{}) else Value.undef;
                 };
                 if (pending(ctx)) {
-                    if (r.int(R_FLAGS) & RIT_CATCH_GET_CHILD == 0) return;
+                    if (!canCatch(ctx, r.int(R_FLAGS))) return;
                     ctx.vm.discardPending();
                     try r.setState(ctx, lvl, RS_NEXT);
                     continue :state RS_NEXT;
