@@ -779,16 +779,29 @@ fn socketError(err: anyerror) SocketError {
 // the host and port of a tcp target as php's parse_ip_address_ex reads
 // them: "[v6]:port" or "host:port", the port as atoi takes it
 fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
-    var scheme: []const u8 = "tcp";
-    var rest = target;
-    if (std.mem.indexOf(u8, target, "://")) |idx| {
-        scheme = target[0..idx];
-        rest = target[idx + 3 ..];
-    }
+    const scheme, const rest = splitScheme(target);
     if (std.ascii.eqlIgnoreCase(scheme, "unix")) return .{ .unix = rest };
     if (std.ascii.eqlIgnoreCase(scheme, "udg")) return .{ .udg = rest };
     const udp = std.ascii.eqlIgnoreCase(scheme, "udp");
     if (!udp and !std.ascii.eqlIgnoreCase(scheme, "tcp")) return error.UnsupportedTransport;
+    const hp = try splitHostPort(rest);
+    const addr = net.Address.parseIp(hp.host, hp.port) catch resolved: {
+        const list = try net.getAddressList(allocator, hp.host, hp.port);
+        defer list.deinit();
+        if (list.addrs.len == 0) return error.UnknownHostName;
+        break :resolved list.addrs[0];
+    };
+    return if (udp) .{ .udp = addr } else .{ .tcp = addr };
+}
+
+fn splitScheme(target: []const u8) struct { []const u8, []const u8 } {
+    if (std.mem.indexOf(u8, target, "://")) |idx| return .{ target[0..idx], target[idx + 3 ..] };
+    return .{ "tcp", target };
+}
+
+const HostPort = struct { host: []const u8, port: u16 };
+
+fn splitHostPort(rest: []const u8) !HostPort {
     if (std.mem.indexOfScalar(u8, rest, 0) != null) return error.NulInHostname;
     var host: []const u8 = undefined;
     var port_text: []const u8 = undefined;
@@ -804,14 +817,36 @@ fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
         host = rest[0..c];
         port_text = rest[c + 1 ..];
     }
-    const port: u16 = @truncate(@as(u64, @bitCast(atoi(port_text))));
-    const addr = net.Address.parseIp(host, port) catch resolved: {
-        const list = try net.getAddressList(allocator, host, port);
-        defer list.deinit();
-        if (list.addrs.len == 0) return error.UnknownHostName;
-        break :resolved list.addrs[0];
-    };
-    return if (udp) .{ .udp = addr } else .{ .tcp = addr };
+    return .{ .host = host, .port = @truncate(@as(u64, @bitCast(atoi(port_text)))) };
+}
+
+// php_network_connect_socket_to_host: a client tries a host name at each
+// address it resolves to, in order, until one connects, within what is
+// left of the timeout; the last failure is the one reported
+fn connectTarget(allocator: std.mem.Allocator, endpoint: Endpoint, target: []const u8, timeout_ms: ?i32, async_connect: bool) anyerror!std.posix.socket_t {
+    const first = try endpointAddress(endpoint);
+    if (endpoint == .unix or endpoint == .udg) return connectEndpoint(endpoint, first, timeout_ms, async_connect);
+    const hp = splitHostPort(splitScheme(target)[1]) catch return connectEndpoint(endpoint, first, timeout_ms, async_connect);
+    if (net.Address.parseIp(hp.host, hp.port)) |_| {
+        return connectEndpoint(endpoint, first, timeout_ms, async_connect);
+    } else |_| {}
+    const list = try net.getAddressList(allocator, hp.host, hp.port);
+    defer list.deinit();
+    const started = platform.monotonicNanos();
+    var last: anyerror = error.UnknownHostName;
+    for (list.addrs) |addr| {
+        var left = timeout_ms;
+        if (timeout_ms) |total| {
+            const spent: i64 = @intCast(@divTrunc(platform.monotonicNanos() - started, std.time.ns_per_ms));
+            if (spent >= total) return error.ConnectionTimedOut;
+            left = @intCast(total - spent);
+        }
+        return connectEndpoint(endpoint, addr, left, async_connect) catch |err| {
+            last = err;
+            continue;
+        };
+    }
+    return last;
 }
 
 fn atoi(s: []const u8) i64 {
@@ -916,11 +951,11 @@ pub fn connectTransport(ctx: *NativeContext, target: []const u8, timeout_s: f64,
         try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
         return null;
     };
-    const addr = endpointAddress(endpoint) catch |err| {
+    _ = endpointAddress(endpoint) catch |err| {
         try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
         return null;
     };
-    const sock = connectEndpoint(endpoint, addr, timeout_ms, false) catch |err| {
+    const sock = connectTarget(ctx.allocator, endpoint, target, timeout_ms, false) catch |err| {
         // php made the stream before the connect failed
         ctx.vm.skipResourceId();
         try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
@@ -1057,8 +1092,8 @@ fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, ta
     // handler (and its backtrace) sees 0 and ''
     try reportSocketError(ctx, args, code_index, null);
     const endpoint = try fitUnixPath(ctx, parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, code_index, func, target, err), func);
-    const addr = endpointAddress(endpoint) catch |err| return failConnect(ctx, args, code_index, func, target, err);
-    const sock = connectEndpoint(endpoint, addr, timeoutMs(ctx, timeout), async_connect) catch |err| return failConnect(ctx, args, code_index, func, target, err);
+    _ = endpointAddress(endpoint) catch |err| return failConnect(ctx, args, code_index, func, target, err);
+    const sock = connectTarget(ctx.allocator, endpoint, target, timeoutMs(ctx, timeout), async_connect) catch |err| return failConnect(ctx, args, code_index, func, target, err);
     try reportSocketError(ctx, args, code_index, null);
     return NativeResult.borrowed(.{ .resource = try endpointStream(ctx, sock, endpoint, !async_connect, target) });
 }
