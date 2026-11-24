@@ -254,7 +254,12 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         defer text.release(ctx);
         // php_curl_option_str
         if (std.mem.indexOfScalar(u8, text.bytes, 0) != null) {
-            try ctx.vm.setPendingException("ValueError", "curl_setopt(): cURL option must not contain any null bytes");
+            // php 8.6 names the option (php_curl_option_get_name)
+            const opt = c.curl_easy_option_by_id(@intCast(option));
+            const name: []const u8 = if (opt != null and opt.*.name != null) std.mem.span(opt.*.name) else "UNKNOWN_OPTION";
+            const msg = try std.fmt.allocPrint(ctx.allocator, "curl_setopt(): cURL option CURLOPT_{s} must not contain any null bytes", .{name});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("ValueError", msg);
             return error.RuntimeError;
         }
         const z = try dupeZ(ctx, text.bytes);
