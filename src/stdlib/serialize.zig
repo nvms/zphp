@@ -1565,8 +1565,14 @@ fn readEnum(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, start:
     const enum_name = str[0..colon];
     const case_name = str[colon + 1 ..];
     if (!validClassName(enum_name)) return false;
+    // the autoloader and the case's value expression run under
+    // serialize_lock, so an unserialize() they make doesn't share this
+    // call's table (php 8.5.13)
     if (!ctx.vm.classes.contains(enum_name)) {
-        ctx.vm.tryAutoload(enum_name) catch |err| if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
+        serialize_lock += 1;
+        const autoloaded = ctx.vm.tryAutoload(enum_name);
+        serialize_lock -= 1;
+        autoloaded catch |err| if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
         if (ctx.vm.pending_exception != null) return false;
     }
     const cls = ctx.vm.classes.get(enum_name) orelse {
@@ -1583,6 +1589,13 @@ fn readEnum(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, start:
         try docref(ctx, e_warning, "Undefined constant {s}::{s}", .{ declared, case_name });
         return false;
     };
+    if (cls.enum_values_pending) {
+        serialize_lock += 1;
+        const resolved = ctx.vm.resolveEnumCaseValues(enum_name);
+        serialize_lock -= 1;
+        resolved catch |err| if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
+        if (ctx.vm.pending_exception != null) return false;
+    }
     const v = ctx.vm.enumCase(constant);
     if (v != .object) {
         try docref(ctx, e_warning, "{s}::{s} is not an enum case", .{ declared, case_name });
