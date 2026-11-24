@@ -351,7 +351,8 @@ fn checkHookAttributes(self: *Compiler, attrs: []const ParsedAttr, at: u32) Erro
 // the validators php runs for an internal attribute on a class
 fn validateClassAttribute(self: *Compiler, attribute: []const u8, class: @FieldType(AttrTarget, "class"), at: u32) Error!void {
     const kind = classAttributeRefusal(attribute, class.kind, class.modifiers & 1 != 0, class.modifiers & 4 != 0) orelse return;
-    const shown = class.name;
+    // the attribute validators still format the class with %s
+    const shown = class_names.display(class.name);
     return self.failFmt(at, "Cannot apply #[\\{s}] to {s} {s}", .{ attribute, kind, shown });
 }
 

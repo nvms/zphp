@@ -241,7 +241,7 @@ fn native_inflate_init(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     const options = try optionsArg(p, 1);
     const window = optionLong(options, "window", 15);
     if (window < 8 or window > 15) return throwFmt(ctx, "ValueError", "zlib window size (logarithm) ({d}) must be within 8..15", .{window});
-    if (!validEncoding(encoding)) return throwFmt(ctx, "ValueError", "Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE", .{});
+    if (!validEncoding(encoding)) return throwFmt(ctx, "ValueError", "inflate_init(): Argument #1 ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE", .{});
     const dict = try dictionaryOption(ctx, func, options);
 
     const made = try newContext(ctx, inflate_class, false);

@@ -1857,7 +1857,7 @@ fn native_convert_uudecode(ctx: *NativeContext, args: []const Value) RuntimeErro
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(ctx.allocator);
     if (!try uudecode(ctx.allocator, s, &out)) {
-        try docref(ctx, "convert_uudecode", "Argument #1 ($data) is not a valid uuencoded string");
+        try docref(ctx, "convert_uudecode", "Argument #1 ($string) is not a valid uuencoded string");
         return NativeResult.scalar(.{ .bool = false });
     }
     return NativeResult.copyString(ctx.allocator, out.items);

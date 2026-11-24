@@ -3181,7 +3181,7 @@ fn rcSetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeErr
     try ctx.vm.resolveClassDefaults(class_name);
     const found = visiblePropertyDef(ctx.vm, class_name, prop_name);
     if (found == null or !found.?.is_static) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Class {s} does not have a property named {s}", .{ class_name, prop_name });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name });
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
     }
@@ -3345,7 +3345,7 @@ fn rmGetPrototype(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const name = methodLookupName(this) orelse return NativeResult.scalar(.null);
     const proto = methodPrototype(ctx, this) orelse {
         const ce = reflectedClass(this) orelse "";
-        return throwReflectionFmt(ctx, "Method {s}::{s} does not have a prototype", .{ ce, name });
+        return throwReflectionFmt(ctx, "Method {s}::{s}() does not have a prototype", .{ ce, name });
     };
     const obj = try ctx.createObject("ReflectionMethod");
     var buf: [256]u8 = undefined;
@@ -5310,14 +5310,14 @@ fn effectiveProperty(vm: *VM, this: *PhpObject, object: ?*PhpObject) ?EffectiveP
 fn checkLazyCompatible(ctx: *NativeContext, this: *PhpObject, method: []const u8, object: ?*PhpObject) RuntimeError!void {
     const name = if (this.get("name") == .string) this.get("name").string.bytes() else "";
     const effective = effectiveProperty(ctx.vm, this, object) orelse {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Can not use {s} on dynamic property {s}::${s}", .{ method, reflectedClass(this) orelse "", name });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot use {s}() on dynamic property {s}::${s}", .{ method, reflectedClass(this) orelse "", name });
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
     };
     const dc = effective.declaring;
     const kind: ?[]const u8 = if (effective.is_static) "static" else if (propertyIsVirtual(ctx.vm, dc, name)) "virtual" else null;
     if (kind) |k| {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Can not use {s} on {s} property {s}::${s}", .{ method, k, dc, name });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot use {s}() on {s} property {s}::${s}", .{ method, k, dc, name });
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
     }
