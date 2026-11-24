@@ -513,9 +513,9 @@ jobs:
           use-cache: false
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.5'
-          # the latest patch release, not one the runner already has
-          update: true
+          # the target release exactly (src/php_version.zig): on windows
+          # update: true keeps the runner's preinstalled patch release
+          php-version: '8.5.13'
           coverage: none
           extensions: mbstring, xml, curl, openssl, sqlite3, pdo_sqlite, intl, gmp, gd, sodium, bcmath, ldap
       - name: build
