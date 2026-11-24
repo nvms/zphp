@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         intl ldap mbstring mysqli pcntl pdo_mysql pdo_pgsql pgsql shmop soap sockets \
         sysvmsg sysvsem sysvshm xsl zip \
     && rm -rf /var/lib/apt/lists/*
+# what the host's php sees: /etc/services and protocols, and the en_*
+# locales ubuntu installs
+RUN apt-get update && apt-get install -y --no-install-recommends locales netbase \
+    && sed -i 's/^# *\(en_[A-Z][A-Z]\(\.UTF-8\)\? \)/\1/' /etc/locale.gen && locale-gen \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
 # the ini the other references run with: php.ini-production plus setup-php's
 # memory_limit and date.timezone
