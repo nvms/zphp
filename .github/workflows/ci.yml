@@ -213,6 +213,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
       - run: zig build
       - run: php --version
@@ -243,6 +245,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
       - run: zig build
       - run: ./tests/examples_test
@@ -270,6 +274,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
           extensions: mbstring, xml, sqlite3, curl, tokenizer
       - run: zig build
@@ -300,6 +306,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
           extensions: dom, mbstring, xml
       - run: zig build
@@ -330,6 +338,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
           extensions: mbstring, xml, curl, openssl
       - run: zig build
@@ -360,6 +370,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
       - run: zig build -Doptimize=fast
       - run: ./tests/phpt/setup
@@ -389,6 +401,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
           extensions: mbstring, xml, sqlite3
       - run: zig build
@@ -418,6 +432,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
           extensions: mbstring, xml, intl
       - run: zig build
@@ -448,6 +464,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
           extensions: mbstring, xml, sqlite3, curl, tokenizer, gd, intl, zip
       - run: zig build
@@ -496,6 +514,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
           extensions: mbstring, xml, curl, openssl, sqlite3, pdo_sqlite, intl, gmp, gd, sodium, bcmath, ldap
       - name: build
@@ -565,6 +585,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          # the latest patch release, not one the runner already has
+          update: true
           coverage: none
           extensions: mbstring, xml, sqlite3, curl, tokenizer
       - run: zig build
