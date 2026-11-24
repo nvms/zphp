@@ -877,10 +877,10 @@ pub const NativeInvocation = struct {
 
 // one message of a date parse, keyed by its byte position like php's arrays.
 // messages are static strings
-pub const DtMsg = struct { pos: u32 = 0, msg: []const u8 = "" };
+pub const DtMsg = struct { pos: i64 = 0, msg: []const u8 = "" };
 
 // the messages are the date parser's static texts; timelib keeps at most
-// 1000 of each kind
+// 16 of each kind plus a "There are more than 16 ..." one at position -1
 pub const DtLastErrors = struct {
     set: bool = false,
     warning_count: u32 = 0,
@@ -896,14 +896,14 @@ pub const DtLastErrors = struct {
         self.errors.clearRetainingCapacity();
     }
 
-    pub fn addWarning(self: *DtLastErrors, a: Allocator, pos: usize, msg: []const u8) !void {
+    pub fn addWarning(self: *DtLastErrors, a: Allocator, pos: i64, msg: []const u8) !void {
         self.warning_count += 1;
-        try self.warnings.append(a, .{ .pos = @intCast(@min(pos, std.math.maxInt(u32))), .msg = msg });
+        try self.warnings.append(a, .{ .pos = pos, .msg = msg });
     }
 
-    pub fn addError(self: *DtLastErrors, a: Allocator, pos: usize, msg: []const u8) !void {
+    pub fn addError(self: *DtLastErrors, a: Allocator, pos: i64, msg: []const u8) !void {
         self.error_count += 1;
-        try self.errors.append(a, .{ .pos = @intCast(@min(pos, std.math.maxInt(u32))), .msg = msg });
+        try self.errors.append(a, .{ .pos = pos, .msg = msg });
     }
 
     pub fn deinit(self: *DtLastErrors, a: Allocator) void {

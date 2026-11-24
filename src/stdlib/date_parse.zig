@@ -820,7 +820,7 @@ fn nfaMatch(m: *const Machine, buf: []const u8, start: usize) !Match {
 
 // ---- parsed time ----
 
-pub const Msg = struct { pos: usize, char: u8, msg: []const u8 };
+pub const Msg = struct { pos: i64, char: u8, msg: []const u8 };
 
 pub const Rel = struct {
     y: i64 = 0,
@@ -1250,13 +1250,13 @@ const Scanner = struct {
     db: TzDb,
 
     fn addError(s: *Scanner, msg: []const u8) !void {
-        if (s.p.errors.items.len >= max_errors) return;
-        try s.p.errors.append(s.a, .{ .pos = s.tok, .char = s.buf[s.tok], .msg = msg });
+        if (!try capMessages(s.a, &s.p.errors, too_many_errors)) return;
+        try s.p.errors.append(s.a, .{ .pos = @intCast(s.tok), .char = s.buf[s.tok], .msg = msg });
     }
 
     fn addWarning(s: *Scanner, msg: []const u8) !void {
-        if (s.p.warnings.items.len >= max_errors) return;
-        try s.p.warnings.append(s.a, .{ .pos = s.tok, .char = s.buf[s.tok], .msg = msg });
+        if (!try capMessages(s.a, &s.p.warnings, too_many_warnings)) return;
+        try s.p.warnings.append(s.a, .{ .pos = @intCast(s.tok), .char = s.buf[s.tok], .msg = msg });
     }
 
     fn haveTime(s: *Scanner) !bool {
@@ -1904,8 +1904,17 @@ fn isTrimSpace(c: u8) bool {
 
 // timelib_strtotime: scan a date string into fields, a zone, and a relative
 // part. errors and warnings carry the byte position in the trimmed string
-// timelib stops recording errors and warnings past this many of each
-const max_errors = 1000;
+// timelib 2026.03 keeps 16 messages of a kind; the 17th becomes a note at
+// position -1 and the rest are dropped
+const max_errors = 16;
+const too_many_errors = "There are more than 16 errors, which are not returned";
+const too_many_warnings = "There are more than 16 warnings, which are not returned";
+
+// false when the message is dropped
+fn capMessages(a: Allocator, list: *std.ArrayListUnmanaged(Msg), note: []const u8) !bool {
+    if (list.items.len == max_errors) try list.append(a, .{ .pos = -1, .char = 0, .msg = note });
+    return list.items.len < max_errors;
+}
 
 pub fn parse(a: Allocator, input: []const u8, db: TzDb) !Parsed {
     var out = Parsed{};
@@ -2100,12 +2109,12 @@ pub fn parseFromFormat(a: Allocator, format: []const u8, input: []const u8, db: 
 
     const at = struct {
         fn err(o: *Parsed, al: Allocator, in: *const Ptr, pos: usize, msg: []const u8) !void {
-            if (o.errors.items.len >= max_errors) return;
-            try o.errors.append(al, .{ .pos = pos, .char = if (pos < in.s.len) in.s[pos] else 0, .msg = msg });
+            if (!try capMessages(al, &o.errors, too_many_errors)) return;
+            try o.errors.append(al, .{ .pos = @intCast(pos), .char = if (pos < in.s.len) in.s[pos] else 0, .msg = msg });
         }
         fn warn(o: *Parsed, al: Allocator, in: *const Ptr, pos: usize, msg: []const u8) !void {
-            if (o.warnings.items.len >= max_errors) return;
-            try o.warnings.append(al, .{ .pos = pos, .char = if (pos < in.s.len) in.s[pos] else 0, .msg = msg });
+            if (!try capMessages(al, &o.warnings, too_many_warnings)) return;
+            try o.warnings.append(al, .{ .pos = @intCast(pos), .char = if (pos < in.s.len) in.s[pos] else 0, .msg = msg });
         }
     };
 
@@ -2845,7 +2854,7 @@ test "scanner fields" {
     try std.testing.expectEqual(ZONETYPE_ID, p.time.zone_type);
     try std.testing.expectEqualStrings("Europe/Paris", p.time.id().?);
     try std.testing.expectEqual(@as(usize, 1), p.warnings.items.len);
-    try std.testing.expectEqual(@as(usize, 35), p.warnings.items[0].pos);
+    try std.testing.expectEqual(@as(i64, 35), p.warnings.items[0].pos);
 
     var q = try parse(a, "2024", db);
     defer q.deinit(a);
@@ -2862,7 +2871,7 @@ test "scanner fields" {
     defer e.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), e.errors.items.len);
     try std.testing.expectEqual(@as(usize, 1), e.warnings.items.len);
-    try std.testing.expectEqual(@as(usize, 4), e.warnings.items[0].pos);
+    try std.testing.expectEqual(@as(i64, 4), e.warnings.items[0].pos);
 }
 
 test "dfa and nfa agree on the longest match" {
@@ -2942,7 +2951,9 @@ fn diffDays(one: *const Time, two: *const Time) i64 {
         return days;
     }
     const delta: f64 = @floatFromInt(one.sse -% two.sse);
-    return toInt(@abs(delta / 86400.0));
+    // timelib 2026.03 caps the days at INT_MAX
+    const ddays = @abs(delta / 86400.0);
+    return if (ddays <= std.math.maxInt(i32)) toInt(ddays) else std.math.maxInt(i32);
 }
 
 fn rangeLimitDaysRelative(base_y: *i64, base_m: *i64, m: *i64, d: *i64, invert: bool) void {
