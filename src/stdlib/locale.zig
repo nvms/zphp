@@ -226,6 +226,14 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     var names = std.ArrayListUnmanaged(?[]const u8).empty;
     defer names.deinit(ctx.allocator);
     for (args[1..], 2..) |arg, position| {
+        // php 8.6 takes an array only as the first locale, and then alone
+        if (arg == .array and position != 2) return wrongType(ctx, position, arg);
+        if (arg == .array and args.len > 2) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "setlocale() expects exactly 2 arguments when argument #2 ($locales) is an array, {d} given", .{args.len});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("ArgumentCountError", msg);
+            return error.RuntimeError;
+        }
         const name: ?[]const u8 = switch (arg) {
             .array => null,
             .null, .undef => "",
@@ -234,6 +242,13 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             .int, .float, .bool => if (ctx.vm.currentStrictTypes()) return wrongType(ctx, position, arg) else try strings.coerceToString(ctx, arg),
             .object => |o| if (ctx.vm.hasMethod(o.class_name, "__toString")) try ctx.vm.objectToString(o) else return wrongType(ctx, position, arg),
             else => return wrongType(ctx, position, arg),
+        };
+        // a locale name is a path string: no NUL bytes (php 8.6)
+        if (name) |n| if (std.mem.indexOfScalar(u8, n, 0) != null) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "setlocale(): Argument #{d}{s} must not contain any null bytes", .{ position, if (position == 2) " ($locales)" else "" });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("ValueError", msg);
+            return error.RuntimeError;
         };
         try names.append(ctx.allocator, name);
     }
@@ -249,6 +264,10 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
                 else => try strings.coerceToString(ctx, entry.value),
             };
             if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            if (std.mem.indexOfScalar(u8, loc, 0) != null) {
+                try ctx.vm.setPendingException("ValueError", "setlocale(): Argument #2 ($locales) must not contain any null bytes");
+                return error.RuntimeError;
+            }
             if (try trySetlocale(ctx, category, loc)) |result| return NativeResult.copyString(ctx.allocator, result);
         }
     }
@@ -258,7 +277,9 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 fn wrongType(ctx: *NativeContext, position: usize, arg: Value) RuntimeError!NativeResult {
     // a variadic argument has no name to give
     const name = if (position == 2) " ($locales)" else "";
-    const msg = try std.fmt.allocPrint(ctx.allocator, "setlocale(): Argument #{d}{s} must be of type array|string|null, {s} given", .{ position, name, @import("types.zig").phpTypeName(arg) });
+    // php 8.6 expects a ?string after the first locale
+    const expected = if (position == 2) "array|string|null" else "?string";
+    const msg = try std.fmt.allocPrint(ctx.allocator, "setlocale(): Argument #{d}{s} must be of type {s}, {s} given", .{ position, name, expected, @import("types.zig").phpTypeName(arg) });
     defer ctx.allocator.free(msg);
     try ctx.vm.setPendingException("TypeError", msg);
     return error.RuntimeError;
