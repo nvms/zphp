@@ -1249,7 +1249,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         _ = try closeStream(ctx, fh);
         return try Value.String.adopt(ctx.allocator, data orelse try ctx.allocator.alloc(u8, 0));
     }
-    if (path.len > 7 and (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://"))) {
+    if (path.len > 7 and (std.ascii.startsWithIgnoreCase(path, "http://") or std.ascii.startsWithIgnoreCase(path, "https://"))) {
         const fetched = try fetchUrl(ctx, path);
         return if (fetched.value == .string) fetched.value.string else null;
     }
@@ -3790,9 +3790,9 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
         stream_type = "user-space";
     } else if (std.mem.indexOf(u8, uri, "://")) |colon| {
         const scheme = uri[0..colon];
-        if (std.mem.eql(u8, scheme, "http") or std.mem.eql(u8, scheme, "https")) {
+        if (std.ascii.eqlIgnoreCase(scheme, "http") or std.ascii.eqlIgnoreCase(scheme, "https")) {
             wrapper_type = "http";
-            stream_type = if (std.mem.eql(u8, scheme, "https")) "tcp_socket/ssl" else "tcp_socket";
+            stream_type = if (std.ascii.eqlIgnoreCase(scheme, "https")) "tcp_socket/ssl" else "tcp_socket";
         } else if (std.mem.eql(u8, scheme, "php")) {
             wrapper_type = "PHP";
             const rest = uri[colon + 3 ..];

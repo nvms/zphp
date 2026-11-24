@@ -230,7 +230,8 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
     const keep_method = flags & FLAG_KEEP_METHOD != 0;
     var request_fulluri = false;
     if (contextOption(context, "http", "request_fulluri")) |v| request_fulluri = v.isTruthy();
-    const use_ssl = resource.scheme.len > 4 and (resource.scheme[4] == 's' or resource.scheme[4] == 'S');
+    // only the "https" scheme, in any case (php 8.5.13 compares the whole name)
+    const use_ssl = std.ascii.eqlIgnoreCase(resource.scheme, "https");
     if (resource.port == 0) resource.port = if (use_ssl) 443 else 80;
     var use_proxy = false;
     var transport: []const u8 = undefined;
