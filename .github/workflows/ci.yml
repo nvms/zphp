@@ -527,7 +527,10 @@ jobs:
           Expand-Archive $zip -DestinationPath $dir
           $ini = Get-Content (Join-Path $dir 'php.ini-production')
           $ini += 'extension_dir = "' + (Join-Path $dir 'ext') + '"'
-          foreach ($ext in 'mbstring','curl','openssl','sqlite3','pdo_sqlite','intl','gmp','gd','sodium','bcmath','ldap') {
+          # setup-php's defaults, which the other jobs' reference php has
+          $ini += 'memory_limit = -1'
+          $ini += 'date.timezone = UTC'
+          foreach ($ext in 'mbstring','curl','openssl','sqlite3','pdo_sqlite','intl','gmp','gd','sodium','bcmath','ldap','fileinfo') {
             if (Test-Path (Join-Path $dir "ext/php_$ext.dll")) { $ini += "extension=$ext" }
           }
           Set-Content (Join-Path $dir 'php.ini') $ini
