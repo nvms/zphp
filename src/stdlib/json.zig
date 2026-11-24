@@ -69,8 +69,24 @@ const ErrorCode = enum(i64) {
     }
 };
 
-// JSON_G(error_code)
+// JSON_G(error_details): the code and, for a decode, where it failed
 threadlocal var last_error: ErrorCode = .none;
+threadlocal var last_location: Location = .{};
+
+// a decode error's line and column (php 8.6), 0 when there is none
+const Location = struct { line: u64 = 0, column: u64 = 0 };
+
+// php_json_get_error_msg_with_location
+fn errorText(buf: []u8, code: ErrorCode, loc: Location) []const u8 {
+    if (loc.line > 0 and loc.column > 0)
+        return std.fmt.bufPrint(buf, "{s} near location {d}:{d}", .{ code.message(), loc.line, loc.column }) catch code.message();
+    return code.message();
+}
+
+fn setLastError(code: ErrorCode, loc: Location) void {
+    last_error = code;
+    last_location = loc;
+}
 
 pub const entries = .{
     .{ "json_encode", json_encode },
@@ -81,7 +97,12 @@ pub const entries = .{
 };
 
 fn throwJsonException(ctx: *NativeContext, code: ErrorCode) RuntimeError {
-    try ctx.vm.setPendingException("JsonException", code.message());
+    return throwJsonExceptionAt(ctx, code, .{});
+}
+
+fn throwJsonExceptionAt(ctx: *NativeContext, code: ErrorCode, loc: Location) RuntimeError {
+    var buf: [128]u8 = undefined;
+    try ctx.vm.setPendingException("JsonException", errorText(&buf, code, loc));
     // the exception's code is the json error code
     if (ctx.vm.pending_exception) |exc| if (exc == .object) try exc.object.set(ctx.allocator, "code", .{ .int = @backingInt(code) });
     return error.RuntimeError;
@@ -501,7 +522,7 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     try enc.buf.ensureTotalCapacity(ctx.allocator, 128);
     _ = try enc.zval(value, options);
     if (options & THROW_ON_ERROR == 0 or options & PARTIAL_OUTPUT_ON_ERROR != 0) {
-        last_error = enc.error_code;
+        setLastError(enc.error_code, .{});
         if (enc.error_code != .none and options & PARTIAL_OUTPUT_ON_ERROR == 0) return NativeResult.scalar(.{ .bool = false });
     } else if (enc.error_code != .none) {
         return throwJsonException(ctx, enc.error_code);
@@ -524,6 +545,10 @@ const Parser = struct {
     max_depth: i64,
     validate: bool,
     errcode: ErrorCode = .none,
+    // the scanner's line, where it starts, and where the current token starts
+    line: u64 = 1,
+    line_start: usize = 0,
+    token: usize = 0,
     // the scanned token's value: an int, a float, or a string the parser
     // takes over
     value: Value = .null,
@@ -538,15 +563,32 @@ const Parser = struct {
         return .err;
     }
 
+    // php_json_parser_error_details: the column counts characters, a utf-8
+    // sequence as one, from the line's start to the failing token
+    fn location(self: *const Parser) Location {
+        var column: u64 = 1;
+        for (self.s[@min(self.line_start, self.s.len)..@min(self.token, self.s.len)]) |c| {
+            if (c & 0b1100_0000 != 0b1000_0000) column += 1;
+        }
+        return .{ .line = self.line, .column = column };
+    }
+
     // php_json_scan
     fn scan(self: *Parser) RuntimeError!Token {
         self.value = .null;
         while (true) {
             const start = self.cursor;
+            self.token = start;
             const c = self.at(start);
             switch (c) {
-                ' ', '\t', '\r', '\n' => {
+                ' ', '\t', '\r' => {
                     self.cursor += 1;
+                    continue;
+                },
+                '\n' => {
+                    self.cursor += 1;
+                    self.line += 1;
+                    self.line_start = self.cursor;
                     continue;
                 },
                 '{' => return self.single(.lbrace),
@@ -651,6 +693,9 @@ const Parser = struct {
         while (true) {
             const c = self.at(i);
             if (c == '"') break;
+            // an unterminated string is a syntax error (php 8.6), a NUL in it a
+            // control character
+            if (c == 0 and i >= self.s.len) return self.fail(.syntax);
             if (c < 0x20) return self.fail(.ctrl_char);
             if (c == '\\') {
                 plain = false;
@@ -1017,10 +1062,10 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const assoc = if (assoc_arg != null) try p.boolean(1, "associative", false) else false;
     const depth = try p.optLong(2, "depth", default_depth);
     var options = try p.optLong(3, "flags", 0);
-    if (options & THROW_ON_ERROR == 0) last_error = .none;
+    if (options & THROW_ON_ERROR == 0) setLastError(.none, .{});
     if (s.len == 0) {
         if (options & THROW_ON_ERROR != 0) return throwJsonException(ctx, .syntax);
-        last_error = .syntax;
+        setLastError(.syntax, .{});
         return NativeResult.scalar(.null);
     }
     if (depth <= 0) return throwValueError(ctx, "json_decode(): Argument #3 ($depth) must be greater than 0", .{});
@@ -1031,8 +1076,8 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     }
     var parser: Parser = .{ .ctx = ctx, .s = s, .options = options, .max_depth = depth, .validate = false };
     const result = (try parser.parse()) orelse {
-        if (options & THROW_ON_ERROR != 0) return throwJsonException(ctx, parser.errcode);
-        last_error = parser.errcode;
+        if (options & THROW_ON_ERROR != 0) return throwJsonExceptionAt(ctx, parser.errcode, parser.location());
+        setLastError(parser.errcode, parser.location());
         return NativeResult.scalar(.null);
     };
     if (result == .string) return NativeResult.takeString(result.string);
@@ -1046,15 +1091,15 @@ fn json_validate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const options = try p.optLong(2, "flags", 0);
     if (options != 0 and options != INVALID_UTF8_IGNORE) return throwValueError(ctx, "json_validate(): Argument #3 ($flags) must be a valid flag (allowed flags: JSON_INVALID_UTF8_IGNORE)", .{});
     if (s.len == 0) {
-        last_error = .syntax;
+        setLastError(.syntax, .{});
         return NativeResult.scalar(.{ .bool = false });
     }
-    last_error = .none;
+    setLastError(.none, .{});
     if (depth <= 0) return throwValueError(ctx, "json_validate(): Argument #2 ($depth) must be greater than 0", .{});
     if (depth > std.math.maxInt(i32)) return throwValueError(ctx, "json_validate(): Argument #2 ($depth) must be less than {d}", .{std.math.maxInt(i32)});
     var parser: Parser = .{ .ctx = ctx, .s = s, .options = options, .max_depth = depth, .validate = true };
     if (try parser.parse() == null) {
-        last_error = parser.errcode;
+        setLastError(parser.errcode, parser.location());
         return NativeResult.scalar(.{ .bool = false });
     }
     return NativeResult.scalar(.{ .bool = true });
@@ -1065,5 +1110,6 @@ fn native_json_last_error(_: *NativeContext, _: []const Value) RuntimeError!Nati
 }
 
 fn native_json_last_error_msg(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.copyString(ctx.allocator, last_error.message());
+    var buf: [128]u8 = undefined;
+    return NativeResult.copyString(ctx.allocator, errorText(&buf, last_error, last_location));
 }
