@@ -1034,6 +1034,11 @@ fn pdoSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
     const attr = if (args[0] == .int) args[0].int else return NativeResult.scalar(.{ .bool = false });
+    // ATTR_ORACLE_NULLS takes only the PDO::NULL_* modes (php 8.5.13)
+    if (attr == 11 and args[1] == .int and (args[1].int < 0 or args[1].int > 2)) {
+        try ctx.vm.setPendingException("ValueError", "PDO::setAttribute(): Argument #2 ($value) PDO::ATTR_ORACLE_NULLS must be one of the PDO::NULL_* constants");
+        return error.RuntimeError;
+    }
     if (attr == 19) {
         try obj.set(ctx.allocator, "__default_fetch_mode", args[1]);
     } else if (attr == 3) {
