@@ -27995,6 +27995,12 @@ pub const VM = struct {
             var ctx = self.makeContext(null);
             return @import("../stdlib/spl.zig").arrayStorageFetch(&ctx, obj, key);
         }
+        // php 8.6's WeakMap write fetch adds a missing key as null
+        if (isWeakMap(obj)) {
+            var ctx = self.makeContext(null);
+            const t = try @import("../stdlib/spl.zig").weakMapRefTarget(&ctx, obj, key);
+            return t.arr.get(t.key);
+        }
         return self.callMethod(obj, "offsetGet", &.{key});
     }
 

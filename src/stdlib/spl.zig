@@ -1555,19 +1555,21 @@ fn wmOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 pub fn weakMapRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: ?Value) RuntimeError!RefTarget {
     const args: []const Value = if (offset) |o| &.{o} else &.{};
     const key = try wmKeyOf(ctx, args);
-    const arr = getData(obj);
-    if (arr == null or !arr.?.contains(.{ .int = key })) {
-        const o = offset.?.object;
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Object {s}#{d} not contained in WeakMap", .{ o.class_name, o.id });
-        defer ctx.allocator.free(msg);
-        try ctx.vm.setPendingException("Error", msg);
-        return error.RuntimeError;
+    // php 8.6 adds a missing key as null for the write, as a reference to
+    // it (`$map[$o] = &$x`, `$map[$o][] = 1`) needs
+    const arr = try ensureData(ctx, obj);
+    if (!arr.contains(.{ .int = key })) {
+        _ = try wmOffsetSetOn(ctx, obj, &.{ offset.?, .null });
     }
-    return .{ .arr = arr.?, .key = .{ .int = key } };
+    return .{ .arr = arr, .key = .{ .int = key } };
 }
 
 fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return wmOffsetSetOn(ctx, obj, args);
+}
+
+fn wmOffsetSetOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
     const arr = try ensureData(ctx, obj);
     if (args.len < 2) return NativeResult.scalar(.null);
     const key = try wmKeyOf(ctx, args);
