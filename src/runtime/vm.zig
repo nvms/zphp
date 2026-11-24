@@ -26573,7 +26573,7 @@ pub const VM = struct {
             // a parent declares it with storage
             const backed = !self.propertyIsVirtual(hook_cls, prop_name);
             if (!backed) {
-                const msg = std.fmt.allocPrint(self.allocator, "Property {s}::${s} is read-only", .{ obj.class_name, prop_name }) catch return error.RuntimeError;
+                const msg = std.fmt.allocPrint(self.allocator, "Cannot write to get-only virtual property {s}::${s}", .{ obj.class_name, prop_name }) catch return error.RuntimeError;
                 defer self.allocator.free(msg);
                 if (try self.throwBuiltinException("Error", msg)) return .{ .step = .dispatched };
                 return error.RuntimeError;
@@ -27641,7 +27641,7 @@ pub const VM = struct {
         if (!self.hasPropHook(obj.class_name, prop_name, if (kind == .get) .get else .set)) return null;
         const hook_name = try self.propHookName(prop_name, if (kind == .get) .get else .set);
         if (kind == .get and self.isWriteOnlyVirtual(obj.class_name, prop_name)) {
-            const msg = try std.fmt.allocPrint(self.allocator, "Property {s}::${s} is write-only", .{ obj.class_name, prop_name });
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot read from set-only virtual property {s}::${s}", .{ obj.class_name, prop_name });
             defer self.allocator.free(msg);
             try self.setPendingException("Error", msg);
             return error.RuntimeError;

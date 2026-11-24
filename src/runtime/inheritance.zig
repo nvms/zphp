@@ -303,7 +303,7 @@ fn parseType(p: *const Pending, arena: std.mem.Allocator, text: []const u8, scop
 // zend_get_function_declaration
 fn declaration(p: *const Pending, arena: std.mem.Allocator, m: Method) ![]const u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
-    if (m.returns_ref) try out.appendSlice(arena, "& ");
+    if (m.returns_ref) try out.append(arena, '&');
     try out.print(arena, "{s}::{s}(", .{ m.class, m.name });
     for (m.params, 0..) |param, i| {
         if (i > 0) try out.appendSlice(arena, ", ");
