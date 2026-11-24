@@ -2168,14 +2168,13 @@ fn native_idate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         'I' => @intFromBool(t.is_dst),
         'Z' => t.offset,
         'U' => ts,
-        else => -1,
+        else => {
+            try ctx.vm.emitWarning("idate(): Unrecognized date format token");
+            return NativeResult.scalar(.{ .bool = false });
+        },
     };
-    // php reports -1 as an unknown format character, whatever produced it
+    // php 8.6 returns -1 when that is the value (the year -1)
     const r: i32 = @truncate(v);
-    if (r == -1) {
-        try ctx.vm.emitWarning("idate(): Unrecognized date format token");
-        return NativeResult.scalar(.{ .bool = false });
-    }
     return NativeResult.scalar(.{ .int = r });
 }
 
