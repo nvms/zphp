@@ -3036,7 +3036,8 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (std.ascii.startsWithIgnoreCase(path, "php://fd/")) return openFdStream(ctx, path, mode);
     if (std.ascii.startsWithIgnoreCase(path, "php://filter/")) return openFilterStream(ctx, path, mode, if (args.len > 3) args[3] else null);
     if (std.ascii.startsWithIgnoreCase(path, "php://") and !knownPhpStream(path[6..])) {
-        try warnDocref(ctx, "Invalid php:// URL specified", .{});
+        // php 8.6 reports "Invalid php:// URL specified" only when the opener
+        // reports errors, which an open through a wrapper never asks for
         try warnDocrefParam(ctx, path, "Failed to open stream: operation failed", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
@@ -3061,6 +3062,20 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
     var read_chain = std.mem.indexOfAny(u8, mode, "r+") != null;
     var write_chain = std.mem.indexOfAny(u8, mode, "w+a") != null;
     const s = try streams.of(ctx, obj);
+    // php 8.6's filter.max_filter_count context option (16 by default, a
+    // deprecation past it when unset)
+    const context_obj: ?*PhpObject = if (context) |cv| (if (cv == .resource) cv.resource else null) else null;
+    const configured = @import("http_wrapper.zig").contextOption(context_obj, "filter", "max_filter_count");
+    const max_filters: i64 = if (configured) |v| Value.toInt(v) else 16;
+    var read_count: i64 = 0;
+    var write_count: i64 = 0;
+    // "Unable to create filter" waits for the end of the operation in php
+    // 8.6, after the filter lookups' own warnings
+    var failed_names: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (failed_names.items) |n| ctx.allocator.free(n);
+        failed_names.deinit(ctx.allocator);
+    }
     // php cuts the spec at "/resource=", so with nothing before it the
     // filters are read from the rest of the path (resource=..., the url's
     // own parts), which name no filter
@@ -3080,6 +3095,16 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
         }
         var names = std.mem.tokenizeScalar(u8, list, '|');
         while (names.next()) |raw_name| {
+            const rc = if (on_read) read_count else 0;
+            const wc = if (on_write) write_count else 0;
+            if (rc == max_filters or wc == max_filters) {
+                if (configured != null) {
+                    _ = try closeStream(ctx, obj);
+                    try warnDocrefParam(ctx, path, "Failed to open stream: too many filters", .{});
+                    return NativeResult.scalar(.{ .bool = false });
+                }
+                try ctx.vm.raiseError(VM.E_DEPRECATED, "Using more than 16 filters in a php://filter URL is deprecated, set this limit using the stream context option max_filter_count, or use stream_filter_append");
+            }
             const name = try phpUrlDecode(ctx.allocator, raw_name);
             defer ctx.allocator.free(name);
             inline for (.{ true, false }) |is_read| {
@@ -3087,13 +3112,15 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
                     if (try stream_filters.create(ctx, name, null)) |f| {
                         const chain = if (is_read) &s.readfilters else &s.writefilters;
                         if (!try stream_filters.append(ctx, obj, chain, f)) try stream_filters.remove(ctx, f);
+                        if (is_read) read_count += 1 else write_count += 1;
                     } else {
-                        try warnDocref(ctx, "Unable to create filter ({s})", .{name});
+                        try failed_names.append(ctx.allocator, try ctx.allocator.dupe(u8, name));
                     }
                 }
             }
         }
     }
+    for (failed_names.items) |name| try warnDocref(ctx, "Unable to create filter ({s})", .{name});
     _ = &read_chain;
     _ = &write_chain;
     if (ctx.vm.pending_exception != null) {

@@ -96,7 +96,7 @@ fn parseUrl(url: []const u8) ?Url {
     return u;
 }
 
-fn contextOption(context: ?*PhpObject, wrapper: []const u8, name: []const u8) ?Value {
+pub fn contextOption(context: ?*PhpObject, wrapper: []const u8, name: []const u8) ?Value {
     const c = context orelse return null;
     const options = c.get("options");
     if (options != .array) return null;
