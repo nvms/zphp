@@ -476,6 +476,10 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
     const src = args[0].array;
     const flag: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    if (flag < 0 or flag > 2) {
+        try ctx.vm.setPendingException("ValueError", "array_filter(): Argument #3 ($mode) must be one of ARRAY_FILTER_USE_VALUE, ARRAY_FILTER_USE_KEY, or ARRAY_FILTER_USE_BOTH");
+        return error.RuntimeError;
+    }
 
     const result = try ctx.createArray();
     if (args.len < 2 or args[1] == .null) {
@@ -1619,7 +1623,12 @@ fn array_merge_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!
 fn array_change_key_case(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
     const src = args[0].array;
-    const case_upper = (try (html.Params{ .ctx = ctx, .func = "array_change_key_case", .args = args }).int(1, "case", 0)) != 0;
+    const case_arg = try (html.Params{ .ctx = ctx, .func = "array_change_key_case", .args = args }).int(1, "case", 0);
+    if (case_arg != 0 and case_arg != 1) {
+        try ctx.vm.setPendingException("ValueError", "array_change_key_case(): Argument #2 ($case) must be either CASE_LOWER or CASE_UPPER");
+        return error.RuntimeError;
+    }
+    const case_upper = case_arg != 0;
     const result = try ctx.createArray();
 
     for (src.entries.items) |entry| {

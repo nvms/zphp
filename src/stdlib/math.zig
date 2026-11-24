@@ -14,6 +14,7 @@ pub const entries = .{
     .{ "round", native_round },
     .{ "min", native_min },
     .{ "max", native_max },
+    .{ "clamp", native_clamp },
     .{ "rand", native_rand },
     .{ "lcg_value", native_lcg_value },
     .{ "pow", native_pow },
@@ -791,6 +792,35 @@ fn minmax(ctx: *NativeContext, comptime func: []const u8, args: []const Value, c
 
 fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return minmax(ctx, "min", args, false);
+}
+
+// php 8.6's clamp(): value, unless it lies outside [min, max], compared as
+// zend_compare does
+fn native_clamp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len != 3) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "clamp() expects exactly 3 arguments, {d} given", .{args.len});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("ArgumentCountError", msg);
+        return error.RuntimeError;
+    }
+    const value = args[0];
+    const min = args[1];
+    const max = args[2];
+    if (min == .float and std.math.isNan(min.float)) {
+        try ctx.vm.setPendingException("ValueError", "clamp(): Argument #2 ($min) must not be NAN");
+        return error.RuntimeError;
+    }
+    if (max == .float and std.math.isNan(max.float)) {
+        try ctx.vm.setPendingException("ValueError", "clamp(): Argument #3 ($max) must not be NAN");
+        return error.RuntimeError;
+    }
+    if (try ctx.vm.compareWithStringable(max, min) == -1) {
+        try ctx.vm.setPendingException("ValueError", "clamp(): Argument #2 ($min) must be smaller than or equal to argument #3 ($max)");
+        return error.RuntimeError;
+    }
+    if (try ctx.vm.compareWithStringable(max, value) == -1) return NativeResult.share(max);
+    if (try ctx.vm.compareWithStringable(value, min) == -1) return NativeResult.share(min);
+    return NativeResult.share(value);
 }
 
 fn native_max(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

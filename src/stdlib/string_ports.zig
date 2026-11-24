@@ -395,7 +395,8 @@ fn phpTrim(ctx: *NativeContext, s: []const u8, what: ?[]const u8, mode: u2, func
     } else {
         const ws = struct {
             fn f(c: u8) bool {
-                return c == ' ' or c == '\n' or c == '\r' or c == '\t' or c == 0x0b or c == 0;
+                // php 8.6 trims form feeds too
+                return c == ' ' or c == 0x0c or c == '\n' or c == '\r' or c == '\t' or c == 0x0b or c == 0;
             }
         }.f;
         if (mode & 1 != 0) while (start != end and ws(s[start])) : (start += 1) {};
@@ -1635,7 +1636,7 @@ fn native_explode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const delim = try p.str(0, "separator");
     const str = try p.str(1, "string");
     const limit = try p.optLong(2, "limit", std.math.maxInt(i64));
-    if (delim.len == 0) return p.valueError(0, "separator", "must not be empty");
+    if (delim.len == 0) return p.valueError(0, "separator", "must not be empty, use str_split() to split a string into characters");
     const arr = try ctx.createArray();
     if (str.len == 0) {
         if (limit >= 0) try appendPiece(ctx, arr, "");

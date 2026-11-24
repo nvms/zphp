@@ -3241,6 +3241,7 @@ pub const VM = struct {
         try c.put(a, "INI_SCANNER_NORMAL", .{ .int = 0 });
         try c.put(a, "INI_SCANNER_RAW", .{ .int = 1 });
         try c.put(a, "INI_SCANNER_TYPED", .{ .int = 2 });
+        try c.put(a, "ARRAY_FILTER_USE_VALUE", .{ .int = 0 });
         try c.put(a, "ARRAY_FILTER_USE_BOTH", .{ .int = 1 });
         try c.put(a, "ARRAY_FILTER_USE_KEY", .{ .int = 2 });
         try c.put(a, "COUNT_NORMAL", .{ .int = 0 });

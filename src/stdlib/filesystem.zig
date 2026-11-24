@@ -1657,6 +1657,8 @@ const PATHINFO_ALL: i64 = 15;
 fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const path = try strArg(ctx, args, "pathinfo", 0, "path", false);
     const opt = try intArg(ctx, args, "pathinfo", 1, "flags", PATHINFO_ALL);
+    if (opt < PATHINFO_DIRNAME or opt > PATHINFO_ALL) return throwValueError(ctx, "pathinfo(): Argument #2 ($flags) must be one of the PATHINFO_* constants", .{});
+    if (opt < PATHINFO_ALL and opt & (opt - 1) != 0) return throwValueError(ctx, "pathinfo(): Argument #2 ($flags) must be only one of the PATHINFO_* constants", .{});
     const base = phpBasename(path, "");
     const dot = std.mem.lastIndexOfScalar(u8, base, '.');
     const Part = struct { key: []const u8, value: []const u8 };
@@ -2044,8 +2046,9 @@ fn renamePath(from: []const u8, to: []const u8) !void {
 fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     if (args[0].string.bytes().len == 0) return throwValueError(ctx, "scandir(): Argument #1 ($directory) must not be empty", .{});
-    // SCANDIR_SORT_ASCENDING=0, _NONE=2, anything else descending
+    // SCANDIR_SORT_ASCENDING=0, _DESCENDING=1, _NONE=2
     const order: i64 = if (args.len >= 2) try @import("string_ports.zig").Args.init(ctx, "scandir", args).long(1, "sorting_order") else 0;
+    if (order < 0 or order > 2) return throwValueError(ctx, "scandir(): Argument #2 ($sorting_order) must be one of the SCANDIR_SORT_ASCENDING, SCANDIR_SORT_DESCENDING, or SCANDIR_SORT_NONE constants", .{});
     var names = std.ArrayListUnmanaged(Value.String).empty;
     defer names.deinit(ctx.allocator);
     defer for (names.items) |name| name.release();
@@ -5665,6 +5668,7 @@ fn diskSpace(ctx: *NativeContext, args: []const Value, comptime func: []const u8
 // the device of the link itself, -1 with a warning when it cannot be lstat'ed
 fn native_linkinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const path = try strArg(ctx, args, "linkinfo", 0, "path", true);
+    if (path.len == 0) return throwValueError(ctx, "linkinfo(): Argument #1 ($path) must not be empty", .{});
     // php checks the directory holding the link
     if (open_basedir.setting(ctx.vm) != null and !try open_basedir.allows(ctx.vm, "linkinfo", phpDirname(path))) return NativeResult.scalar(.{ .bool = false });
     if (platform.is_windows) {

@@ -646,7 +646,13 @@ fn native_getopt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 fn native_sleep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const p = @import("string_ports.zig").Args.init(ctx, "sleep", args);
     const secs = try p.long(0, "seconds");
-    if (secs < 0) return p.valueError(0, "seconds", "must be greater than or equal to 0");
+    // php 8.6 refuses what the C call's unsigned int can't hold (a thousandth
+    // of it on windows, which sleeps in milliseconds)
+    const max: i64 = if (platform.is_windows) std.math.maxInt(u32) / 1000 else std.math.maxInt(u32);
+    if (secs < 0 or secs > max) {
+        if (platform.is_windows) return p.valueError(0, "seconds", "must be between 0 and 4294967");
+        return p.valueError(0, "seconds", "must be between 0 and 4294967295");
+    }
     if (secs > 0) ctx.vm.flushOutputToStdout();
     if (secs > 0) platform.sleep(@as(u64, @intCast(@min(secs, std.math.maxInt(u32)))) * 1_000_000_000);
     return NativeResult.scalar(.{ .int = 0 });
@@ -655,7 +661,7 @@ fn native_sleep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn native_usleep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const p = @import("string_ports.zig").Args.init(ctx, "usleep", args);
     const usecs = try p.long(0, "microseconds");
-    if (usecs < 0) return p.valueError(0, "microseconds", "must be greater than or equal to 0");
+    if (usecs < 0 or usecs > std.math.maxInt(u32)) return p.valueError(0, "microseconds", "must be between 0 and 4294967295");
     if (usecs > 0) ctx.vm.flushOutputToStdout();
     if (usecs > 0) platform.sleep(@as(u64, @intCast(@min(usecs, std.math.maxInt(u32)))) * 1_000);
     return NativeResult.scalar(.null);

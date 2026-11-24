@@ -173,7 +173,7 @@ fn strReplaceOnSingle(ctx: *NativeContext, search: Value, replace: Value, subjec
     return r.str;
 }
 
-const default_trim_chars = " \t\n\r\x0b\x00";
+const default_trim_chars = " \x0c\t\n\r\x0b\x00";
 
 // build the trim char set, expanding `a..b` ranges
 fn buildTrimSet(chars: []const u8) [256]bool {

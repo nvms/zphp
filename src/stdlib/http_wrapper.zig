@@ -323,8 +323,8 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         } else if (hv == .string) {
             try raw.appendSlice(a, hv.string.bytes());
         }
-        // php_trim with " \t\n\r\0\x0B" from both ends
-        const trimmed = std.mem.trim(u8, raw.items, " \t\n\r\x00\x0b");
+        // php_trim with " \f\t\n\r\0\x0B" from both ends
+        const trimmed = std.mem.trim(u8, raw.items, " \x0c\t\n\r\x00\x0b");
         if (trimmed.len > 0) {
             try user_headers.appendSlice(a, trimmed);
             var lc: std.ArrayListUnmanaged(u8) = .empty;

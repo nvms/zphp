@@ -2742,6 +2742,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "chown", Signature{ .params = &[_]Param{ .{ .name = "filename", .type = "string" }, .{ .name = "user", .type = "string|int" } }, .returns = "bool" } },
     .{ "chr", Signature{ .params = &[_]Param{ .{ .name = "codepoint", .type = "int" } }, .returns = "string" } },
     .{ "chunk_split", Signature{ .params = &[_]Param{ .{ .name = "string", .type = "string" }, .{ .name = "length", .default = .{ .int = 76 }, .type = "int" }, .{ .name = "separator", .default = .{ .string = "\x0d\x0a" }, .type = "string" } }, .returns = "string" } },
+    .{ "clamp", Signature{ .params = &[_]Param{ .{ .name = "value", .type = "mixed" }, .{ .name = "min", .type = "mixed" }, .{ .name = "max", .type = "mixed" } }, .returns = "mixed" } },
     .{ "class_alias", Signature{ .params = &[_]Param{ .{ .name = "class", .type = "string" }, .{ .name = "alias", .type = "string" }, .{ .name = "autoload", .default = .{ .bool = true }, .type = "bool" } }, .returns = "bool" } },
     .{ "class_exists", Signature{ .params = &[_]Param{ .{ .name = "class", .type = "string" }, .{ .name = "autoload", .default = .{ .bool = true }, .type = "bool" } }, .returns = "bool" } },
     .{ "class_implements", Signature{ .params = &[_]Param{ .{ .name = "object_or_class" }, .{ .name = "autoload", .default = .{ .bool = true }, .type = "bool" } }, .returns = "array|false" } },

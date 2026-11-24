@@ -181,9 +181,9 @@ fn detectMultipleCrlf(hdr: []const u8) bool {
 }
 
 fn trimHeaders(s: []const u8) []const u8 {
-    // php_trim(headers, NULL, 0, 2): right trim of " \t\n\r\v\0"
+    // php_trim(headers, NULL, 0, 2): right trim of " \f\t\n\r\v\0"
     var end = s.len;
-    while (end > 0 and std.mem.indexOfScalar(u8, " \t\n\r\x0b\x00", s[end - 1]) != null) end -= 1;
+    while (end > 0 and std.mem.indexOfScalar(u8, " \x0c\t\n\r\x0b\x00", s[end - 1]) != null) end -= 1;
     return s[0..end];
 }
 
