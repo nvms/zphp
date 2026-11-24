@@ -233,7 +233,7 @@ const Encoder = struct {
             try self.prettyIndent(options);
             if (as_object) {
                 switch (entry.key) {
-                    .string => |k| try self.key(k.bytes(), options),
+                    .string => |k| if (!try self.key(k.bytes(), options)) return false,
                     .int => |n| {
                         try self.appendByte('"');
                         try self.appendLong(n);
@@ -248,15 +248,14 @@ const Encoder = struct {
         return self.closeContainer(options, need_comma, if (as_object) '}' else ']');
     }
 
-    // a key is escaped without the numeric check; with partial output an
-    // invalid one becomes ""
-    fn key(self: *Encoder, k: []const u8, options: i64) RuntimeError!void {
-        if (!try self.escapeString(k, options & ~NUMERIC_CHECK)) {
-            if (options & PARTIAL_OUTPUT_ON_ERROR != 0) {
-                self.buf.items.len -= 4;
-                try self.append("\"\"");
-            }
-        }
+    // a key is escaped without the numeric check; an invalid one ends the
+    // encoding, or with partial output becomes ""
+    fn key(self: *Encoder, k: []const u8, options: i64) RuntimeError!bool {
+        if (try self.escapeString(k, options & ~NUMERIC_CHECK)) return true;
+        if (options & PARTIAL_OUTPUT_ON_ERROR == 0) return false;
+        self.buf.items.len -= 4;
+        try self.append("\"\"");
+        return true;
     }
 
     fn object(self: *Encoder, proxy: *PhpObject, options: i64) RuntimeError!bool {
@@ -312,7 +311,7 @@ const Encoder = struct {
             try self.prettyChar(options, '\n');
             try self.prettyIndent(options);
             switch (prop.key) {
-                .name => |name| try self.key(name, options),
+                .name => |name| if (!try self.key(name, options)) return false,
                 .int => |n| {
                     try self.appendByte('"');
                     try self.appendLong(n);
@@ -478,7 +477,9 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const value: Value = if (args.len > 0) args[0] else .null;
     const options = try p.optLong(1, "flags", 0);
     const depth = try p.optLong(2, "depth", default_depth);
-    var enc: Encoder = .{ .a = ctx.allocator, .vm = ctx.vm, .max_depth = @as(i32, @truncate(depth)) };
+    if (depth < std.math.minInt(i32) or depth > std.math.maxInt(i32))
+        return throwValueError(ctx, "json_encode(): Argument #3 ($depth) must be between {d} and {d}", .{ std.math.minInt(i32), std.math.maxInt(i32) });
+    var enc: Encoder = .{ .a = ctx.allocator, .vm = ctx.vm, .max_depth = depth };
     defer enc.buf.deinit(ctx.allocator);
     try enc.buf.ensureTotalCapacity(ctx.allocator, 128);
     _ = try enc.zval(value, options);
