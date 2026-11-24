@@ -1286,7 +1286,7 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
         break :known null;
     } else null;
     if (class_name == null) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {s} given", .{phpTypeName(args[0])});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {s} given", .{classArgGiven(args[0])});
         defer ctx.allocator.free(msg);
         try ctx.vm.setPendingException("TypeError", msg);
         return error.RuntimeError;
@@ -1411,7 +1411,7 @@ fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (ctx.vm.pending_exception != null) return error.RuntimeError;
     if (!ctx.vm.classes.contains(class_name)) {
         if (ctx.vm.interfaces.contains(class_name) or ctx.vm.traits.contains(class_name)) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-        const msg = try std.fmt.allocPrint(ctx.allocator, "get_class_vars(): Argument #1 ($class) must be a valid class name, {s} given", .{raw});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "get_class_vars(): Argument #1 ($class) must be a valid class name, \"{s}\" given", .{upToNul(raw)});
         defer ctx.allocator.free(msg);
         try ctx.vm.setPendingException("TypeError", msg);
         return error.RuntimeError;
@@ -1465,9 +1465,22 @@ fn classVarVisible(ctx: *NativeContext, caller: ?[]const u8, declaring: []const 
     };
 }
 
+fn upToNul(s: []const u8) []const u8 {
+    return s[0 .. std.mem.indexOfScalar(u8, s, 0) orelse s.len];
+}
+
+threadlocal var class_arg_buf: [512]u8 = undefined;
+
+// what zend_wrong_parameter_type_error says was given to a class name
+// parameter: a string is quoted (as a C string), anything else its type
+fn classArgGiven(v: Value) []const u8 {
+    if (v != .string) return phpTypeName(v);
+    return std.fmt.bufPrint(&class_arg_buf, "\"{s}\"", .{upToNul(v.string.bytes())}) catch "string";
+}
+
 // Z_PARAM_OBJ_OR_CLASS_NAME's TypeError
 fn parentClassArgError(ctx: *NativeContext, arg: Value) RuntimeError!NativeResult {
-    const msg = try std.fmt.allocPrint(ctx.allocator, "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {s} given", .{phpTypeName(arg)});
+    const msg = try std.fmt.allocPrint(ctx.allocator, "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {s} given", .{classArgGiven(arg)});
     defer ctx.allocator.free(msg);
     try ctx.vm.setPendingException("TypeError", msg);
     return error.RuntimeError;

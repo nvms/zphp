@@ -4252,7 +4252,13 @@ fn stream_wrapper_register(ctx: *NativeContext, args: []const Value) RuntimeErro
     if (!class_like(ctx.vm, class_arg)) try ctx.vm.tryAutoload(class_arg);
     if (!class_like(ctx.vm, class_arg)) {
         if (ctx.vm.pending_exception != null) return error.RuntimeError;
-        return throwStreamArg(ctx, "stream_wrapper_register(): Argument #2 ($class) must be a valid class name, {s} given", .{class_arg});
+        return throwStreamArg(ctx, "stream_wrapper_register(): Argument #2 ($class) must be a valid class name, \"{s}\" given", .{class_arg[0 .. std.mem.indexOfScalar(u8, class_arg, 0) orelse class_arg.len]});
+    }
+    // php 8.6 refuses what can't be instantiated (ZEND_ACC_UNINSTANTIABLE)
+    const concrete = if (ctx.vm.classes.getPtr(class_arg)) |def| !def.is_abstract and !def.is_enum else false;
+    if (!concrete) {
+        try ctx.vm.setPendingException("ValueError", "stream_wrapper_register(): Argument #2 ($class) must be a concrete class");
+        return error.RuntimeError;
     }
     const class_name = ctx.vm.declaredClassName(class_arg);
     // the wrapper's own resource
