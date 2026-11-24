@@ -1019,6 +1019,7 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
     }
     if (owned) |o| e = .{ .code = 0, .message = o };
     if (err == error.ListenWithoutText) e = .{ .code = 0, .message = "" };
+    if (err == error.UnixBindFailed) e = .{ .code = 0, .message = socketError(unix_bind_error).message };
     // php had already made the stream when the connect failed, so its id is gone
     ctx.vm.skipResourceId();
     // stream_socket_client quotes the target with php_addslashes
@@ -1123,6 +1124,9 @@ fn native_stream_socket_server(ctx: *NativeContext, args: []const Value) Runtime
     return NativeResult.borrowed(.{ .resource = obj });
 }
 
+// why the last unix bind failed, for error.UnixBindFailed's text
+threadlocal var unix_bind_error: anyerror = error.Unexpected;
+
 fn listenSocket(endpoint: Endpoint, flags: i64, backlog: u31) !std.posix.socket_t {
     const addr = try endpointAddress(endpoint);
     const sock = try endpointSocket(endpoint, addr);
@@ -1131,9 +1135,12 @@ fn listenSocket(endpoint: Endpoint, flags: i64, backlog: u31) !std.posix.socket_
     // take a port that is already bound, which php allows there too
     if (endpoint == .tcp or endpoint == .udp) try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
     if ((flags & 4) != 0) sys.bind(sock, &addr.any, addr.getOsSockLen()) catch |err| {
-        // php's unix bind returns bind()'s result and records no error, so
-        // the failure has no code or text
-        if (endpoint == .unix or endpoint == .udg) return error.ListenWithoutText;
+        // php 8.6's unix bind records the system's text for the failure,
+        // though no code
+        if (endpoint == .unix or endpoint == .udg) {
+            unix_bind_error = err;
+            return error.UnixBindFailed;
+        }
         return err;
     };
     // a datagram socket can't listen; php's listen op fails with no text
