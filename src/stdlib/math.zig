@@ -504,6 +504,7 @@ fn baseToValue(ctx: *NativeContext, str: []const u8, base: u8) RuntimeError!Valu
                 num = num * base + c;
                 continue;
             }
+            try ctx.vm.raiseError(8, "Input number is larger than PHP_INT_MAX, precision has been lost in conversion");
             fnum = @floatFromInt(num);
             float_mode = true;
         }
@@ -591,6 +592,7 @@ fn native_number_format(ctx: *NativeContext, args: []const Value) RuntimeError!N
     const dec: i64 = if (p.has(1)) try p.long(1, "decimals") else 0;
     const dec_point = (try p.strOrNull(2, "decimal_separator")) orelse ".";
     const thousand_sep = (try p.strOrNull(3, "thousands_separator")) orelse ",";
+    if (dec > std.math.maxInt(i32) or dec < std.math.minInt(i32)) return p.valueError(1, "decimals", "must be between -2147483648 and 2147483647");
     switch (num) {
         .int => |i| return numberFormatLong(ctx, i, dec, dec_point, thousand_sep),
         else => {
