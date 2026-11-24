@@ -2072,10 +2072,9 @@ const Xxh64 = struct {
 
     fn init(c: *Ctx, a: InitArgs) RuntimeError!void {
         c.* = std.mem.zeroes(Ctx);
-        if (a.options) |_| {
-            const seed = try seedOption(a);
-            if (seed != null and seed.? == .int) {
-                zphp_xxh64_reset(c, @bitCast(seed.?.int));
+        if (try seedOption(a)) |seed| {
+            if (seed == .int) {
+                zphp_xxh64_reset(c, @bitCast(seed.int));
                 return;
             }
             try deprecated(a, "Passing a seed of a type other than int is deprecated because it is the same as setting the seed to 0");
