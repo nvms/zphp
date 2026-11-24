@@ -371,7 +371,7 @@ fn argClass(ctx: *NativeContext, label: []const u8, args: []const Value, i: usiz
     ctx.vm.tryAutoload(name) catch |err| if (ctx.vm.pending_exception == null) return err;
     if (ctx.vm.pending_exception != null) return error.RuntimeError;
     if (ctx.vm.classes.getKey(name)) |declared| if (ctx.vm.isInstanceOf(declared, base)) return declared;
-    try sic.raise(ctx, "TypeError", "{s}(): Argument #{d} (${s}) must be a class name derived from {s}{s}, {s} given", .{ label, i + 1, pname, base, if (nullable) " or null" else "", name });
+    try sic.raise(ctx, "TypeError", "{s}(): Argument #{d} (${s}) must be a class name derived from {s}{s}, \"{s}\" given", .{ label, i + 1, pname, base, if (nullable) " or null" else "", name });
     return error.RuntimeError;
 }
 
@@ -1259,7 +1259,11 @@ fn readEx(ctx: *NativeContext, obj: *PhpObject, silent: bool, line_add: i64, is_
         return false;
     }
     const max = int(obj, F.max_line_len);
-    const line = (try filesystem.streamReadLine(ctx, stream, if (max > 0) @intCast(max) else std.math.maxInt(usize))) orelse try ctx.allocator.alloc(u8, 0);
+    // php 8.6 fails a read that gets nothing instead of making an empty line
+    const line = (try filesystem.streamReadLine(ctx, stream, if (max > 0) @intCast(max) else std.math.maxInt(usize))) orelse {
+        if (!silent) try cannotRead(ctx, obj);
+        return false;
+    };
     defer ctx.allocator.free(line);
     var len = line.len;
     if (!is_csv and flags(obj) & DROP_NEW_LINE != 0) {
@@ -1423,9 +1427,28 @@ fn sfoValid(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 fn sfoFgets(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try this(ctx);
     try noArgs(ctx, "SplFileObject::fgets", args);
-    _ = try requireStream(ctx, obj);
-    if (!try readEx(ctx, obj, false, 1, false)) return error.RuntimeError;
-    return NativeResult.share(obj.get(F.current_line));
+    const stream = try requireStream(ctx, obj);
+    // php 8.6: a line current() read is handed out (and counted) first, and
+    // fgets() keeps nothing for current() to return again
+    if (hasLine(obj)) {
+        const line = obj.get(F.current_line);
+        line.string.retain();
+        defer line.string.release();
+        try freeLine(ctx, obj);
+        try setInt(ctx, obj, F.line_num, int(obj, F.line_num) + 1);
+        return NativeResult.share(line);
+    }
+    if (!try readEx(ctx, obj, true, 1, false)) {
+        if (sic.pending(ctx)) return error.RuntimeError;
+        if (try streamEof(ctx, stream)) return NativeResult.copyString(ctx.allocator, "");
+        try cannotRead(ctx, obj);
+        return error.RuntimeError;
+    }
+    const line = obj.get(F.current_line);
+    line.string.retain();
+    defer line.string.release();
+    try freeLine(ctx, obj);
+    return NativeResult.share(line);
 }
 
 fn sfoCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1449,6 +1472,10 @@ fn sfoNext(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try this(ctx);
     try noArgs(ctx, "SplFileObject::next", args);
     _ = try requireStream(ctx, obj);
+    // php 8.6 moves past a line nobody read yet, and stops counting at the end
+    if (!hasLine(obj) and !hasZval(obj)) {
+        if (!try readLine(ctx, obj, true)) return sic.finishNull(ctx);
+    }
     try freeLine(ctx, obj);
     if (flags(obj) & READ_AHEAD != 0) _ = try readLine(ctx, obj, true);
     try setInt(ctx, obj, F.line_num, int(obj, F.line_num) + 1);
@@ -1765,8 +1792,9 @@ fn sfoSeek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     try fileRewind(ctx, obj);
     var i: i64 = 0;
     while (i < line_pos) : (i += 1) {
-        if (!try readLine(ctx, obj, true)) return sic.finishNull(ctx);
+        if (!try readLine(ctx, obj, true)) break;
     }
+    if (sic.pending(ctx)) return error.RuntimeError;
     if (line_pos > 0 and flags(obj) & READ_AHEAD == 0) {
         try setInt(ctx, obj, F.line_num, int(obj, F.line_num) + 1);
         try freeLine(ctx, obj);
@@ -1779,7 +1807,10 @@ fn sfoToString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     try noArgs(ctx, "SplFileObject::__toString", args);
     _ = try requireStream(ctx, obj);
     if (!hasLine(obj)) {
-        if (!try readLine(ctx, obj, false)) return error.RuntimeError;
+        if (!try readLine(ctx, obj, true)) {
+            if (sic.pending(ctx)) return error.RuntimeError;
+            return NativeResult.copyString(ctx.allocator, "");
+        }
     }
     return NativeResult.share(obj.get(F.current_line));
 }
