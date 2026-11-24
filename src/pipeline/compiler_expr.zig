@@ -2544,7 +2544,11 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.const_expr_fcc_check);
         try self.emitByte(@intFromBool(callee.tag == .qualified_name));
     }
-    try self.emitOp(.callable_closure);
+    // a function named in the code is php 8.6's cached ZEND_CALLABLE_CONVERT
+    // ('strlen'(...) is one too; 'A::m'(...) is a method, which the vm leaves)
+    const named_function = !self.const_expr and (callee.tag == .identifier or callee.tag == .qualified_name or
+        (callee.tag == .string_literal and callee.data.rhs != Ast.interpolated));
+    try self.emitOp(if (named_function) .callable_closure_cached else .callable_closure);
 }
 
 pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {

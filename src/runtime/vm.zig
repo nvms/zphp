@@ -984,6 +984,10 @@ pub const VM = struct {
     // the innermost running native call; a user call made at its depth comes
     // from the native itself
     native_call: ?*const NativeCall = null,
+    // php 8.6's callable_convert_cache: the Closure each function named in a
+    // first-class callable got this request, by its registered name; each
+    // holds a reference, dropped in reset()
+    fcc_cache: std.StringHashMapUnmanaged(*PhpObject) = .{},
     // the frame depth a running call_user_func(_array) was called at: a
     // native it calls is called by an internal function, never strictly
     forwarding_depth: usize = std.math.maxInt(usize),
@@ -3851,6 +3855,7 @@ pub const VM = struct {
 
     pub fn deinit(self: *VM) void {
         self.sensitive_params.deinit(self.allocator);
+        self.fcc_cache.deinit(self.allocator);
         if (self.unwind_marker) |marker| {
             self.allocator.destroy(marker);
             self.unwind_marker = null;
@@ -4113,6 +4118,10 @@ pub const VM = struct {
         self.rw_prop_fetch_ip = 0;
         self.rw_prop_fetch_chunk = 0;
         self.sensitive_params.clearRetainingCapacity();
+        // the request's shared first-class callables go with it
+        var fcc_it = self.fcc_cache.valueIterator();
+        while (fcc_it.next()) |closure| self.releaseValue(.{ .object = closure.* });
+        self.fcc_cache.clearRetainingCapacity();
         self.iap_positions.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();
         if (self.ic) |ic| {
@@ -11131,7 +11140,7 @@ pub const VM = struct {
                     }
                 },
 
-                .callable_closure => {
+                .callable_closure, .callable_closure_cached => {
                     var callable = self.pop();
                     // a closure's first-class callable is the closure itself
                     if (callable == .object and std.mem.eql(u8, callable.object.class_name, "Closure")) {
@@ -11159,6 +11168,27 @@ pub const VM = struct {
                     }
                     if (held_pair) |pair| callable = .{ .array = pair };
                     if (function) |registered| callable = .{ .string = Value.String.borrowed(registered) };
+                    // php 8.6 makes one Closure per function named in the code
+                    // and keeps it for the request (EG(callable_convert_cache))
+                    if (op == .callable_closure_cached and held_pair == null and forwarded == null and callable == .string and
+                        std.mem.indexOf(u8, callable.string.bytes(), "::") == null)
+                    {
+                        // keyed by the function, which names in any case and
+                        // either side of a namespace fallback reach alike
+                        var key_buf: [256]u8 = undefined;
+                        const written = callable.string.bytes();
+                        const key = if (written.len <= key_buf.len) std.ascii.lowerString(&key_buf, written) else written;
+                        if (self.fcc_cache.get(key)) |shared| {
+                            self.push(.{ .object = shared });
+                            continue;
+                        }
+                        const made = try self.newFakeClosure(callable, forwarded);
+                        // the cache's reference; the operand stack holds none
+                        made.retain();
+                        try self.fcc_cache.put(self.allocator, try self.internName(key), made);
+                        self.push(.{ .object = made });
+                        continue;
+                    }
                     self.push(.{ .object = try self.newFakeClosure(callable, forwarded) });
                 },
 

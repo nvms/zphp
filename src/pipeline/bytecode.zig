@@ -640,6 +640,9 @@ pub const OpCode = enum(u16) {
     // [value] -> [value], before a constant expression's array_spread: only
     // an array may be unpacked there
     const_expr_unpack_check,
+    // callable_closure for a function named in the code (`strlen(...)`):
+    // php 8.6 shares one Closure per function for the request
+    callable_closure_cached,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
