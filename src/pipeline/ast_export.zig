@@ -1183,6 +1183,16 @@ const Exporter = struct {
         return k;
     }
 
+    // whether the modifiers written before the declaration whose first
+    // token is `t` include `tag`
+    fn hasModifier(e: *Exporter, t: u32, tag: Tag) bool {
+        var k = e.declStart(t);
+        while (k < t) : (k += 1) {
+            if (e.tokTag(k) == tag) return true;
+        }
+        return false;
+    }
+
     fn typeRange(e: *Exporter, start: u32, end: u32) Error!void {
         var t = start;
         while (t < end) : (t += 1) {
@@ -1675,6 +1685,7 @@ const Exporter = struct {
         var class_tok = n.main_token + 1;
         while (e.tokTag(class_tok) != .kw_class) class_tok += 1;
         try e.attributes(e.declStart(class_tok), indent, false);
+        if (e.hasModifier(class_tok, .kw_readonly)) try e.str("readonly ");
         try e.str("class");
         if (argc > 0) {
             try e.char('(');
@@ -1723,6 +1734,7 @@ const Exporter = struct {
                 try e.indentBy(indent);
                 try e.attributes(e.declStart(constKeyword(e, n)), indent, true);
                 try e.visibility(flags & 3);
+                if (e.hasModifier(constKeyword(e, n), .kw_final)) try e.str("final ");
                 try e.str("const ");
                 if (try e.typeExtra(flags >> 16)) try e.char(' ');
                 var count: usize = 0;
@@ -1754,6 +1766,8 @@ const Exporter = struct {
                     else => "private(set) ",
                 });
                 if (n.tag == .static_class_property or flags & AstMod.PropertyHooks.prop_static_hooked != 0) try e.str("static ");
+                if (e.hasModifier(first_tok, .kw_abstract)) try e.str("abstract ");
+                if (e.hasModifier(first_tok, .kw_final)) try e.str("final ");
                 if (flags & 4 != 0) try e.str("readonly ");
                 if (try e.typeExtra(type_extra)) try e.char(' ');
                 if (n.tag == .class_property_hooks) {
