@@ -100,7 +100,7 @@ const Out = struct {
     }
 };
 
-const zend_version = std.fmt.comptimePrint("Zend Engine v4.{d}.{d}, Copyright (c) Zend Technologies\n", .{ php_version.minor, php_version.release });
+const zend_version = std.fmt.comptimePrint("Zend Engine v4.{d}.{d}, Copyright © Zend by Perforce\n", .{ php_version.minor, php_version.release });
 const api_version = "20250925";
 
 pub fn printInfo(ctx: *NativeContext, flag: i64) RuntimeError!void {
@@ -201,17 +201,40 @@ pub fn printInfo(ctx: *NativeContext, flag: i64) RuntimeError!void {
     }
 
     if (flag & INFO_LICENSE != 0) {
-        try out.print("\nPHP License\n");
-        try out.print("This program is free software; you can redistribute it and/or modify\n");
-        try out.print("it under the terms of the PHP License as published by the PHP Group\n");
-        try out.print("and included in the distribution in the file:  LICENSE\n");
         try out.print("\n");
-        try out.print("This program is distributed in the hope that it will be useful,\n");
-        try out.print("but WITHOUT ANY WARRANTY; without even the implied warranty of\n");
-        try out.print("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n");
+        try out.print("License\n");
         try out.print("\n");
-        try out.print("If you did not receive a copy of the PHP license, or have any\n");
-        try out.print("questions about PHP licensing, please contact license@php.net.\n");
+        try out.print("PHP is free software. You may redistribute it and/or modify it under the\n");
+        try out.print("terms of the Modified BSD License (SPDX-License-Identifier: BSD-3-Clause).\n");
+        try out.print("\n");
+        try out.print("Copyright © The PHP Group and Contributors.\n");
+        try out.print("Copyright © Zend Technologies Ltd., a subsidiary company of\n");
+        try out.print("    Perforce Software, Inc.\n");
+        try out.print("\n");
+        try out.print("Redistribution and use in source and binary forms, with or without\n");
+        try out.print("modification, are permitted provided that the following conditions are met:\n");
+        try out.print("\n");
+        try out.print("1. Redistributions of source code must retain the above copyright notice, this\n");
+        try out.print("   list of conditions and the following disclaimer.\n");
+        try out.print("\n");
+        try out.print("2. Redistributions in binary form must reproduce the above copyright notice,\n");
+        try out.print("   this list of conditions and the following disclaimer in the documentation\n");
+        try out.print("   and/or other materials provided with the distribution.\n");
+        try out.print("\n");
+        try out.print("3. Neither the name of the copyright holder nor the names of its\n");
+        try out.print("   contributors may be used to endorse or promote products derived from\n");
+        try out.print("   this software without specific prior written permission.\n");
+        try out.print("\n");
+        try out.print("THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n");
+        try out.print("AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n");
+        try out.print("IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE\n");
+        try out.print("DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE\n");
+        try out.print("FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL\n");
+        try out.print("DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR\n");
+        try out.print("SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n");
+        try out.print("CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,\n");
+        try out.print("OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n");
+        try out.print("OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n");
     }
 }
 
@@ -702,12 +725,12 @@ pub fn printCredits(ctx: *NativeContext, flag: i64) RuntimeError!void {
     try out.print("PHP Credits\n");
     if (flag & CREDITS_GROUP != 0) {
         try out.tableStart();
-        try out.header(&.{"PHP Group"});
+        try out.colspanHeader("PHP Group");
         try out.row(&.{"Thies C. Arntzen, Stig Bakken, Shane Caraveo, Andi Gutmans, Rasmus Lerdorf, Sam Ruby, Sascha Schumann, Zeev Suraski, Jim Winstead, Andrei Zmievski"});
     }
     if (flag & CREDITS_GENERAL != 0) {
         try out.tableStart();
-        try out.header(&.{"Language Design & Concept"});
+        try out.colspanHeader("Language Design & Concept");
         try out.row(&.{"Andi Gutmans, Rasmus Lerdorf, Zeev Suraski, Marcus Boerger"});
         try out.tableStart();
         try out.colspanHeader("PHP Authors");
@@ -748,7 +771,7 @@ pub fn printCredits(ctx: *NativeContext, flag: i64) RuntimeError!void {
     }
     if (flag & CREDITS_QA != 0) {
         try out.tableStart();
-        try out.header(&.{"PHP Quality Assurance Team"});
+        try out.colspanHeader("PHP Quality Assurance Team");
         try out.row(&.{"Ilia Alshanetsky, Joerg Behrens, Antony Dovgal, Stefan Esser, Moriyoshi Koizumi, Magnus Maatta, Sebastian Nohn, Derick Rethans, Melvyn Sopacua, Pierre-Alain Joye, Dmitry Stogov, Felipe Pena, David Soria Parra, Stanislav Malyshev, Julien Pauli, Stephen Zarkos, Anatol Belski, Remi Collet, Ferenc Kovacs"});
     }
     if (flag & CREDITS_WEB != 0) {
