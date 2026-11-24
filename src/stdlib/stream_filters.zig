@@ -1431,10 +1431,12 @@ fn zlibInflate(ctx: *NativeContext, z: *ZlibData, in: *Brigade, out: *Brigade, c
                 z.finished = true;
                 exit_status = .pass_on;
             } else if (status != zlib.Z_OK and status != zlib.Z_BUF_ERROR) {
-                try fs.noticeDocref(ctx, "zlib: {s}", .{std.mem.span(zlib.zError(status))});
                 b.delref();
                 z.strm.next_in = &z.inbuf;
                 z.strm.avail_in = 0;
+                // last: an error handler may remove this filter and free z
+                // (php 8.5.13)
+                try fs.noticeDocref(ctx, "zlib: {s}", .{std.mem.span(zlib.zError(status))});
                 return .err_fatal;
             }
             desired -= z.strm.avail_in;
