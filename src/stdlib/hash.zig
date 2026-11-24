@@ -135,7 +135,7 @@ fn doHash(ctx: *NativeContext, comptime func: []const u8, algo: []const u8, data
     var input: ?Value.String = null;
     defer if (input) |s| s.release();
     if (is_file) {
-        if (std.mem.indexOfScalar(u8, data, 0) != null) return throwFmt(ctx, "ValueError", func ++ "(): Argument #1 ($algo) must not contain any null bytes", .{});
+        if (std.mem.indexOfScalar(u8, data, 0) != null) return throwFmt(ctx, "ValueError", func ++ "(): Argument #2 ($filename) must not contain any null bytes", .{});
         input = (try filesystem.readPathAs(ctx, data, func)) orelse return NativeResult.scalar(.{ .bool = false });
         // php_hash_do_hash's read loop fails on a read error
         if (filesystem.read_failed) return NativeResult.scalar(.{ .bool = false });
