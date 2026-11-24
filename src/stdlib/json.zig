@@ -290,13 +290,30 @@ const Encoder = struct {
     // php_json_encode_array for an object: its json property table
     fn objectProperties(self: *Encoder, obj: *PhpObject, options: i64) RuntimeError!bool {
         if (try self.stackExhausted(options)) return false;
-        if (obj.recursion & Recursion.gc != 0) {
-            self.error_code = .recursion;
-            try self.append("null");
-            return false;
+        // php guards the property table, not the object, and a DateInterval
+        // already being encoded hands out a fresh table nothing guards
+        // (date_object_get_properties_interval), so only an array cycle or
+        // running out of stack stops one that contains itself. past the
+        // depth limit the result is the depth error either way, and zphp
+        // stops there: its levels cost more memory than php's, so the memory
+        // limit would end the script before the stack ran out
+        const guard = obj.recursion & Recursion.gc == 0;
+        if (!guard) {
+            if (!self.vm.isInstanceOf(obj.class_name, "DateInterval")) {
+                self.error_code = .recursion;
+                try self.append("null");
+                return false;
+            }
+            if (self.depth > self.max_depth) {
+                self.error_code = .depth;
+                if (options & PARTIAL_OUTPUT_ON_ERROR != 0) try self.append("null");
+                return false;
+            }
         }
-        obj.recursion |= Recursion.gc;
-        defer obj.recursion &= ~Recursion.gc;
+        if (guard) obj.recursion |= Recursion.gc;
+        defer if (guard) {
+            obj.recursion &= ~Recursion.gc;
+        };
         var listing = try object_properties.list(self.vm, obj, .json, self.a);
         defer listing.deinit(self.a);
         const holder = listing.takeHolder();
