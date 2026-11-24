@@ -5321,6 +5321,17 @@ pub const VM = struct {
     // exit() unwinds by itself
     fn unwindFailedCall(self: *VM, base_frame: usize) void {
         if (self.exit_requested) return;
+        self.dropFramesAbove(base_frame);
+    }
+
+    // a destructor that exit()ed under code that discards its failure: its
+    // frames go now, so the releasing code goes on in its own frame until
+    // it sees the exit (drain_raised)
+    fn dropExitedFrames(self: *VM, base_frame: usize) void {
+        if (self.exit_requested) self.dropFramesAbove(base_frame);
+    }
+
+    fn dropFramesAbove(self: *VM, base_frame: usize) void {
         if (self.frame_count <= base_frame) return;
         const entry_sp = self.frames[base_frame].entry_sp;
         if (self.pending_exception) |exc| self.chainHeldExceptions(exc, base_frame, entry_sp);
@@ -11261,7 +11272,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
 
-                    self.enterHandler(handler, exception, .owned);
+                    if (!self.enterHandler(handler, exception, .owned)) return error.RuntimeError;
                 },
 
                 .push_handler => {
@@ -11475,7 +11486,7 @@ pub const VM = struct {
                                             const handler = self.exception_handlers[self.handler_count - 1];
                                             if (handler.frame_count > base_frame or base_frame == 0) {
                                                 self.pending_exception = null;
-                                                self.enterHandler(handler, exc, .owned);
+                                                if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                                 continue;
                                             }
                                         }
@@ -12367,7 +12378,7 @@ pub const VM = struct {
                                     self.pending_exception = null;
                                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                         const handler = self.exception_handlers[self.handler_count - 1];
-                                        self.enterHandler(handler, exc, .owned);
+                                        if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                         continue;
                                     }
                                     self.pending_exception = exc;
@@ -12618,7 +12629,7 @@ pub const VM = struct {
                                     self.pending_exception = null;
                                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                         const handler = self.exception_handlers[self.handler_count - 1];
-                                        self.enterHandler(handler, exc, .owned);
+                                        if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                         continue;
                                     }
                                     self.pending_exception = exc;
@@ -13548,7 +13559,7 @@ pub const VM = struct {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
-                                    self.enterHandler(handler, exc, .owned);
+                                    if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                     continue;
                                 }
                                 self.pending_exception = exc;
@@ -13834,7 +13845,7 @@ pub const VM = struct {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
-                                    self.enterHandler(handler, exc, .owned);
+                                    if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                     continue;
                                 }
                                 self.pending_exception = exc;
@@ -14006,7 +14017,7 @@ pub const VM = struct {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
-                                    self.enterHandler(handler, exc, .owned);
+                                    if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                     continue;
                                 }
                                 self.pending_exception = exc;
@@ -14194,7 +14205,7 @@ pub const VM = struct {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
-                                    self.enterHandler(handler, exc, .owned);
+                                    if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                     continue;
                                 }
                                 self.pending_exception = exc;
@@ -15506,7 +15517,7 @@ pub const VM = struct {
                             self.pending_exception = null;
                             if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                 const handler = self.exception_handlers[self.handler_count - 1];
-                                self.enterHandler(handler, exc, .owned);
+                                if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                 return;
                             }
                             self.pending_exception = exc;
@@ -19275,13 +19286,14 @@ pub const VM = struct {
             return false;
         }
 
-        self.enterHandler(handler, .{ .object = obj }, .borrowed);
-        return true;
+        return self.enterHandler(handler, .{ .object = obj }, .borrowed);
     }
 
     // enters an exception handler: unwinds the frames and operands above it
-    // and pushes the exception for its catch
-    fn enterHandler(self: *VM, handler: ExceptionHandler, exc: Value, comptime ownership: enum { owned, borrowed }) void {
+    // and pushes the exception for its catch. false when a destructor (or a
+    // destroyed fiber's finally) the unwinding ran called exit(): no catch
+    // runs, and the caller stops for the exit
+    fn enterHandler(self: *VM, handler: ExceptionHandler, exc: Value, comptime ownership: enum { owned, borrowed }) bool {
         self.chainHeldExceptions(exc, handler.frame_count, handler.sp);
         // initializers the exception left
         while (self.initializer_scopes.items.len > 0 and self.initializer_scopes.items[self.initializer_scopes.items.len - 1].handlers >= self.handler_count) {
@@ -19304,6 +19316,10 @@ pub const VM = struct {
         // a destructor's exception replaces the one caught, with it as its
         // previous
         if (self.hasPendingReleases()) {
+            // held across the drain, which lets go of what was in flight
+            // when a destructor exits
+            const was_exiting = self.exit_requested;
+            stackRetain(thrown);
             self.pending_exception = thrown;
             if (self.draining_destructors) self.drainNested() else {
                 self.drainPendingDestruct();
@@ -19311,10 +19327,19 @@ pub const VM = struct {
                 self.collectCyclesIfNeeded();
             }
             self.drain_raised = false;
-            thrown = self.takePending() orelse thrown;
+            const replaced = self.takePending();
+            if (self.exit_requested and !was_exiting) {
+                if (replaced) |r| self.stackRelease(r);
+                self.stackRelease(thrown);
+                return false;
+            }
+            const original = thrown;
+            thrown = replaced orelse thrown;
+            self.stackRelease(original);
         }
         self.pushTransfer(thrown);
         self.currentFrame().ip = handler.catch_ip;
+        return true;
     }
 
     // an exception unwinding to `frame_count` frames and `sp` operands takes
@@ -19350,8 +19375,7 @@ pub const VM = struct {
         const handler = self.exception_handlers[self.handler_count - 1];
         if (handler.frame_count <= base_frame and base_frame > 0) return false;
         self.pending_exception = null;
-        self.enterHandler(handler, exc, .owned);
-        return true;
+        return self.enterHandler(handler, exc, .owned);
     }
 
     // runs a generator to its next yield. a generator delegating with yield
@@ -30883,7 +30907,7 @@ pub const VM = struct {
                     self.pending_exception = null;
                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                         const handler = self.exception_handlers[self.handler_count - 1];
-                        self.enterHandler(handler, exc, .owned);
+                        if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                         return;
                     }
                     self.pending_exception = exc;
@@ -33842,7 +33866,8 @@ pub const VM = struct {
             if (self.callDestructorInGcFiber(obj)) return;
         }
         const in_flight = self.takePending();
-        _ = self.callMethod(obj, "__destruct", &.{}) catch {};
+        const base_frame = self.frame_count;
+        if (self.callMethod(obj, "__destruct", &.{})) |_| {} else |_| self.dropExitedFrames(base_frame);
         self.settleDrainException(in_flight);
     }
 
@@ -33850,8 +33875,15 @@ pub const VM = struct {
     // pending for the releasing code, with the one that was in flight
     // before as its previous; with none, that one is in flight again
     fn settleDrainException(self: *VM, in_flight: ?Value) void {
+        // exit() in a destructor or a destroyed fiber's finally ends the
+        // script: the releasing code stops as for an exception
+        if (self.exit_requested) {
+            if (in_flight) |previous| self.stackRelease(previous);
+            self.drain_raised = true;
+            return;
+        }
         if (self.pending_exception) |ex| {
-            if (self.exit_requested or self.isUnwindMarker(ex)) {
+            if (self.isUnwindMarker(ex)) {
                 if (in_flight) |previous| self.stackRelease(previous);
                 return;
             }
@@ -33875,7 +33907,7 @@ pub const VM = struct {
     inline fn drainRaised(self: *VM) bool {
         if (!self.drain_raised) return false;
         self.drain_raised = false;
-        return self.pending_exception != null;
+        return self.pending_exception != null or self.exit_requested;
     }
 
     fn destroyReleasedObject(self: *VM, obj: *PhpObject, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
@@ -33908,7 +33940,10 @@ pub const VM = struct {
             // destructor of this drain set for the exception now waiting
             const raised = self.drain_raised;
             const refused = self.destructorRefused(obj) catch true;
-            if (!refused) _ = self.callMethod(obj, "__destruct", &.{}) catch {};
+            const base_frame = self.frame_count;
+            if (!refused) {
+                if (self.callMethod(obj, "__destruct", &.{})) |_| {} else |_| self.dropExitedFrames(base_frame);
+            }
             if (raised) self.drain_raised = true;
             self.settleDrainException(in_flight);
             // what the destructor's writes through references dropped dies

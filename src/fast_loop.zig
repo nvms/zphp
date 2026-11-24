@@ -1807,12 +1807,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
     }
 }
 
-// a destructor the drain ran threw: the exception is raised here, where the
-// value was released, by the loop that called this one
+// a destructor the drain ran threw or exit()ed: the exception (or the exit)
+// is raised here, where the value was released, by the loop that called
+// this one
 fn raiseDrained(self: *VM, frame: anytype, ip: usize) RuntimeError!void {
     self.drain_raised = false;
     frame.ip = ip;
-    if (self.pending_exception == null) return;
+    if (self.pending_exception == null and !self.exit_requested) return;
     return error.RuntimeError;
 }
 
