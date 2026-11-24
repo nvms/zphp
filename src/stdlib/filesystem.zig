@@ -2488,13 +2488,16 @@ fn globMatchFlags(pattern: []const u8, name: []const u8, flags: i64) bool {
                 ni += 1;
                 continue;
             } else if (pattern[pi] == '[') {
-                if (std.mem.indexOfScalarPos(u8, pattern, pi + 1, ']')) |close| {
-                    var negate = false;
-                    var class_start = pi + 1;
-                    if (class_start < close and (pattern[class_start] == '!' or pattern[class_start] == '^')) {
-                        negate = true;
-                        class_start += 1;
-                    }
+                // a leading '!' or '^' negates the class (php_glob.c takes
+                // '^' as '!' since php 8.5.13), and the class's first
+                // character is itself even when it is ']'
+                var negate = false;
+                var class_start = pi + 1;
+                if (class_start < pattern.len and (pattern[class_start] == '!' or pattern[class_start] == '^')) {
+                    negate = true;
+                    class_start += 1;
+                }
+                if (std.mem.indexOfScalarPos(u8, pattern, @min(class_start + 1, pattern.len), ']')) |close| {
                     const c = name[ni];
                     var matched = false;
                     var k = class_start;
