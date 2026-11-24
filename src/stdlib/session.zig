@@ -40,6 +40,7 @@ pub const entries = .{
 // "register a custom handler before starting" pattern run end-to-end without
 // hitting an undefined-function fatal
 fn native_session_set_save_handler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len >= 1) try refuseWhileUploadProgress(ctx);
     // legacy 6-callable form: session_set_save_handler(open, close, read, write, destroy, gc, ...)
     if (args.len >= 6 and args[0] != .object) return NativeResult.scalar(.{ .bool = true });
     // OO form: session_set_save_handler($handler [, $register_shutdown = true])
@@ -264,8 +265,34 @@ pub fn isActive(ctx: *NativeContext) bool {
 
 // the directives the session module registers (the trans sid tags and hosts
 // are the url rewriter's)
+// the settings whose handlers refuse changes while a session runs or
+// upload progress is on (SESSION_CHECK_*_STATE)
 pub fn isSessionIni(name: []const u8) bool {
-    return std.mem.startsWith(u8, name, "session.") and !std.mem.eql(u8, name, "session.trans_sid_tags") and !std.mem.eql(u8, name, "session.trans_sid_hosts");
+    if (!std.mem.startsWith(u8, name, "session.")) return false;
+    for ([_][]const u8{ "session.trans_sid_tags", "session.trans_sid_hosts", "session.encode_sources" }) |other| {
+        if (std.mem.eql(u8, name, other)) return false;
+    }
+    return !isPerDirIni(name);
+}
+
+// PHP_INI_PERDIR: ini_set() can't change these at all
+pub fn isPerDirIni(name: []const u8) bool {
+    return std.mem.eql(u8, name, "session.auto_start") or std.mem.startsWith(u8, name, "session.upload_progress.");
+}
+
+pub const upload_progress_refusal = "Session ini settings cannot be changed at runtime when session.upload_progress.enabled is On";
+
+// PS(rfc1867_enabled): off by default since php 8.5.13
+pub fn uploadProgressEnabled(ctx: *NativeContext) bool {
+    return iniBool(iniValue(ctx, "session.upload_progress.enabled", "0"));
+}
+
+// the session functions that set a setting go through its ini handler,
+// which refuses while upload progress is on (SESSION_CHECK_UPLOAD_PROGRESS_STATE)
+fn refuseWhileUploadProgress(ctx: *NativeContext) RuntimeError!void {
+    if (!uploadProgressEnabled(ctx)) return;
+    try ctx.vm.setPendingException("Error", upload_progress_refusal);
+    return error.RuntimeError;
 }
 
 fn iniBool(v: []const u8) bool {
@@ -423,7 +450,8 @@ fn native_session_regenerate_id(ctx: *NativeContext, args: []const Value) Runtim
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_session_name(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn native_session_name(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len >= 1 and args[0] != .null) try refuseWhileUploadProgress(ctx);
     return NativeResult.literal(default_name);
 }
 
@@ -452,6 +480,7 @@ fn native_session_unset(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
 fn native_session_save_path(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const current = try Value.String.create(ctx.allocator, currentSessionDir(ctx));
     errdefer current.release();
+    if (args.len >= 1 and args[0] != .null) try refuseWhileUploadProgress(ctx);
     if (args.len >= 1 and args[0] == .string and args[0].string.bytes().len > 0) {
         try setSessionVar(ctx, "__session_save_path", args[0]);
     }
@@ -459,19 +488,21 @@ fn native_session_save_path(ctx: *NativeContext, args: []const Value) RuntimeErr
 }
 
 fn native_session_module_name(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    _ = ctx;
+    if (args.len >= 1 and args[0] != .null) try refuseWhileUploadProgress(ctx);
     if (args.len >= 1) {
         // accept and ignore - we only implement the 'files' handler
     }
     return NativeResult.literal("files");
 }
 
-fn native_session_cache_limiter(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_session_cache_limiter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len >= 1 and args[0] != .null) try refuseWhileUploadProgress(ctx);
     if (args.len >= 1 and args[0] == .string) return NativeResult.share(args[0]);
     return NativeResult.literal("nocache");
 }
 
-fn native_session_cache_expire(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_session_cache_expire(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len >= 1 and args[0] != .null) try refuseWhileUploadProgress(ctx);
     if (args.len >= 1 and args[0] == .int) return NativeResult.share(args[0]);
     return NativeResult.scalar(.{ .int = 180 });
 }
@@ -504,7 +535,8 @@ fn native_session_reset(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_session_set_cookie_params(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn native_session_set_cookie_params(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    try refuseWhileUploadProgress(ctx);
     return NativeResult.scalar(.{ .bool = true });
 }
 

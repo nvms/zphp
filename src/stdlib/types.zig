@@ -1985,7 +1985,7 @@ pub fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "session.sid_bits_per_character")) return "4";
     if (std.mem.eql(u8, name, "session.sid_length")) return "32";
     if (std.mem.eql(u8, name, "session.upload_progress.cleanup")) return "1";
-    if (std.mem.eql(u8, name, "session.upload_progress.enabled")) return "1";
+    if (std.mem.eql(u8, name, "session.upload_progress.enabled")) return "0";
     if (std.mem.eql(u8, name, "session.upload_progress.freq")) return "1%";
     if (std.mem.eql(u8, name, "session.upload_progress.min_freq")) return "1";
     if (std.mem.eql(u8, name, "session.upload_progress.name")) return "PHP_SESSION_UPLOAD_PROGRESS";
@@ -2083,6 +2083,14 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         // (SESSION_CHECK_ACTIVE_STATE), and deprecate the transparent
         // session id settings
         const session = @import("session.zig");
+        if (session.isPerDirIni(name)) return NativeResult.scalar(Value{ .bool = false });
+        if (session.isSessionIni(name) and session.uploadProgressEnabled(ctx)) {
+            // php marks the setting modified before its handler refuses, so
+            // ini_restore() runs the handler too
+            if (!ctx.vm.ic.?.ini_values.contains(name)) _ = try ctx.vm.setIni(name, previous);
+            try ctx.vm.setPendingException("Error", session.upload_progress_refusal);
+            return error.RuntimeError;
+        }
         if (session.isActive(ctx) and session.isSessionIni(name)) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "ini_set(): Session ini settings cannot be changed when a session is active (started from {s})", .{session.startedAt(ctx)});
             defer ctx.allocator.free(msg);
@@ -2668,6 +2676,13 @@ fn native_ini_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 fn native_ini_restore(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
     const name = args[0].string.bytes();
+    // a modified session setting goes back through its handler, which
+    // refuses while upload progress is on
+    const session = @import("session.zig");
+    if (session.isSessionIni(name) and ctx.vm.ic.?.ini_values.contains(name) and session.uploadProgressEnabled(ctx)) {
+        try ctx.vm.setPendingException("Error", session.upload_progress_refusal);
+        return error.RuntimeError;
+    }
     try ctx.vm.restoreIni(name);
     if (std.mem.eql(u8, name, "memory_limit")) ctx.vm.applyConfiguredMemoryLimit(false);
     if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
