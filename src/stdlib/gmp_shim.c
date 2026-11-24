@@ -125,3 +125,15 @@ unsigned long zphp_mpz_scan1(const zphp_mpz* a, unsigned long start) { return mp
 int zphp_mpz_legendre(const zphp_mpz* a, const zphp_mpz* p) { return mpz_legendre(a->v, p->v); }
 int zphp_mpz_jacobi(const zphp_mpz* a, const zphp_mpz* b) { return mpz_jacobi(a->v, b->v); }
 int zphp_mpz_perfect_square_p(const zphp_mpz* a) { return mpz_perfect_square_p(a->v); }
+int zphp_mpz_fits_ulong_p(const zphp_mpz* a) { return mpz_fits_ulong_p(a->v); }
+uint64_t zphp_mpz_get_ui64(const zphp_mpz* a) {
+    uint64_t v = 0;
+    if (mpz_sgn(a->v) != 0) mpz_export(&v, NULL, -1, sizeof v, 0, 0, a->v);
+    return v;
+}
+int zphp_mpz_odd_p(const zphp_mpz* a) { return mpz_odd_p(a->v); }
+void zphp_mpz_fac_ui(zphp_mpz* r, unsigned long n) { mpz_fac_ui(r->v, n); }
+void zphp_mpz_bin_ui(zphp_mpz* r, const zphp_mpz* n, unsigned long k) { mpz_bin_ui(r->v, n->v, k); }
+void zphp_mpz_powm_sec(zphp_mpz* r, const zphp_mpz* a, const zphp_mpz* e, const zphp_mpz* m) { mpz_powm_sec(r->v, a->v, e->v, m->v); }
+/* mpz_prevprime (gmp 6.3): 2 when the result is surely prime, 1 when probably */
+int zphp_mpz_prevprime(zphp_mpz* r, const zphp_mpz* a) { return mpz_prevprime(r->v, a->v); }

@@ -424,6 +424,8 @@ pub const functions = Map.initComptime(.{
     .{ "gmp_popcount", "gmp" },
     .{ "gmp_pow", "gmp" },
     .{ "gmp_powm", "gmp" },
+    .{ "gmp_powm_sec", "gmp" },
+    .{ "gmp_prevprime", "gmp" },
     .{ "gmp_prob_prime", "gmp" },
     .{ "gmp_root", "gmp" },
     .{ "gmp_scan0", "gmp" },

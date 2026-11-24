@@ -3059,6 +3059,8 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "gmp_popcount", Signature{ .params = &[_]Param{ .{ .name = "num", .type = "GMP|string|int" } }, .returns = "int" } },
     .{ "gmp_pow", Signature{ .params = &[_]Param{ .{ .name = "num", .type = "GMP|string|int" }, .{ .name = "exponent", .type = "int" } }, .returns = "GMP" } },
     .{ "gmp_powm", Signature{ .params = &[_]Param{ .{ .name = "num", .type = "GMP|string|int" }, .{ .name = "exponent", .type = "GMP|string|int" }, .{ .name = "modulus", .type = "GMP|string|int" } }, .returns = "GMP" } },
+    .{ "gmp_powm_sec", Signature{ .params = &[_]Param{ .{ .name = "num", .type = "GMP|string|int" }, .{ .name = "exponent", .type = "GMP|string|int" }, .{ .name = "modulus", .type = "GMP|string|int" } }, .returns = "GMP" } },
+    .{ "gmp_prevprime", Signature{ .params = &[_]Param{ .{ .name = "num", .type = "GMP|string|int" }, .{ .name = "definitely_prime", .default = .null, .by_ref = true } }, .returns = "GMP" } },
     .{ "gmp_prob_prime", Signature{ .params = &[_]Param{ .{ .name = "num", .type = "GMP|string|int" }, .{ .name = "repetitions", .default = .{ .int = 10 }, .type = "int" } }, .returns = "int" } },
     .{ "gmp_root", Signature{ .params = &[_]Param{ .{ .name = "num", .type = "GMP|string|int" }, .{ .name = "nth", .type = "int" } }, .returns = "GMP" } },
     .{ "gmp_scan0", Signature{ .params = &[_]Param{ .{ .name = "num1", .type = "GMP|string|int" }, .{ .name = "start", .type = "int" } }, .returns = "int" } },
