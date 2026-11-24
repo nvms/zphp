@@ -1341,6 +1341,11 @@ fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
             break;
         }
     }
+    // php 8.6 returns false rather than the matches before a failed one
+    if (preg_error != NO_ERROR) {
+        ctx.vm.releaseUnheldArray(out);
+        return NativeResult.scalar(.{ .bool = false });
+    }
     return NativeResult.borrowed(.{ .array = out });
 }
 
