@@ -53,7 +53,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Randomizer::pickArrayKeys", rzPickArrayKeys);
 
     // Random\IntervalBoundary, the interval getFloat() draws from
-    var boundary = ClassDef{ .name = "Random\\IntervalBoundary", .is_enum = true, .is_final = true };
+    var boundary = ClassDef{ .name = "Random\\IntervalBoundary", .is_enum = true };
     for (boundary_cases) |name| {
         const case_obj = try a.create(PhpObject);
         case_obj.* = .{ .class_name = "Random\\IntervalBoundary", .enum_case = true };

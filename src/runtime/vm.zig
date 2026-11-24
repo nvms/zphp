@@ -2702,8 +2702,7 @@ pub const VM = struct {
         // PHP 8.4 RoundingMode enum. registered as a unit (unbacked) enum to
         // match PHP's exposed surface - the cases have a `name` property only,
         // and the internal mapping from case -> mode int happens inside round()
-        var rm_def = ClassDef{ .name = "RoundingMode", .is_enum = true };
-        const rm_cases = [_][]const u8{
+        try vm.registerUnitEnum("RoundingMode", &.{
             "HalfAwayFromZero",
             "HalfTowardsZero",
             "HalfEven",
@@ -2712,20 +2711,9 @@ pub const VM = struct {
             "AwayFromZero",
             "NegativeInfinity",
             "PositiveInfinity",
-        };
-        for (rm_cases) |name| {
-            const case_obj = try allocator.create(PhpObject);
-            case_obj.* = .{ .class_name = "RoundingMode", .enum_case = true };
-            try vm.objects.append(allocator, case_obj);
-            try case_obj.set(allocator, "name", .{ .string = Value.String.borrowed(name) });
-            objRetain(case_obj);
-            try rm_def.constants.put(allocator, name, .{ .object = case_obj });
-            try rm_def.constant_order.append(allocator, name);
-            try rm_def.case_order.append(allocator, name);
-        }
-        try rm_def.interfaces.append(allocator, "UnitEnum");
-        try vm.classes.put(allocator, "RoundingMode", rm_def);
-        try vm.registerEnumMethods("RoundingMode", 0);
+        });
+        // php 8.6's SortDirection, which no function takes yet
+        try vm.registerUnitEnum("SortDirection", &.{ "Ascending", "Descending" });
 
         // the internal classes whose objects refuse dynamic properties in php
         // (Error "Cannot create dynamic property"), where others only deprecate
@@ -21755,6 +21743,25 @@ pub const VM = struct {
             owner = if (cls.parent) |p| self.classes.getPtr(p) else null;
         }
         return false;
+    }
+
+    // an internal unit enum: each case a `name`-only object the class holds
+    pub fn registerUnitEnum(vm: *VM, name: []const u8, cases: []const []const u8) !void {
+        const allocator = vm.allocator;
+        var def = ClassDef{ .name = name, .is_enum = true };
+        for (cases) |case| {
+            const case_obj = try allocator.create(PhpObject);
+            case_obj.* = .{ .class_name = name, .enum_case = true };
+            try vm.objects.append(allocator, case_obj);
+            try case_obj.set(allocator, "name", .{ .string = Value.String.borrowed(case) });
+            objRetain(case_obj);
+            try def.constants.put(allocator, case, .{ .object = case_obj });
+            try def.constant_order.append(allocator, case);
+            try def.case_order.append(allocator, case);
+        }
+        try def.interfaces.append(allocator, "UnitEnum");
+        try vm.classes.put(allocator, name, def);
+        try vm.registerEnumMethods(name, 0);
     }
 
     fn handleEnumDecl(self: *VM) RuntimeError!void {

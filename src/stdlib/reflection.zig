@@ -90,7 +90,7 @@ fn reflectionNullResult(_: *NativeContext, _: []const Value) RuntimeError!Native
 
 pub fn register(vm: *VM, a: Allocator) !void {
     // Unit enum cases are request-lifetime objects, just like RoundingMode.
-    var hook_type = ClassDef{ .name = "PropertyHookType", .is_enum = true, .is_final = true };
+    var hook_type = ClassDef{ .name = "PropertyHookType", .is_enum = true };
     for ([_][]const u8{ "Get", "Set" }) |name| {
         const obj = try a.create(PhpObject);
         obj.* = .{ .class_name = "PropertyHookType", .enum_case = true };
@@ -2026,19 +2026,20 @@ fn rcIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .bool = false });
-    if (cls.is_enum) return NativeResult.scalar(.{ .bool = true });
+    // a declared enum is implicitly final; php's stubs leave internal ones not
+    if (cls.is_enum and !cls.is_internal) return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = cls.is_final });
 }
 
 fn rcGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // ReflectionClass::IS_EXPLICIT_ABSTRACT=64, IS_FINAL=32, IS_READONLY=65536;
-    // an enum is implicitly final
+    // a declared enum is implicitly final, an internal one not
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .int = 0 });
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .int = 0 });
     var mods: i64 = 0;
     if (cls.is_abstract) mods |= 64;
-    if (cls.is_final or cls.is_enum) mods |= 32;
+    if (cls.is_final or (cls.is_enum and !cls.is_internal)) mods |= 32;
     if (cls.is_readonly) mods |= 65536;
     return NativeResult.scalar(.{ .int = mods });
 }
