@@ -1275,19 +1275,22 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
         VM.retainValue(.{ .array = data });
         var delayed_data = false;
         defer if (!delayed_data) ctx.vm.releaseValue(.{ .array = data });
-        if (!try readArrayElements(ctx, u, sc, data, @intCast(elements))) {
+        // an object without its closing brace is never handed its data (php
+        // 8.5.13), which lives on to the end of the call as php's tmp var
+        if (!try readArrayElements(ctx, u, sc, data, @intCast(elements)) or !finishNested(sc)) {
             obj.destructor_called = true;
+            try u.keep(ctx.allocator, .{ .array = data });
             return false;
         }
         // __unserialize() runs once the whole string is read
         VM.retainValue(.{ .object = obj });
         try u.delayed.append(ctx.allocator, .{ .obj = obj, .data = data });
         delayed_data = true;
-        return finishNested(sc);
+        return true;
     }
 
     const has_wakeup = !incomplete and ctx.vm.hasMethod(class_name, "__wakeup");
-    if (!try readProperties(ctx, u, sc, obj, @intCast(elements), incomplete)) {
+    if (!try readProperties(ctx, u, sc, obj, @intCast(elements), incomplete) or !finishNested(sc)) {
         if (has_wakeup) obj.destructor_called = true;
         return false;
     }
@@ -1295,7 +1298,7 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
         VM.retainValue(.{ .object = obj });
         try u.delayed.append(ctx.allocator, .{ .obj = obj, .data = null });
     }
-    return finishNested(sc);
+    return true;
 }
 
 // object_init_ex: the classes php refuses to instantiate throw
