@@ -5680,7 +5680,21 @@ fn native_finfo_open(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
 
 fn native_finfo_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    try checkFinfoPath(ctx, "finfo_file(): Argument #2", args[1].string.bytes());
     return native_mime_content_type(ctx, &.{args[1]});
+}
+
+// Z_PARAM_PATH refuses a nul byte, then php_finfo_get_type an empty name,
+// numbering the argument as the function or the method takes it
+fn checkFinfoPath(ctx: *NativeContext, comptime arg: []const u8, path: []const u8) RuntimeError!void {
+    const what = if (std.mem.indexOfScalar(u8, path, 0) != null)
+        arg ++ " ($filename) must not contain any null bytes"
+    else if (path.len == 0)
+        arg ++ " ($filename) must not be empty"
+    else
+        return;
+    try ctx.vm.setPendingException("ValueError", what);
+    return error.RuntimeError;
 }
 
 fn native_finfo_buffer(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -5699,6 +5713,7 @@ fn finfoConstruct(_: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn finfoFile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    try checkFinfoPath(ctx, "finfo::file(): Argument #1", args[0].string.bytes());
     return native_mime_content_type(ctx, args[0..1]);
 }
 
