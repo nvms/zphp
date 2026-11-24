@@ -511,13 +511,29 @@ jobs:
           # a restored zig cache has built stale binaries (2026-11: a soak
           # that leaked only on ci, a gc test that failed only there)
           use-cache: false
-      - uses: shivammathur/setup-php@v2
-        with:
-          # the target release exactly (src/php_version.zig): on windows
-          # update: true keeps the runner's preinstalled patch release
-          php-version: '8.5.13'
-          coverage: none
-          extensions: mbstring, xml, curl, openssl, sqlite3, pdo_sqlite, intl, gmp, gd, sodium, bcmath, ldap
+      # the reference php is the target release exactly (src/php_version.zig).
+      # setup-php keeps the runner's preinstalled 8.5 whatever patch release
+      # is asked for, so php's own windows build is installed here
+      - name: install php
+        shell: pwsh
+        env:
+          PHP_ZIP: php-8.5.13-nts-Win32-vs17-x64.zip
+          PHP_SHA256: 4ae6c72bc0ca4f6b8f3e9b107874bae0135699f3aabe6c26a1f6103d040eea97
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP $env:PHP_ZIP
+          Invoke-WebRequest "https://downloads.php.net/~windows/releases/archives/$env:PHP_ZIP" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:PHP_SHA256) { throw "checksum mismatch for $env:PHP_ZIP" }
+          $dir = Join-Path $env:RUNNER_TEMP 'php'
+          Expand-Archive $zip -DestinationPath $dir
+          $ini = Get-Content (Join-Path $dir 'php.ini-production')
+          $ini += 'extension_dir = "' + (Join-Path $dir 'ext') + '"'
+          foreach ($ext in 'mbstring','curl','openssl','sqlite3','pdo_sqlite','intl','gmp','gd','sodium','bcmath','ldap') {
+            if (Test-Path (Join-Path $dir "ext/php_$ext.dll")) { $ini += "extension=$ext" }
+          }
+          Set-Content (Join-Path $dir 'php.ini') $ini
+          Add-Content $env:GITHUB_PATH $dir
+          & (Join-Path $dir 'php.exe') -v
+          & (Join-Path $dir 'php.exe') -m
       - name: build
         run: zig build
       - name: smoke
