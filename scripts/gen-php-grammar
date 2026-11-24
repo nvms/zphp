@@ -14,7 +14,7 @@
 #
 # pass a tarball or an unpacked source tree to skip the download:
 #
-#   scripts/gen-php-grammar ~/Downloads/php-8.5.12.tar.xz
+#   scripts/gen-php-grammar ~/Downloads/php-8.5.13.tar.xz
 
 import os, re, subprocess, sys, tarfile, tempfile, urllib.request
 
