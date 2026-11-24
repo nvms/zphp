@@ -144,7 +144,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // register the class so attribute reflection and class_exists pick it up
     var override_def = ClassDef{ .name = "Override", .is_final = true };
     try override_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
-    try override_def.attributes.append(a, .{ .name = "Attribute", .args = try attributeTargets(a, 12) });
+    try override_def.attributes.append(a, .{ .name = "Attribute", .args = try attributeTargets(a, 28) });
     try vm.classes.put(a, "Override", override_def);
 
     // PHP 8.2 #[SensitiveParameter] - marks parameters whose values should be

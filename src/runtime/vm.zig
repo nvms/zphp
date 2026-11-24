@@ -11982,6 +11982,25 @@ pub const VM = struct {
                         idef.deinit(self.allocator);
                         return self.raiseCompileFatal(msg, .{ .file = iface_site.file, .line = iface_site.start_line });
                     }
+                    // a constant marked #[\Override] needs a parent interface
+                    // declaring it (php 8.6)
+                    var iface_ca = def.constant_attributes.iterator();
+                    while (iface_ca.next()) |entry| {
+                        if (!hasOverrideAttribute(entry.value_ptr.*)) continue;
+                        var seen_ifaces: std.ArrayListUnmanaged([]const u8) = .empty;
+                        defer seen_ifaces.deinit(self.allocator);
+                        for (idef.parents.items) |parent| try self.collectInterface(&seen_ifaces, parent);
+                        const met = for (seen_ifaces.items) |parent| {
+                            const pdef = self.classes.getPtr(parent) orelse break true;
+                            if (pdef.constants.contains(entry.key_ptr.*)) break true;
+                        } else false;
+                        if (met) continue;
+                        const site: SourcePosition = .{ .file = iface_site.file, .line = iface_site.start_line };
+                        const name = entry.key_ptr.*;
+                        def.deinit(self.allocator);
+                        idef.deinit(self.allocator);
+                        return self.constantOverrideFatal(iface_name, name, site);
+                    }
                     // a property marked #[\Override] needs a parent interface
                     // declaring it
                     var iface_pa = def.property_attributes.iterator();
@@ -21577,6 +21596,16 @@ pub const VM = struct {
             const at: SourcePosition = if (func) |f| .{ .file = if (f.file_path.len > 0) f.file_path else def.file_path, .line = f.start_line } else .{ .file = def.file_path, .line = def.start_line };
             return self.raiseCompileFatal(msg, at);
         }
+        // php 8.6: a class constant (or enum case), the class's own or a
+        // trait's, needs a parent's non-private constant or an interface's
+        var cit = def.constant_attributes.iterator();
+        while (cit.next()) |entry| {
+            if (!hasOverrideAttribute(entry.value_ptr.*)) continue;
+            if (self.inheritsConstant(def, entry.key_ptr.*)) continue;
+            return self.constantOverrideFatal(class_name, entry.key_ptr.*, .{ .file = def.file_path, .line = def.start_line });
+        }
+        if (try self.traitConstantOverrideMissing(def, def.used_traits.items, 0)) |name|
+            return self.constantOverrideFatal(class_name, name, .{ .file = def.file_path, .line = def.start_line });
         var pit = def.property_attributes.iterator();
         while (pit.next()) |entry| {
             if (!hasOverrideAttribute(entry.value_ptr.*)) continue;
@@ -21653,6 +21682,58 @@ pub const VM = struct {
                 for (idef.properties.items) |prop| if (std.mem.eql(u8, prop.name, name) and has(idef, prop, kind)) return true;
             }
             owner = if (cls.parent) |p| self.classes.getPtr(p) else null;
+        }
+        return false;
+    }
+
+    fn constantOverrideFatal(self: *VM, class_name: []const u8, name: []const u8, at: SourcePosition) RuntimeError {
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s} has #[\\Override] attribute, but no matching parent constant exists", .{ class_name, name });
+        defer self.allocator.free(msg);
+        return self.raiseCompileFatal(msg, at);
+    }
+
+    // a constant marked #[\Override] in a trait the class uses, which the
+    // class doesn't declare itself, and which it inherits from nothing
+    fn traitConstantOverrideMissing(self: *VM, def: *const ClassDef, traits: []const []const u8, depth: usize) RuntimeError!?[]const u8 {
+        if (depth > 32) return null;
+        for (traits) |t| {
+            if (self.classes.getPtr(t)) |tdef| {
+                var it = tdef.constant_attributes.iterator();
+                while (it.next()) |entry| {
+                    if (def.constant_attributes.contains(entry.key_ptr.*)) continue;
+                    if (!hasOverrideAttribute(entry.value_ptr.*)) continue;
+                    if (!self.inheritsConstant(def, entry.key_ptr.*)) return entry.key_ptr.*;
+                }
+            }
+            if (self.trait_uses.get(t)) |subs| if (try self.traitConstantOverrideMissing(def, subs, depth + 1)) |name| return name;
+        }
+        return null;
+    }
+
+    // whether a constant is one a parent declares (not privately) or an
+    // interface does, as do_inherit_constant_check resets ZEND_ACC_OVERRIDE.
+    // an ancestor zphp hasn't loaded counts as declaring it
+    fn inheritsConstant(self: *VM, def: *const ClassDef, name: []const u8) bool {
+        var current = def.parent;
+        while (current) |pn| {
+            const cls = self.classes.getPtr(pn) orelse return true;
+            if (cls.constants.contains(name) and (cls.const_visibility.get(name) orelse .public) != .private) return true;
+            current = cls.parent;
+        }
+        var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer seen.deinit(self.allocator);
+        var owner: ?*const ClassDef = def;
+        while (owner) |cls| {
+            for (cls.interfaces.items) |iface| self.collectInterface(&seen, iface) catch return true;
+            owner = if (cls.parent) |p| self.classes.getPtr(p) else null;
+        }
+        for (seen.items) |iface| {
+            // an internal interface (UnitEnum, BackedEnum) is known only as one
+            const idef = self.classes.getPtr(iface) orelse {
+                if (self.interfaces.contains(iface)) continue;
+                return true;
+            };
+            if (idef.constants.contains(name)) return true;
         }
         return false;
     }

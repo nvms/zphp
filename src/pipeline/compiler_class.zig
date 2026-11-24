@@ -278,7 +278,7 @@ const internal_attributes = [_]struct { name: []const u8, flags: u8, repeatable:
     .{ .name = "ReturnTypeWillChange", .flags = 4 },
     .{ .name = "AllowDynamicProperties", .flags = 1 },
     .{ .name = "SensitiveParameter", .flags = 32 },
-    .{ .name = "Override", .flags = 12 },
+    .{ .name = "Override", .flags = 28 },
     .{ .name = "Deprecated", .flags = 87 },
     .{ .name = "NoDiscard", .flags = 6 },
     .{ .name = "DelayedTargetValidation", .flags = 127 },
