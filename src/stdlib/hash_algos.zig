@@ -1267,14 +1267,10 @@ const Snefru = struct {
     }
 
     fn update(c: *Ctx, input: []const u8) void {
-        const bits: u64 = @as(u64, input.len) *% 8;
-        if (@as(u64, 0xffffffff - c.count[1]) < bits) {
-            c.count[0] +%= 1;
-            c.count[1] = 0xffffffff - c.count[1];
-            c.count[1] = (@as(u32, @truncate(input.len)) *% 8) -% c.count[1];
-        } else {
-            c.count[1] +%= @as(u32, @truncate(input.len)) *% 8;
-        }
+        // the bit count as one 64-bit number, high word first (php 8.5.13)
+        const count = ((@as(u64, c.count[0]) << 32) | c.count[1]) +% @as(u64, input.len) *% 8;
+        c.count[0] = @truncate(count >> 32);
+        c.count[1] = @truncate(count);
         const len: usize = c.length;
         if (len + input.len < 32) {
             @memcpy(c.buffer[len..][0..input.len], input);
@@ -1444,14 +1440,10 @@ fn Gost(comptime crypto: bool) type {
         }
 
         fn update(c: *Ctx, input: []const u8) void {
-            const bits: u64 = @as(u64, input.len) *% 8;
-            if (@as(u64, 0xffffffff - c.count[0]) < bits) {
-                c.count[1] +%= 1;
-                c.count[0] = 0xffffffff - c.count[0];
-                c.count[0] = @as(u32, @truncate(bits)) -% c.count[0];
-            } else {
-                c.count[0] +%= @truncate(bits);
-            }
+            // the bit count as one 64-bit number, low word first (php 8.5.13)
+            const count = ((@as(u64, c.count[1]) << 32) | c.count[0]) +% @as(u64, input.len) *% 8;
+            c.count[0] = @truncate(count);
+            c.count[1] = @truncate(count >> 32);
             const len: usize = c.length;
             if (len + input.len < 32) {
                 @memcpy(c.buffer[len..][0..input.len], input);
