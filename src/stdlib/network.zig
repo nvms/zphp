@@ -777,7 +777,7 @@ fn socketError(err: anyerror) SocketError {
 }
 
 // the host and port of a tcp target as php's parse_ip_address_ex reads
-// them: "[v6]:port" or "host:port", the port as atoi takes it
+// them: "[v6]:port" or "host:port", the port as strtol reads it
 fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
     const scheme, const rest = splitScheme(target);
     if (std.ascii.eqlIgnoreCase(scheme, "unix")) return .{ .unix = rest };
@@ -817,7 +817,29 @@ fn splitHostPort(rest: []const u8) !HostPort {
         host = rest[0..c];
         port_text = rest[c + 1 ..];
     }
-    return .{ .host = host, .port = @truncate(@as(u64, @bitCast(atoi(port_text)))) };
+    // parse_port: strtol, and a port outside 0..65535 is refused (php 8.5.13)
+    const port = strtol(port_text);
+    if (port < 0 or port > 65535) return error.ParsePort;
+    return .{ .host = host, .port = @intCast(port) };
+}
+
+// ZEND_STRTOL in base 10: leading space, a sign, digits, saturating at the
+// long's range as strtol does
+fn strtol(s: []const u8) i64 {
+    var i: usize = 0;
+    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
+    var neg = false;
+    if (i < s.len and (s[i] == '-' or s[i] == '+')) {
+        neg = s[i] == '-';
+        i += 1;
+    }
+    var n: i64 = 0;
+    while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {
+        const d: i64 = s[i] - '0';
+        n = std.math.mul(i64, n, 10) catch return if (neg) std.math.minInt(i64) else std.math.maxInt(i64);
+        n = (if (neg) std.math.sub(i64, n, d) else std.math.add(i64, n, d)) catch return if (neg) std.math.minInt(i64) else std.math.maxInt(i64);
+    }
+    return n;
 }
 
 // php_network_connect_socket_to_host: a client tries a host name at each
@@ -847,19 +869,6 @@ fn connectTarget(allocator: std.mem.Allocator, endpoint: Endpoint, target: []con
         };
     }
     return last;
-}
-
-fn atoi(s: []const u8) i64 {
-    var i: usize = 0;
-    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
-    var neg = false;
-    if (i < s.len and (s[i] == '-' or s[i] == '+')) {
-        neg = s[i] == '-';
-        i += 1;
-    }
-    var n: i64 = 0;
-    while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) n = n *% 10 +% (s[i] - '0');
-    return if (neg) -n else n;
 }
 
 // parse_unix_address: a path longer than sun_path holds (less its nul,
@@ -991,6 +1000,7 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
     switch (err) {
         error.ParseAddress => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse address \"{s}\"", .{rest}),
         error.ParseIpv6Address => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse IPv6 address \"{s}\"", .{rest}),
+        error.ParsePort => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse port of address \"{s}\"", .{rest}),
         error.NulInHostname => owned = try ctx.allocator.dupe(u8, "The hostname must not contain null bytes"),
         error.UnsupportedTransport => owned = try std.fmt.allocPrint(ctx.allocator, "Unable to find the socket transport \"{s}\" - did you forget to enable it when you configured PHP?", .{target[0 .. std.mem.indexOf(u8, target, "://") orelse 0]}),
         else => {},
