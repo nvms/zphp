@@ -260,11 +260,8 @@ fn validateFormat(ctx: *NativeContext, f: CStr, num_vars: usize) RuntimeError!us
                 }
             },
             else => |c| {
-                // php formats the message with %c, and a NUL ends it there
-                const msg = if (c == 0)
-                    try ctx.allocator.dupe(u8, "Bad scan conversion character \"")
-                else
-                    try std.fmt.allocPrint(ctx.allocator, "Bad scan conversion character \"{c}\"", .{c});
+                // php 8.6 keeps a NUL %c in the message
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Bad scan conversion character \"{c}\"", .{c});
                 defer ctx.allocator.free(msg);
                 return valueError(ctx, msg);
             },

@@ -785,8 +785,6 @@ fn formattedPrint(st: *State, out: *Out, format: []const u8, args: []const Value
             '%' => try out.append(a, '%'),
             else => {
                 if (spec == 0 and i >= format.len) return st.valueError("Missing format specifier at end of string", .{});
-                // php builds the message as a C string, so a nul ends it
-                if (spec == 0) return st.valueError("Unknown format specifier \"", .{});
                 return st.valueError("Unknown format specifier \"{c}\"", .{spec});
             },
         }
