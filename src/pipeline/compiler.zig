@@ -498,6 +498,8 @@ pub const Compiler = struct {
     new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .empty,
     deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .empty,
     warnings: std.ArrayListUnmanaged(CompileWarning) = .empty,
+    // the tokens warnOnce already warned for
+    warned_once: std.AutoHashMapUnmanaged(u64, void) = .empty,
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
@@ -798,6 +800,32 @@ pub const Compiler = struct {
 
     // zend_compile_return: a bare return in a function with a return type,
     // a value from a void one, any return from a never one
+    // php 8.6's zend_compile_return deprecations: a value returned from a
+    // constructor or destructor, and any return inside a finally block. a
+    // finally body compiles once per way out here, so each warns once
+    fn returnDeprecations(self: *Compiler, node: Ast.Node) Error!void {
+        if (node.data.lhs != 0 and self.current_class.len > 0) {
+            if (std.ascii.eqlIgnoreCase(self.current_function, "__construct")) {
+                try self.warnOnce(node.main_token, 8192, "Returning a value from a constructor is deprecated", .{});
+            } else if (std.ascii.eqlIgnoreCase(self.current_function, "__destruct")) {
+                try self.warnOnce(node.main_token, 8192, "Returning a value from a destructor is deprecated", .{});
+            }
+        }
+        for (self.jump_scopes.items) |scope| if (scope.kind == .finally_body) {
+            try self.warnOnce(node.main_token, 8192, "Returning from a finally block is deprecated", .{});
+            break;
+        };
+    }
+
+    // warn() for a statement a finally block's copies compile again: once
+    // per token and message
+    pub fn warnOnce(self: *Compiler, token: u32, level: u16, comptime fmt: []const u8, args: anytype) Error!void {
+        const key = (@as(u64, token) << 32) | @as(u64, @truncate(std.hash.Wyhash.hash(0, fmt)));
+        const gop = try self.warned_once.getOrPut(self.allocator, key);
+        if (gop.found_existing) return;
+        try self.warn(token, level, fmt, args);
+    }
+
     fn checkReturn(self: *Compiler, node: Ast.Node) Error!void {
         const t = self.declared_return;
         if (t.len == 0 or self.is_generator) return;
@@ -992,6 +1020,7 @@ pub const Compiler = struct {
                     try self.emitOp(.pop);
                     return;
                 }
+                try self.returnDeprecations(node);
                 try self.checkReturn(node);
                 if (self.returns_ref and node.data.lhs != 0) try compiler_expr.assertNotShortCircuited(self, node.data.lhs, node.main_token);
                 if (self.is_generator) {
@@ -2582,6 +2611,7 @@ pub const Compiler = struct {
         while (hp_it.next()) |v| v.deinit(a);
         self.handler_patches.deinit(a);
         self.jump_scopes.deinit(a);
+        self.warned_once.deinit(a);
         self.labels.deinit(a);
         self.label_sites.deinit(a);
         self.local_slots.deinit(a);

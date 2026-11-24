@@ -4626,6 +4626,15 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
 
+    // php 8.6 deprecates a generator constructor or destructor
+    if (method_gen) {
+        if (std.ascii.eqlIgnoreCase(method_name, "__construct")) {
+            try sub.warn(member.main_token, 8192, "Making a constructor a Generator is deprecated", .{});
+        } else if (std.ascii.eqlIgnoreCase(method_name, "__destruct")) {
+            try sub.warn(member.main_token, 8192, "Making a destructor a Generator is deprecated", .{});
+        }
+    }
+
     // slot 0 = $this for instance methods
     if (member.tag != .static_class_method) {
         _ = sub.getOrCreateSlot("$this");
@@ -4844,6 +4853,10 @@ fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m
             const required = php_types.format(self.allocator, .{ .mask = rule.returns }) catch return error.OutOfMemory;
             defer self.allocator.free(required);
             return self.failFmt(token, "{s}::{s}(): Return type must be {s} when declared", .{ class, name, required });
+        }
+        // php 8.6 deprecates a nullable __debugInfo() return type
+        if (std.ascii.eqlIgnoreCase(name, "__debuginfo") and declared.mask & php_types.NULL != 0) {
+            try self.warn(token, 8192, "Returning null from {s}::__debugInfo() is deprecated, make the return type non-nullable and return an empty array instead", .{class});
         }
     }
 }

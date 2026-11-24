@@ -240,7 +240,7 @@ pub fn table(vm: *VM, obj: *PhpObject, purpose: Purpose) RuntimeError!?*PhpArray
             try vm.raiseError(VM.E_DEPRECATED, msg);
             return try vm.allocArray();
         }
-        return vm.raiseFatal("__debuginfo() must return an array");
+        return vm.raiseFatal("__debugInfo() must return an array");
     }
     var name: ?[]const u8 = obj.class_name;
     while (name) |n| {
