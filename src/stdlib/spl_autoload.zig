@@ -392,7 +392,8 @@ fn classUses(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const name = (try findClass(ctx, "class_uses", args)) orelse return NativeResult.scalar(.{ .bool = false });
     const used = if (ctx.vm.classes.get(name)) |cls| cls.used_traits.items else ctx.vm.trait_uses.get(name) orelse &.{};
     const out = try ctx.createArray();
-    for (used) |t| try addName(ctx, out, t);
+    // the names as the use statements wrote them (php 8.6)
+    for (used) |t| try out.set(ctx.allocator, .{ .string = Value.String.borrowed(t) }, .{ .string = Value.String.borrowed(t) });
     return NativeResult.borrowed(.{ .array = out });
 }
 

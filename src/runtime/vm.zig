@@ -21201,7 +21201,9 @@ pub const VM = struct {
         self.trait_property_checks.clearRetainingCapacity();
         for (trait_names[0..trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, class_name);
         try self.bindClassTraits(&def, class_name, trait_names[0..trait_count], rules);
-        for (trait_names[0..trait_count]) |trait_name| try def.used_traits.append(self.allocator, self.declaredClassName(trait_name));
+        // ce->trait_names keeps the names as the use statement wrote them,
+        // which class_uses() and reflection report (php 8.6 for class_uses)
+        for (trait_names[0..trait_count]) |trait_name| try def.used_traits.append(self.allocator, try self.internName(if (trait_name.len > 0 and trait_name[0] == '\\') trait_name[1..] else trait_name));
         for (rules.aliases) |rule| {
             if (rule.alias.len == 0) continue;
             // an alias that names no trait belongs to the first used trait
