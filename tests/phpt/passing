@@ -137,6 +137,8 @@ Zend/tests/assert/expect_018.phpt
 Zend/tests/assert/expect_019.phpt
 Zend/tests/assert/expect_020.phpt
 Zend/tests/assert/expect_empty_stmt_bug.phpt
+Zend/tests/assert/expect_final_abstract_modifiers.phpt
+Zend/tests/assert/expect_readonly_anon_class.phpt
 Zend/tests/assert/gh11580.phpt
 Zend/tests/assert/gh16293_001.phpt
 Zend/tests/assert/gh16293_002.phpt
@@ -1196,6 +1198,7 @@ Zend/tests/constexpr/new_arg_unpack.phpt
 Zend/tests/constexpr/new_dynamic_class_name.phpt
 Zend/tests/constexpr/new_invalid_operation_in_arg.phpt
 Zend/tests/constexpr/new_named_params.phpt
+Zend/tests/constexpr/new_named_params_duplicate_leak.phpt
 Zend/tests/constexpr/new_not_allowed_class_constant.phpt
 Zend/tests/constexpr/new_not_allowed_property.phpt
 Zend/tests/constexpr/new_positional_after_named.phpt
@@ -1437,6 +1440,7 @@ Zend/tests/enum/traits-no-forbidden-methods.phpt
 Zend/tests/enum/traits-no-properties.phpt
 Zend/tests/enum/traits.phpt
 Zend/tests/enum/unit-cases.phpt
+Zend/tests/enum/unserialize-autoload-nested.phpt
 Zend/tests/enum/unserialize-const.phpt
 Zend/tests/enum/unserialize-missing-colon.phpt
 Zend/tests/enum/unserialize-non-enum.phpt
@@ -1522,6 +1526,7 @@ Zend/tests/ex_func_null_during_property_write.phpt
 Zend/tests/exception_ignore_args.phpt
 Zend/tests/exception_in_nested_rope.phpt
 Zend/tests/exception_in_rope_end.phpt
+Zend/tests/exception_previous_already_in_chain_destructor.phpt
 Zend/tests/exception_set_previous_leak.phpt
 Zend/tests/exception_with_by_ref_message.phpt
 Zend/tests/exceptions/bug26698.phpt
@@ -1650,6 +1655,7 @@ Zend/tests/fibers/call-to-ctor-of-terminated-fiber.phpt
 Zend/tests/fibers/catch-then-suspend.phpt
 Zend/tests/fibers/catch.phpt
 Zend/tests/fibers/debug-backtrace.phpt
+Zend/tests/fibers/destroy-suspended-fiber-during-unwinding.phpt
 Zend/tests/fibers/destructors_001.phpt
 Zend/tests/fibers/destructors_002.phpt
 Zend/tests/fibers/destructors_003.phpt
@@ -1660,6 +1666,7 @@ Zend/tests/fibers/destructors_008.phpt
 Zend/tests/fibers/destructors_009.phpt
 Zend/tests/fibers/destructors_010.phpt
 Zend/tests/fibers/destructors_011.phpt
+Zend/tests/fibers/destructors_012.phpt
 Zend/tests/fibers/destructors_013.phpt
 Zend/tests/fibers/destructors_014.phpt
 Zend/tests/fibers/destructors_015.phpt
@@ -1696,6 +1703,8 @@ Zend/tests/fibers/gh15108-005.phpt
 Zend/tests/fibers/gh15108-006.phpt
 Zend/tests/fibers/gh15108-007.phpt
 Zend/tests/fibers/gh20483.phpt
+Zend/tests/fibers/gh24265-001.phpt
+Zend/tests/fibers/gh24265-002.phpt
 Zend/tests/fibers/gh9735-001.phpt
 Zend/tests/fibers/gh9735-002.phpt
 Zend/tests/fibers/gh9735-003.phpt
@@ -1745,6 +1754,7 @@ Zend/tests/fibers/unfinished-fiber-with-finally.phpt
 Zend/tests/fibers/unfinished-fiber-with-nested-try-catch.phpt
 Zend/tests/fibers/unfinished-fiber-with-suspend-in-finally.phpt
 Zend/tests/fibers/unfinished-fiber-with-throw-in-finally.phpt
+Zend/tests/fibers/unfinished-fiber-with-throw-previous-already-in-chain.phpt
 Zend/tests/fibers/unfinished-fiber.phpt
 Zend/tests/fibers/unstarted-fiber.phpt
 Zend/tests/first_class_callable/constexpr/attributes.phpt
@@ -1782,6 +1792,11 @@ Zend/tests/first_class_callable/constexpr/property_initializer_scope_003.phpt
 Zend/tests/first_class_callable/constexpr/static_call.phpt
 Zend/tests/first_class_callable/constexpr/static_call_self.phpt
 Zend/tests/first_class_callable/constexpr/static_property_initializer.phpt
+Zend/tests/first_class_callable/constexpr/trait_scope_001.phpt
+Zend/tests/first_class_callable/constexpr/trait_scope_002.phpt
+Zend/tests/first_class_callable/constexpr/trait_scope_004.phpt
+Zend/tests/first_class_callable/constexpr/trait_scope_005.phpt
+Zend/tests/first_class_callable/constexpr/trait_scope_006.phpt
 Zend/tests/first_class_callable/constexpr/userland.phpt
 Zend/tests/first_class_callable/first_class_callable_001.phpt
 Zend/tests/first_class_callable/first_class_callable_002.phpt
@@ -2065,6 +2080,7 @@ Zend/tests/generators/finally/run_on_dtor.phpt
 Zend/tests/generators/finally/throw_yield.phpt
 Zend/tests/generators/finally/yield_return.phpt
 Zend/tests/generators/finally/yield_throw.phpt
+Zend/tests/generators/finally/yield_throw_previous_already_in_chain.phpt
 Zend/tests/generators/finally/yield_yield.phpt
 Zend/tests/generators/func_get_args.phpt
 Zend/tests/generators/gc_order.phpt
@@ -2315,6 +2331,8 @@ Zend/tests/gh23232.phpt
 Zend/tests/gh23662.phpt
 Zend/tests/gh24050.phpt
 Zend/tests/gh24050_2.phpt
+Zend/tests/gh24989.phpt
+Zend/tests/gh24989_uncaught.phpt
 Zend/tests/gh418106144.phpt
 Zend/tests/gh7958.phpt
 Zend/tests/gh8548.phpt
@@ -3381,6 +3399,7 @@ Zend/tests/nullsafe_operator/040.phpt
 Zend/tests/nullsafe_operator/bug81216.phpt
 Zend/tests/nullsafe_operator/bug81216_2.phpt
 Zend/tests/nullsafe_operator/constant_propagation.phpt
+Zend/tests/nullsafe_operator/gh23979.phpt
 Zend/tests/nullsafe_operator/gh8661.phpt
 Zend/tests/nullsafe_operator/oss-fuzz-69765.phpt
 Zend/tests/nullsafe_operator/oss_fuzz_60011_1.phpt
@@ -4038,6 +4057,7 @@ Zend/tests/serialize/bug76502.phpt
 Zend/tests/serialize/serializable_deprecation.phpt
 Zend/tests/shift_001.phpt
 Zend/tests/shift_002.phpt
+Zend/tests/shift_left_overflow_range.phpt
 Zend/tests/short_echo_as_identifier.phpt
 Zend/tests/special_name_error2.phpt
 Zend/tests/special_name_error3.phpt
@@ -4419,6 +4439,7 @@ Zend/tests/try/try_finally_024.phpt
 Zend/tests/try/try_finally_025.phpt
 Zend/tests/try/try_finally_026.phpt
 Zend/tests/try/try_finally_027.phpt
+Zend/tests/try/try_finally_previous_already_in_chain.phpt
 Zend/tests/try/try_finally_recursive_previous.phpt
 Zend/tests/try/try_multicatch_001.phpt
 Zend/tests/try/try_multicatch_002.phpt
@@ -5138,6 +5159,7 @@ Zend/tests/xor_003.phpt
 Zend/tests/zend_ini/gh16886.phpt
 Zend/tests/zend_ini/gh16892.phpt
 Zend/tests/zend_ini/oss_fuzz_428983568.phpt
+Zend/tests/zend_mm_chunk_alloc_mmap_failure.phpt
 Zend/tests/zend_operators.phpt
 Zend/tests/zend_signed_multiply-64bit-2.phpt
 Zend/tests/zend_signed_multiply-64bit.phpt
@@ -5319,6 +5341,7 @@ ext/date/tests/bug-gh11600.phpt
 ext/date/tests/bug-gh15582.phpt
 ext/date/tests/bug-gh16037.phpt
 ext/date/tests/bug-gh18076.phpt
+ext/date/tests/bug-gh20503.phpt
 ext/date/tests/bug-gh8471.phpt
 ext/date/tests/bug-gh8964-001.phpt
 ext/date/tests/bug-gh8964-002.phpt
@@ -5912,6 +5935,7 @@ ext/hash/tests/snefru.phpt
 ext/hash/tests/tiger.phpt
 ext/hash/tests/whirlpool.phpt
 ext/hash/tests/xxh3_convert_secret_to_string.phpt
+ext/hash/tests/xxhash_options_without_seed.phpt
 ext/hash/tests/xxhash_secret.phpt
 ext/hash/tests/xxhash_seed.phpt
 ext/hash/tests/xxhash_seed_deprecation.phpt
@@ -5975,11 +5999,14 @@ ext/json/tests/json_decode_invalid_utf8.phpt
 ext/json/tests/json_decode_oom_utf8_substitute.phpt
 ext/json/tests/json_encode_basic.phpt
 ext/json/tests/json_encode_basic_utf8.phpt
+ext/json/tests/json_encode_depth.phpt
 ext/json/tests/json_encode_exceptions.phpt
 ext/json/tests/json_encode_hooked_property_throwing_getter.phpt
+ext/json/tests/json_encode_invalid_key_aborts.phpt
 ext/json/tests/json_encode_invalid_utf8.phpt
 ext/json/tests/json_encode_numeric.phpt
 ext/json/tests/json_encode_oom_escape.phpt
+ext/json/tests/json_encode_oom_hooked_property_recursion_guard.phpt
 ext/json/tests/json_encode_oom_partial_output.phpt
 ext/json/tests/json_encode_oom_pretty_print.phpt
 ext/json/tests/json_encode_oom_string_prealloc.phpt
@@ -7277,6 +7304,11 @@ ext/spl/tests/gh20614.phpt
 ext/spl/tests/gh20856.phpt
 ext/spl/tests/gh21499.phpt
 ext/spl/tests/gh21927.phpt
+ext/spl/tests/gh24264_1.phpt
+ext/spl/tests/gh24264_2.phpt
+ext/spl/tests/gh24264_3.phpt
+ext/spl/tests/gh24264_4.phpt
+ext/spl/tests/gh24264_5.phpt
 ext/spl/tests/gh7809.phpt
 ext/spl/tests/gh8366.phpt
 ext/spl/tests/gh9883-extra.phpt
@@ -8845,6 +8877,7 @@ ext/standard/tests/file/gh15653.phpt
 ext/standard/tests/file/gh18212.phpt
 ext/standard/tests/file/gh9779.phpt
 ext/standard/tests/file/glob_basic.phpt
+ext/standard/tests/file/glob_bracket_negation.phpt
 ext/standard/tests/file/glob_variation.phpt
 ext/standard/tests/file/glob_variation2.phpt
 ext/standard/tests/file/glob_variation3.phpt
@@ -9193,6 +9226,7 @@ ext/standard/tests/general_functions/gettype_settype_basic.phpt
 ext/standard/tests/general_functions/gettype_settype_error.phpt
 ext/standard/tests/general_functions/gh12655.phpt
 ext/standard/tests/general_functions/gh20840.phpt
+ext/standard/tests/general_functions/gh24605_var_export_stack_guard.phpt
 ext/standard/tests/general_functions/gh9905.phpt
 ext/standard/tests/general_functions/head.phpt
 ext/standard/tests/general_functions/highlight_heredoc.phpt
@@ -9352,11 +9386,14 @@ ext/standard/tests/http/gh15034.phpt
 ext/standard/tests/http/gh15650.phpt
 ext/standard/tests/http/gh16810.phpt
 ext/standard/tests/http/gh22171.phpt
+ext/standard/tests/http/gh24508.phpt
+ext/standard/tests/http/gh24509.phpt
 ext/standard/tests/http/gh8641.phpt
 ext/standard/tests/http/gh9316.phpt
 ext/standard/tests/http/ghsa-52jp-hrpf-2jff-001.phpt
 ext/standard/tests/http/ghsa-52jp-hrpf-2jff-002.phpt
 ext/standard/tests/http/ghsa-c5f2-jwm7-mmq2.phpt
+ext/standard/tests/http/ghsa-f6gg-rchx-xw8j.phpt
 ext/standard/tests/http/ghsa-fpwc-w8rq-cr92-002.phpt
 ext/standard/tests/http/ghsa-fpwc-w8rq-cr92.phpt
 ext/standard/tests/http/ghsa-hgf5-96fm-v528-001.phpt
@@ -9398,6 +9435,7 @@ ext/standard/tests/http/http_response_header_deprecated_multiple_files.phpt
 ext/standard/tests/http/http_response_header_deprecated_multiple_op_arrays.phpt
 ext/standard/tests/http/http_response_header_deprecated_nested_op_arrays.phpt
 ext/standard/tests/http/http_response_header_deprecated_parameter.phpt
+ext/standard/tests/http/http_response_header_nested_request.phpt
 ext/standard/tests/http/http_single_char_location_redirect.phpt
 ext/standard/tests/http/ignore_errors.phpt
 ext/standard/tests/http/request_parse_body/multipart_options_invalid_key.phpt
@@ -9684,6 +9722,8 @@ ext/standard/tests/network/getprotobyname_basic.phpt
 ext/standard/tests/network/getprotobyname_error.phpt
 ext/standard/tests/network/getprotobynumber_basic.phpt
 ext/standard/tests/network/getprotobynumber_error.phpt
+ext/standard/tests/network/gh24308.phpt
+ext/standard/tests/network/gh24616.phpt
 ext/standard/tests/network/ghsa-3cr5-j632-f35r.phpt
 ext/standard/tests/network/ghsa-www2-q4fc-65wf.phpt
 ext/standard/tests/network/inet.phpt
@@ -9732,6 +9772,9 @@ ext/standard/tests/serialize/__serialize_004.phpt
 ext/standard/tests/serialize/__serialize_005.phpt
 ext/standard/tests/serialize/__serialize_006.phpt
 ext/standard/tests/serialize/__serialize_007.phpt
+ext/standard/tests/serialize/__unserialize_malformed.phpt
+ext/standard/tests/serialize/__unserialize_malformed_nested_destructor.phpt
+ext/standard/tests/serialize/__wakeup_malformed.phpt
 ext/standard/tests/serialize/bug14293.phpt
 ext/standard/tests/serialize/bug21957.phpt
 ext/standard/tests/serialize/bug23298.phpt
@@ -9813,6 +9856,8 @@ ext/standard/tests/serialize/gh12265.phpt
 ext/standard/tests/serialize/gh12265b.phpt
 ext/standard/tests/serialize/gh15169.phpt
 ext/standard/tests/serialize/gh19701.phpt
+ext/standard/tests/serialize/gh24373.phpt
+ext/standard/tests/serialize/gh24373_unserialize.phpt
 ext/standard/tests/serialize/incomplete_class.phpt
 ext/standard/tests/serialize/incomplete_class_magic.phpt
 ext/standard/tests/serialize/incomplete_class_raw_payload_markers.phpt
