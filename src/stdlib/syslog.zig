@@ -45,8 +45,7 @@ fn native_openlog(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_closelog(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    _ = ctx;
+fn native_closelog(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     _ = args;
     if (has_syslog) {
         closelog();
@@ -60,8 +59,52 @@ fn native_syslog(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const p = Args.init(ctx, "syslog", args);
     const priority = try p.longAs(0, "priority", "int");
     const message = try p.str(1, "message");
+    // a log openlog() didn't open is opened with syslog.ident and
+    // syslog.facility, and so closed at the request's end (php 8.5.13)
+    openDefault();
     try logStr(ctx, priority, message);
     return NativeResult.scalar(.{ .bool = true });
+}
+
+// php_openlog(PG(syslog_ident), 0, PG(syslog_facility)) unless the log is
+// open already
+fn openDefault() void {
+    if (!has_syslog or have_called_openlog) return;
+    const ini = @import("../ini_config.zig");
+    const ident = ini.get("syslog.ident") orelse "php";
+    const z = std.heap.c_allocator.dupeSentinel(u8, ident[0 .. std.mem.indexOfScalar(u8, ident, 0) orelse ident.len], 0) catch return;
+    openlog(z.ptr, 0, facilityCode(ini.get("syslog.facility") orelse "LOG_USER"));
+    dropIdent();
+    ident_buf = z;
+    have_called_openlog = true;
+}
+
+// OnSetFacility's names; LOG_USER for anything else
+fn facilityCode(name: []const u8) c_int {
+    const table = [_]struct { []const u8, []const u8, c_int }{
+        .{ "LOG_AUTH", "auth", 4 << 3 },      .{ "LOG_AUTHPRIV", "authpriv", 10 << 3 },
+        .{ "LOG_CRON", "cron", 9 << 3 },      .{ "LOG_DAEMON", "daemon", 3 << 3 },
+        .{ "LOG_FTP", "ftp", 11 << 3 },       .{ "LOG_KERN", "kern", 0 },
+        .{ "LOG_LPR", "lpr", 6 << 3 },        .{ "LOG_MAIL", "mail", 2 << 3 },
+        .{ "LOG_NEWS", "news", 7 << 3 },      .{ "LOG_SYSLOG", "syslog", 5 << 3 },
+        .{ "LOG_USER", "user", 1 << 3 },      .{ "LOG_UUCP", "uucp", 8 << 3 },
+        .{ "LOG_LOCAL0", "local0", 16 << 3 }, .{ "LOG_LOCAL1", "local1", 17 << 3 },
+        .{ "LOG_LOCAL2", "local2", 18 << 3 }, .{ "LOG_LOCAL3", "local3", 19 << 3 },
+        .{ "LOG_LOCAL4", "local4", 20 << 3 }, .{ "LOG_LOCAL5", "local5", 21 << 3 },
+        .{ "LOG_LOCAL6", "local6", 22 << 3 }, .{ "LOG_LOCAL7", "local7", 23 << 3 },
+    };
+    if (std.mem.eql(u8, name, "security")) return 4 << 3;
+    for (table) |e| if (std.mem.eql(u8, name, e[0]) or std.mem.eql(u8, name, e[1])) return e[2];
+    return 1 << 3;
+}
+
+// PHP_RSHUTDOWN_FUNCTION(syslog): a log php opened is closed with the
+// request; one it never opened is left alone
+pub fn endRequest() void {
+    if (!has_syslog or !have_called_openlog) return;
+    closelog();
+    have_called_openlog = false;
+    dropIdent();
 }
 
 const Filter = enum { all, no_ctrl, ascii, raw };
@@ -113,9 +156,6 @@ pub fn logStr(ctx: *NativeContext, priority: i64, message: []const u8) RuntimeEr
 // php_syslog: opens the log with syslog.ident and syslog.facility first
 pub fn log(ctx: *NativeContext, priority: i64, message: []const u8) RuntimeError!void {
     if (!has_syslog) return;
-    if (!have_called_openlog) {
-        openlog("php", 0, 8);
-        have_called_openlog = true;
-    }
+    openDefault();
     try logStr(ctx, priority, message);
 }
