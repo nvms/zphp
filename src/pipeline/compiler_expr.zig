@@ -1952,7 +1952,8 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    if (!hasSplatOrNamed(self.ast, args) and isGlobalSprintf(self, callee) and try compileSprintfRope(self, args)) return;
+    if (!hasSplatOrNamed(self.ast, args) and isGlobalFunction(self, callee, "sprintf") and try compileSprintfRope(self, args)) return;
+    if (!hasSplatOrNamed(self.ast, args) and isGlobalFunction(self, callee, "printf") and try compilePrintfRope(self, args)) return;
 
     if (callee.tag == .property_access and callee.main_token == 0) try checkMethodName(self, callee.data.rhs);
     if (hasSplatOrNamed(self.ast, args)) {
@@ -2064,16 +2065,116 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
-// a call that names php's own sprintf at compile time: unqualified outside a
-// namespace, imported, or fully qualified
-fn isGlobalSprintf(self: *Compiler, callee: Ast.Node) bool {
+// a call that names one of php's own functions at compile time: unqualified
+// outside a namespace, imported, or fully qualified
+fn isGlobalFunction(self: *Compiler, callee: Ast.Node, name: []const u8) bool {
     if (callee.tag == .identifier) {
-        return std.ascii.eqlIgnoreCase(self.resolveFunctionName(self.ast.tokenSlice(callee.main_token)), "sprintf");
+        return std.ascii.eqlIgnoreCase(self.resolveFunctionName(self.ast.tokenSlice(callee.main_token)), name);
     }
     // rhs 1 marks a leading backslash
     if (callee.tag != .qualified_name or callee.data.rhs != 1) return false;
     const parts = self.ast.extraSlice(callee.data.lhs);
-    return parts.len == 1 and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(parts[0]), "sprintf");
+    return parts.len == 1 and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(parts[0]), name);
+}
+
+// the persistent internal constants php substitutes while compiling
+// (zend_try_ct_eval_const), the numeric ones a value can fold from
+const ct_numeric_constants = std.StaticStringMap(f64).initComptime(.{
+    .{ "M_E", 2.718281828459045235360 },        .{ "M_LOG2E", 1.4426950408889634074 },
+    .{ "M_LOG10E", 0.43429448190325182765 },    .{ "M_LN2", 0.69314718055994530942 },
+    .{ "M_LN10", 2.30258509299404568402 },      .{ "M_PI", 3.14159265358979323846 },
+    .{ "M_PI_2", 1.57079632679489661923 },      .{ "M_PI_4", 0.78539816339744830962 },
+    .{ "M_1_PI", 0.31830988618379067154 },      .{ "M_2_PI", 0.63661977236758134308 },
+    .{ "M_SQRTPI", 1.77245385090551602729 },    .{ "M_2_SQRTPI", 1.12837916709551257390 },
+    .{ "M_LNPI", 1.14472988584940017414 },      .{ "M_EULER", 0.57721566490153286061 },
+    .{ "M_SQRT2", 1.41421356237309504880 },     .{ "M_SQRT1_2", 0.70710678118654752440 },
+    .{ "M_SQRT3", 1.73205080756887729352 },
+});
+
+// a scalar php's compiler folds (zend_eval_const_expr): literals, those
+// constants, signs and + - * of numbers. null when it isn't one
+fn compileTimeScalar(self: *Compiler, idx: u32) ?Value {
+    const n = self.ast.nodes[idx];
+    switch (n.tag) {
+        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => return self.evalConstExpr(idx),
+        .string_literal => {
+            const tok_tag = self.ast.tokens[n.main_token].tag;
+            if (tok_tag == .heredoc or tok_tag == .nowdoc or n.data.rhs == Ast.interpolated) return null;
+            const v = self.evalConstExpr(idx);
+            return if (v == .string) v else null;
+        },
+        .grouped_expr => return compileTimeScalar(self, n.data.lhs),
+        .identifier => {
+            if (self.namespace.len > 0) return null;
+            const f = ct_numeric_constants.get(self.ast.tokenSlice(n.main_token)) orelse return null;
+            return .{ .float = f };
+        },
+        .prefix_op => {
+            const tag = self.ast.tokens[n.main_token].tag;
+            if (tag != .minus and tag != .plus) return null;
+            const inner = compileTimeScalar(self, n.data.lhs) orelse return null;
+            return switch (inner) {
+                .int => |v| if (tag == .plus) inner else if (v == std.math.minInt(i64)) Value{ .float = -@as(f64, @floatFromInt(v)) } else Value{ .int = -v },
+                .float => |v| if (tag == .plus) inner else Value{ .float = -v },
+                else => null,
+            };
+        },
+        .binary_op => {
+            const tag = self.ast.tokens[n.main_token].tag;
+            if (tag != .plus and tag != .minus and tag != .star and tag != .slash) return null;
+            const l = compileTimeScalar(self, n.data.lhs) orelse return null;
+            const r = compileTimeScalar(self, n.data.rhs) orelse return null;
+            if ((l != .int and l != .float) or (r != .int and r != .float)) return null;
+            if (tag == .slash) {
+                // a division by zero throws, so it isn't folded
+                const lf: f64 = if (l == .int) @floatFromInt(l.int) else l.float;
+                const rf: f64 = if (r == .int) @floatFromInt(r.int) else r.float;
+                if (rf == 0) return null;
+                if (l == .int and r == .int and !(l.int == std.math.minInt(i64) and r.int == -1) and @rem(l.int, r.int) == 0) return .{ .int = @divTrunc(l.int, r.int) };
+                return .{ .float = lf / rf };
+            }
+            if (l == .int and r == .int) {
+                const res = switch (tag) {
+                    .plus => @addWithOverflow(l.int, r.int),
+                    .minus => @subWithOverflow(l.int, r.int),
+                    else => @mulWithOverflow(l.int, r.int),
+                };
+                if (res[1] == 0) return .{ .int = res[0] };
+            }
+            const lf: f64 = if (l == .int) @floatFromInt(l.int) else l.float;
+            const rf: f64 = if (r == .int) @floatFromInt(r.int) else r.float;
+            return .{ .float = switch (tag) {
+                .plus => lf + rf,
+                .minus => lf - rf,
+                else => lf * rf,
+            } };
+        },
+        else => return null,
+    }
+}
+
+// zend_compile_func_printf (php 8.6): a format without placeholders is an
+// echo, one sprintf's rope takes is echoed, and either way the call's value
+// is the length written. false when nothing was emitted
+fn compilePrintfRope(self: *Compiler, args: []const u32) Error!bool {
+    if (args.len == 1) {
+        const fmt = compileTimeScalar(self, args[0]) orelse return false;
+        if (fmt == .string and std.mem.indexOfScalar(u8, fmt.string.bytes(), '%') == null) {
+            try self.compileNode(args[0]);
+            try self.emitOp(.echo);
+            try self.emitConstant(try self.addConstant(.{ .int = @intCast(fmt.string.bytes().len) }));
+            return true;
+        }
+    }
+    if (!try compileSprintfRope(self, args)) return false;
+    try self.emitOp(.dup);
+    try self.emitOp(.echo);
+    var guards: ArgGuards = .empty;
+    errdefer guards.deinit(self.allocator);
+    try emitValueGuard(self, .{ .pos = 0, .guards = &guards }, .arg_value);
+    const idx = try self.addConstant(.{ .string = Value.String.borrowed("\\strlen") });
+    try emitCallOp(self, &guards, .call, .{ .a = idx, .argc = 1 });
+    return true;
 }
 
 // zend_compile_func_sprintf: a literal format of plain %s, %d and %% with one
@@ -2095,11 +2196,15 @@ fn compileSprintfRope(self: *Compiler, args: []const u32) Error!bool {
     if (fmt.len >= 256) return false;
 
     var placeholders: usize = 0;
+    var specs: [256]u8 = undefined;
     var i: usize = 0;
     while (std.mem.indexOfScalarPos(u8, fmt, i, '%')) |p| {
         if (p + 1 == fmt.len) return false;
         switch (fmt[p + 1]) {
-            's', 'd' => placeholders += 1,
+            's', 'd' => {
+                specs[placeholders] = fmt[p + 1];
+                placeholders += 1;
+            },
             '%' => {},
             else => return false,
         }
@@ -2108,8 +2213,24 @@ fn compileSprintfRope(self: *Compiler, args: []const u32) Error!bool {
     if (placeholders != args.len - 1) return false;
 
     const call_offset = self.current_source_offset;
-    // the values are evaluated before any of them is converted
-    for (args[1..]) |arg| try self.compileNode(arg);
+    // the values are evaluated before any of them is converted; a %s of a
+    // value the compiler folds is converted now, with the precision of the
+    // compile (php's convert_to_string on the constant operand)
+    for (args[1..], 0..) |arg, k| {
+        if (specs[k] == 's') if (compileTimeScalar(self, arg)) |v| {
+            var buf: [1100]u8 = undefined;
+            const text: []const u8 = switch (v) {
+                .string => |s| s.bytes(),
+                .int => |n| std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable,
+                .float => |f| Value.doubleText(&buf, f),
+                .bool => |b| if (b) "1" else "",
+                else => "",
+            };
+            try emitRopeLiteral(self, text);
+            continue;
+        };
+        try self.compileNode(arg);
+    }
     self.current_source_offset = call_offset;
     // reverse them so the first one is on top
     var depth = placeholders;
