@@ -4351,10 +4351,28 @@ fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const compile_name = compiledFunctionName(ctx.vm, func_name);
-    const attrs = ctx.vm.function_attributes.get(compile_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    const attrs = ctx.vm.function_attributes.get(compile_name) orelse {
+        const tramp = trampolineMagic(ctx.vm, this, func_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+        return buildAttributeArrayWithFlags(ctx, tramp.attrs, filter, 2, flags, tramp.class);
+    };
     return buildAttributeArrayWithFlags(ctx, attrs, filter, 2, flags, functionAttributeScope(ctx, this, func_name));
+}
+
+// a Closure made from a method the class doesn't have calls __call or
+// __callStatic through a trampoline, which carries the magic method's
+// attributes (zend_get_call_trampoline_func)
+fn trampolineMagic(vm: *VM, this: *PhpObject, func_name: []const u8) ?struct { attrs: []const vm_mod.AttributeDef, class: []const u8 } {
+    if (this.get("__from_closure") != .bool) return null;
+    const sep = std.mem.indexOf(u8, func_name, "::") orelse return null;
+    const class = func_name[0..sep];
+    if (vm.hasMethod(class, func_name[sep + 2 ..])) return null;
+    const magic: []const u8 = if (this.get("__closure_this") == .object) "__call" else "__callStatic";
+    const found = vm.findMethodInfo(class, magic) orelse return null;
+    const cls = vm.classes.get(found.defining) orelse return null;
+    const attrs = cls.method_attributes.get(magic) orelse return null;
+    return .{ .attrs = attrs, .class = found.defining };
 }
 
 fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -7161,7 +7179,8 @@ fn rfIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (ctx.vm.native_fns.get(func_name)) |native| return NativeResult.scalar(.{ .bool = native.deprecated != null });
-    const attrs = ctx.vm.function_attributes.get(compiledFunctionName(ctx.vm, func_name)) orelse return NativeResult.scalar(.{ .bool = false });
+    const attrs = ctx.vm.function_attributes.get(compiledFunctionName(ctx.vm, func_name)) orelse
+        if (trampolineMagic(ctx.vm, this, func_name)) |tramp| tramp.attrs else return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
 }
 
@@ -7205,11 +7224,41 @@ fn rconstGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const name = constName(this);
     if (name != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const key = ctx.vm.constant_attributes.get(name.string.bytes()) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const attrs = ctx.vm.function_attributes.get(key) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    // an internal constant its stub marks #[\Deprecated(since:, message:)]
+    if (deprecations.constants.get(name.string.bytes())) |suffix| {
+        var arg_buf: [2]Value = undefined;
+        var name_buf: [2]?[]const u8 = undefined;
+        const attr = [_]AttributeDef{deprecatedFromSuffix(suffix, &arg_buf, &name_buf)};
+        return buildAttributeArrayWithFlags(ctx, &attr, filter, 64, flags, "");
+    }
+    const key = ctx.vm.constant_attributes.get(name.string.bytes()) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const attrs = ctx.vm.function_attributes.get(key) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     return buildAttributeArrayWithFlags(ctx, attrs, filter, 64, flags, "");
+}
+
+// the attribute behind a generated deprecation suffix: " since 8.4, the
+// error level was removed" is since: '8.4', message: 'the error level ...'.
+// the strings point into the generated table; the slices into the caller's
+// buffers
+fn deprecatedFromSuffix(suffix: []const u8, args: *[2]Value, names: *[2]?[]const u8) AttributeDef {
+    var rest = suffix;
+    var n: usize = 0;
+    if (std.mem.startsWith(u8, rest, " since ")) {
+        rest = rest[" since ".len..];
+        const end = std.mem.indexOf(u8, rest, ", ") orelse rest.len;
+        args[n] = .{ .string = Value.String.borrowed(rest[0..end]) };
+        names[n] = "since";
+        n += 1;
+        rest = rest[end..];
+    }
+    if (std.mem.startsWith(u8, rest, ", ")) {
+        args[n] = .{ .string = Value.String.borrowed(rest[2..]) };
+        names[n] = "message";
+        n += 1;
+    }
+    return .{ .name = "Deprecated", .args = args[0..n], .arg_names = names[0..n] };
 }
 
 fn rconstConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

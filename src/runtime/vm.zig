@@ -15803,7 +15803,7 @@ pub const VM = struct {
         return self.functions.contains(name) or self.native_fns.contains(name) or self.functionNamedIgnoringCase(name) != null;
     }
 
-    fn findMethodInfo(self: *VM, class_name: []const u8, method_name: []const u8) ?struct { info: ClassDef.MethodInfo, defining: []const u8 } {
+    pub fn findMethodInfo(self: *VM, class_name: []const u8, method_name: []const u8) ?struct { info: ClassDef.MethodInfo, defining: []const u8 } {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             const entry = self.classes.getEntry(cn) orelse break;
