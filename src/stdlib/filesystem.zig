@@ -273,7 +273,7 @@ pub const StreamIo = struct {
         return platform.write(self.file, data);
     }
 
-    fn sock(self: StreamIo) std.posix.socket_t {
+    pub fn sock(self: StreamIo) std.posix.socket_t {
         return if (platform.is_windows) @ptrCast(self.file.handle) else self.file.handle;
     }
 };
@@ -3980,7 +3980,7 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
         // none of the generic ones
         for (s.meta.array.entries.items) |e| try result.set(ctx.allocator, e.key, e.value);
     } else {
-        try result.set(ctx.allocator, key("timed_out"), .{ .bool = false });
+        try result.set(ctx.allocator, key("timed_out"), .{ .bool = obj.get("__timed_out") == .bool and obj.get("__timed_out").bool });
         try result.set(ctx.allocator, key("blocked"), .{ .bool = !(blocking == .bool and !blocking.bool) });
         try result.set(ctx.allocator, key("eof"), .{ .bool = try streams.eof(ctx, obj) });
     }

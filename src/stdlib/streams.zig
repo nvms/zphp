@@ -258,6 +258,27 @@ pub fn rawRead(ctx: *NativeContext, obj: *PhpObject, s: *Stream, dest: []u8) Run
         },
         .fd => |io| {
             if (s.may_block) ctx.vm.flushOutputToStdout();
+            // php_sock_stream_wait_for_data: a blocking socket with a
+            // timeout from stream_set_timeout waits that long for data, and
+            // a read that times out returns nothing and marks timed_out
+            if (io.socket) if (obj.get("__timeout_us") == .int) {
+                try obj.set(ctx.allocator, "__timed_out", .{ .bool = false });
+                const blocking = obj.get("__blocking") != .bool or obj.get("__blocking").bool;
+                const us = obj.get("__timeout_us").int;
+                if (blocking and us >= 0) {
+                    var fds = [_]@import("../sys.zig").pollfd{.{ .fd = io.sock(), .events = @import("../sys.zig").POLL.IN, .revents = 0 }};
+                    const ms: i32 = @intCast(@min(std.math.maxInt(i32), @divTrunc(us, 1000)));
+                    const ready = @import("../sys.zig").poll(&fds, ms) catch 1;
+                    // a zero timeout doesn't wait: no data is a transient
+                    // nothing, not a timeout
+                    if (ready == 0 and us == 0) return 0;
+                    if (ready == 0) {
+                        try obj.set(ctx.allocator, "__timed_out", .{ .bool = true });
+                        // it is ok to time out with data buffered
+                        return if (s.buffered() > 0) 0 else -1;
+                    }
+                }
+            };
             const n = io.read(dest) catch |err| {
                 if (err == error.WouldBlock) return 0;
                 if (io.socket) {
