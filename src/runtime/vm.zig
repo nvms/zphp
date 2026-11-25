@@ -989,6 +989,8 @@ pub const VM = struct {
     // first-class callable got this request, by its registered name; each
     // holds a reference, dropped in reset()
     fcc_cache: std.StringHashMapUnmanaged(*PhpObject) = .{},
+    // SplObjectStorage::getHash() calls running (spl_object_storage_get_hash_depth)
+    spl_get_hash_depth: u32 = 0,
     // php 8.6's partial applications: the compiled closure (its compile
     // name) by call site, callee and generated source, for the request
     pfa_cache: std.StringHashMapUnmanaged([]const u8) = .{},
@@ -4136,6 +4138,7 @@ pub const VM = struct {
         var fcc_it = self.fcc_cache.valueIterator();
         while (fcc_it.next()) |closure| self.releaseValue(.{ .object = closure.* });
         self.fcc_cache.clearRetainingCapacity();
+        self.spl_get_hash_depth = 0;
         self.pfa_cache.clearRetainingCapacity();
         for (self.partial_attrs.items) |entry| {
             _ = self.function_attributes.remove(entry.name);

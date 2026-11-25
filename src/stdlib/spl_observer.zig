@@ -196,7 +196,12 @@ fn userHash(vm: *VM, obj: *PhpObject) bool {
 // exception pending
 fn hashKey(ctx: *NativeContext, obj: *PhpObject, target: Value) RuntimeError!?PhpArray.Key {
     if (userHash(ctx.vm, obj)) {
-        const r = try sic.callOn(ctx, obj, "getHash", &.{target});
+        ctx.vm.spl_get_hash_depth += 1;
+        const r = sic.callOn(ctx, obj, "getHash", &.{target}) catch |err| {
+            ctx.vm.spl_get_hash_depth -= 1;
+            return err;
+        };
+        ctx.vm.spl_get_hash_depth -= 1;
         if (r == .undef or sic.pending(ctx)) return null;
         if (r != .string) {
             try sic.raise(ctx, "TypeError", "{s}::getHash(): Return value must be of type string, {s} returned", .{ obj.class_name, r.valueName() });
@@ -216,7 +221,15 @@ fn freeKey(ctx: *NativeContext, obj: *PhpObject, k: PhpArray.Key) void {
 }
 
 // spl_object_storage_attach: the element's index
+// php 8.6 refuses to change a storage from inside a getHash() call
+fn mutatingInGetHash(ctx: *NativeContext) RuntimeError!bool {
+    if (ctx.vm.spl_get_hash_depth == 0) return false;
+    try sic.raise(ctx, "Error", "Modification of SplObjectStorage during getHash() is prohibited", .{});
+    return true;
+}
+
 fn storageAttach(ctx: *NativeContext, obj: *PhpObject, target: Value, inf: Value) RuntimeError!?usize {
+    if (try mutatingInGetHash(ctx)) return null;
     const k = (try hashKey(ctx, obj, target)) orelse return null;
     defer freeKey(ctx, obj, k);
     const st = try writable(ctx, obj);
@@ -235,12 +248,14 @@ fn storageAttach(ctx: *NativeContext, obj: *PhpObject, target: Value, inf: Value
 
 // spl_object_storage_detach: whether the object was there
 fn storageDetach(ctx: *NativeContext, obj: *PhpObject, target: Value) RuntimeError!bool {
+    if (try mutatingInGetHash(ctx)) return false;
     const k = (try hashKey(ctx, obj, target)) orelse return false;
     defer freeKey(ctx, obj, k);
     return removeKey(ctx, obj, k);
 }
 
 fn removeKey(ctx: *NativeContext, obj: *PhpObject, k: PhpArray.Key) RuntimeError!bool {
+    if (try mutatingInGetHash(ctx)) return false;
     const st = try writable(ctx, obj);
     const i = st.find(k) orelse return false;
     const o: Value = st.objs.entries.items[i].value;
@@ -454,6 +469,7 @@ fn getInfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 fn setInfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try this(ctx);
     if (!try sic.argCount(ctx, "SplObjectStorage::setInfo", args.len, 1, 1)) return error.RuntimeError;
+    if (try mutatingInGetHash(ctx)) return error.RuntimeError;
     const i = (try currentIndex(ctx, obj)) orelse return NativeResult.scalar(.null);
     const st = try writable(ctx, obj);
     const old = st.infAt(i);
