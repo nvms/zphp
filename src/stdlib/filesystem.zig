@@ -5470,19 +5470,33 @@ const PosixW = std.posix.W;
 
 // decode a waitpid status onto the proc object's cached fields. marks __reaped so
 // no later wait() runs on the same (now-consumed) pid
-fn cacheProcTerm(ctx: *NativeContext, proc: *PhpObject, status: u32) void {
+fn cacheProcTerm(ctx: *NativeContext, proc: *PhpObject, status: u32, reaper: enum { status_poll, close }) void {
     proc.set(ctx.allocator, "__reaped", .{ .bool = true }) catch {};
     proc.set(ctx.allocator, "__running", .{ .bool = false }) catch {};
+    // proc_get_status's exitcode is set only for a normal exit; proc_close
+    // returns that code, or the raw wait status of a signaled child it reaps
+    // itself. php caches only a normal exit, so a signaled child that
+    // proc_get_status reaped leaves proc_close nothing to wait for: -1
     if (PosixW.IFEXITED(status)) {
-        proc.set(ctx.allocator, "__exit", .{ .int = @intCast(PosixW.EXITSTATUS(status)) }) catch {};
-    } else if (PosixW.IFSIGNALED(status)) {
-        const sig: i64 = @intFromEnum(PosixW.TERMSIG(status));
-        proc.set(ctx.allocator, "__exit", .{ .int = sig + 128 }) catch {};
-        proc.set(ctx.allocator, "__termsig", .{ .int = sig }) catch {};
-        proc.set(ctx.allocator, "__signaled", .{ .bool = true }) catch {};
+        const code: i64 = @intCast(PosixW.EXITSTATUS(status));
+        proc.set(ctx.allocator, "__exit", .{ .int = code }) catch {};
+        proc.set(ctx.allocator, "__close_status", .{ .int = code }) catch {};
     } else {
         proc.set(ctx.allocator, "__exit", .{ .int = -1 }) catch {};
+        proc.set(ctx.allocator, "__close_status", .{ .int = if (reaper == .close) @intCast(status) else -1 }) catch {};
+        if (PosixW.IFSIGNALED(status)) {
+            proc.set(ctx.allocator, "__termsig", .{ .int = @intFromEnum(PosixW.TERMSIG(status)) }) catch {};
+            proc.set(ctx.allocator, "__signaled", .{ .bool = true }) catch {};
+        }
     }
+}
+
+// what proc_close returns once the child is reaped
+fn procCloseStatus(obj: *PhpObject) i64 {
+    const close = obj.get("__close_status");
+    if (close == .int) return close.int;
+    const exit = obj.get("__exit");
+    return if (exit == .int) exit.int else 0;
 }
 
 fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -5490,8 +5504,7 @@ fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
     try obj.set(ctx.allocator, "__open", .{ .bool = false });
     const pc = ctx.vm.lookupProcChild(obj) orelse {
         // already finalized (or spawn failed) - return the cached exit
-        const cached = obj.get("__exit");
-        return NativeResult.scalar(.{ .int = if (cached == .int) cached.int else 0 });
+        return NativeResult.scalar(.{ .int = procCloseStatus(obj) });
     };
     // close stdin first so the child sees EOF and can finish
     for (pc.pipe_fds.items) |*pipe| if (pipe.role == 0) pipe.close();
@@ -5499,11 +5512,10 @@ fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
         // a prior proc_get_status may have already reaped via WNOHANG; if not, do a
         // blocking wait now (exactly one waitpid per pid - ECHILD is unreachable)
         const res = sys.waitpid(pc.pid, 0);
-        cacheProcTerm(ctx, obj, res.status);
+        cacheProcTerm(ctx, obj, res.status, .close);
     }
     ctx.vm.closeProcChild(obj);
-    const exit = obj.get("__exit");
-    return NativeResult.scalar(.{ .int = if (exit == .int) exit.int else 0 });
+    return NativeResult.scalar(.{ .int = procCloseStatus(obj) });
 }
 
 fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -5520,7 +5532,7 @@ fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError
                 running = true;
             } else {
                 pc.reaped = true;
-                cacheProcTerm(ctx, obj, res.status);
+                cacheProcTerm(ctx, obj, res.status, .status_poll);
             }
         }
     }
