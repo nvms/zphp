@@ -314,8 +314,8 @@ fn serveCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 // php -S: one worker serving the document root (the working directory
-// unless -t names one), running the router script, or the index.php the
-// document root holds, for anything that isn't a static file
+// unless -t names one), running the router script, or without one routing
+// each request as php's built-in server does
 fn cliServerCommand(allocator: std.mem.Allocator) !void {
     const serve = @import("serve.zig");
     const address = cli_server_address.?;
@@ -344,6 +344,7 @@ fn cliServerCommand(allocator: std.mem.Allocator) !void {
         .port = port.?,
         .workers = 1,
         .cli_server_host = if (host.len == 0) "localhost" else host,
+        .cli_server_routing = cli_server_router == null,
     });
 }
 

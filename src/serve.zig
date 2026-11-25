@@ -62,6 +62,9 @@ fn maxPhpMtime(dir_path: []const u8) i128 {
     return max;
 }
 
+// set before the workers start, read-only while they run
+var cli_server_routing: bool = false;
+
 fn requestShutdown() void {
     wake(signal_socket);
 }
@@ -88,6 +91,10 @@ pub const ServeConfig = struct {
     // set by `zphp -S host:port`: listen on that host and announce the
     // server the way php's built-in web server does
     cli_server_host: ?[]const u8 = null,
+    // php -S without a router: requests are routed as php's built-in server
+    // routes them (files, directory index files, scripts with PATH_INFO, a
+    // 404 page), and there may be no index.php to compile up front
+    cli_server_routing: bool = false,
 };
 
 pub const LogFormat = enum { text, json };
@@ -386,6 +393,9 @@ const Dispatch = struct {
     result: *const CompileResult,
     script_filename: []const u8, // absolute path of the script to execute
     front_controller: bool, // true: SCRIPT_NAME = /<entry basename> (rewritten); false: SCRIPT_NAME = the request path
+    // php -S: SCRIPT_NAME and PATH_INFO as its routing found them
+    script_name: ?[]const u8 = null,
+    path_info: []const u8 = "",
 };
 
 fn loadFile(path: []const u8, allocator: Allocator, vm: *@import("runtime/vm.zig").VM) ?*CompileResult {
@@ -593,23 +603,192 @@ fn resolveDispatch(w: *Worker, req: *const Request) Dispatch {
     // the entry itself runs as the front controller (same $_SERVER shape)
     if (std.mem.eql(u8, real, w.result.file_path)) return fc;
 
-    if (w.script_cache.get(real)) |cached| {
-        return .{ .result = cached, .script_filename = cached.file_path, .front_controller = false };
-    }
-    const compiled = loadFile(real, w.allocator, &w.vm) orelse return fc;
+    const compiled = cachedScript(w, real) orelse return fc;
+    return .{ .result = compiled, .script_filename = compiled.file_path, .front_controller = false };
+}
+
+// a script compiled once per worker, by its real path
+fn cachedScript(w: *Worker, real: []const u8) ?*CompileResult {
+    if (w.script_cache.get(real)) |cached| return cached;
+    const compiled = loadFile(real, w.allocator, &w.vm) orelse return null;
     const key = w.allocator.dupe(u8, real) catch {
         compiled.deinit();
         w.allocator.destroy(compiled);
-        return fc;
+        return null;
     };
     w.script_cache.put(w.allocator, key, compiled) catch {
         w.allocator.free(key);
         compiled.deinit();
         w.allocator.destroy(compiled);
-        return fc;
+        return null;
     };
-    return .{ .result = compiled, .script_filename = compiled.file_path, .front_controller = false };
+    return compiled;
 }
+
+fn fileExists(path: []const u8) bool {
+    const st = std.Io.Dir.cwd().statFile(platform.io, path, .{}) catch return false;
+    return st.kind == .file;
+}
+
+const CliOutcome = union(enum) { sent: u16, script };
+
+// php's built-in server without a router (php_cli_server_dispatch): the
+// request path, decoded and normalized, is looked up under the document
+// root, walking up past segments that don't exist (they become PATH_INFO);
+// a directory serves its index.php or index.html; a .php file runs, any
+// other file is sent as is, and nothing found is php's 404 page
+fn cliServerRoute(w: *Worker, c: *Connection, req: *const Request, id_header: []const u8, dispatch: *Dispatch) CliOutcome {
+    const a = w.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const vpath = normalizeVpath(arena, req.path) catch return .{ .sent = cliErrorPage(w, c, req, 500, id_header) };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.appendSlice(arena, w.doc_root) catch return .{ .sent = cliErrorPage(w, c, req, 500, id_header) };
+    const vpath_start = buf.items.len;
+    if (vpath.len == 0 or vpath[0] != '/') buf.append(arena, '/') catch {};
+    buf.appendSlice(arena, vpath) catch {};
+    const full = buf.items;
+    var q = full.len;
+    var path_info: []const u8 = "";
+    var translated: ?[]const u8 = null;
+    while (q > 0) {
+        const st = std.Io.Dir.cwd().statFile(platform.io, full[0..q], .{}) catch {
+            // this segment doesn't exist: it and what follows are path info
+            while (q > 0) {
+                q -= 1;
+                if (full[q] == '/') break;
+            }
+            path_info = full[q..];
+            continue;
+        };
+        if (st.kind == .directory) {
+            const dir = full[0..q];
+            const sep: []const u8 = if (dir.len > 0 and dir[dir.len - 1] == '/') "" else "/";
+            for ([_][]const u8{ "index.php", "index.html" }) |index| {
+                const candidate = std.fmt.allocPrint(arena, "{s}{s}{s}", .{ dir, sep, index }) catch break;
+                if (fileExists(candidate)) {
+                    translated = candidate;
+                    break;
+                }
+            }
+        } else {
+            translated = full[0..q];
+        }
+        break;
+    }
+    const path = translated orelse return .{ .sent = cliErrorPage(w, c, req, 404, id_header) };
+    const script_vpath = path[vpath_start..];
+    if (!std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".php")) {
+        for ([_][]const u8{ "DELETE", "PUT", "PATCH" }) |m| {
+            if (std.mem.eql(u8, req.method, m)) return .{ .sent = cliErrorPage(w, c, req, 405, id_header) };
+        }
+        var static_req = req.*;
+        static_req.path = script_vpath;
+        if (tryServeStatic(a, c, w.doc_root, &static_req, c.keep_alive, id_header)) |status| return .{ .sent = status };
+        return .{ .sent = cliErrorPage(w, c, req, 404, id_header) };
+    }
+    const real = platform.realpathAlloc(arena, path) catch return .{ .sent = cliErrorPage(w, c, req, 404, id_header) };
+    const compiled = cachedScript(w, real) orelse return .{ .sent = cliErrorPage(w, c, req, 500, id_header) };
+    // the names outlive the routing's arena; runDispatch takes them over
+    const name_copy = a.dupe(u8, script_vpath) catch return .{ .sent = cliErrorPage(w, c, req, 500, id_header) };
+    const info_copy = a.dupe(u8, path_info) catch {
+        a.free(name_copy);
+        return .{ .sent = cliErrorPage(w, c, req, 500, id_header) };
+    };
+    dispatch.* = .{ .result = compiled, .script_filename = compiled.file_path, .front_controller = false, .script_name = name_copy, .path_info = info_copy };
+    return .script;
+}
+
+fn requestString(vm: *VM, text: []const u8) ?[]const u8 {
+    const copy = vm.allocator.dupe(u8, text) catch return null;
+    vm.strings.append(vm.allocator, copy) catch {
+        vm.allocator.free(copy);
+        return null;
+    };
+    return copy;
+}
+
+// normalize_vpath: the path percent-decoded, with "." and ".." segments
+// resolved (never above the root)
+fn normalizeVpath(a: Allocator, raw: []const u8) ![]const u8 {
+    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        if (raw[i] == '%' and i + 2 < raw.len) {
+            const hi = std.fmt.charToDigit(raw[i + 1], 16) catch {
+                try decoded.append(a, raw[i]);
+                continue;
+            };
+            const lo = std.fmt.charToDigit(raw[i + 2], 16) catch {
+                try decoded.append(a, raw[i]);
+                continue;
+            };
+            try decoded.append(a, hi * 16 + lo);
+            i += 2;
+        } else try decoded.append(a, raw[i]);
+    }
+    var segments: std.ArrayListUnmanaged([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, decoded.items, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            _ = segments.pop();
+            continue;
+        }
+        try segments.append(a, seg);
+    }
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (segments.items) |seg| {
+        try out.append(a, '/');
+        try out.appendSlice(a, seg);
+    }
+    // a trailing slash stays: it names a directory
+    if (decoded.items.len > 0 and decoded.items[decoded.items.len - 1] == '/') try out.append(a, '/');
+    if (out.items.len == 0) try out.append(a, '/');
+    return out.items;
+}
+
+// php_cli_server_send_error_page
+fn cliErrorPage(w: *Worker, c: *Connection, req: *const Request, status: u16, id_header: []const u8) u16 {
+    const a = w.allocator;
+    var status_buf: [32]u8 = undefined;
+    const line = statusText(status, &status_buf);
+    // the reason phrase, after the code
+    const text = if (std.mem.indexOfScalar(u8, line, ' ')) |sp| line[sp + 1 ..] else line;
+    var escaped: std.ArrayListUnmanaged(u8) = .empty;
+    defer escaped.deinit(a);
+    for (req.path) |ch| switch (ch) {
+        '&' => escaped.appendSlice(a, "&amp;") catch {},
+        '<' => escaped.appendSlice(a, "&lt;") catch {},
+        '>' => escaped.appendSlice(a, "&gt;") catch {},
+        '"' => escaped.appendSlice(a, "&quot;") catch {},
+        '\'' => escaped.appendSlice(a, "&#039;") catch {},
+        else => escaped.append(a, ch) catch {},
+    };
+    const content = switch (status) {
+        404 => std.fmt.allocPrint(a, "<h1>{s}</h1><p>The requested resource <code class=\"url\">{s}</code> was not found on this server.</p>", .{ text, escaped.items }),
+        405 => std.fmt.allocPrint(a, "<h1>{s}</h1><p>Requested method not allowed.</p>", .{text}),
+        else => std.fmt.allocPrint(a, "<h1>{s}</h1><p>The server is temporarily unavailable.</p>", .{text}),
+    } catch return status;
+    defer a.free(content);
+    const body = std.fmt.allocPrint(a, "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{d} {s}</title>{s}</head><body>{s}</body></html>", .{ status, text, cli_server_css, content }) catch return status;
+    defer a.free(body);
+    if (std.ascii.eqlIgnoreCase(req.method, "HEAD")) {
+        writeResponse(c, status, "text/html; charset=UTF-8", null, "", c.keep_alive, false, a, id_header) catch {};
+    } else {
+        writeResponse(c, status, "text/html; charset=UTF-8", null, body, c.keep_alive, false, a, id_header) catch {};
+    }
+    return status;
+}
+
+const cli_server_css =
+    "<style>\n" ++
+    "body { background-color: #fcfcfc; color: #333333; margin: 0; padding:0; }\n" ++
+    "h1 { font-size: 1.5em; font-weight: normal; background-color: #9999cc; min-height:2em; line-height:2em; border-bottom: 1px inset black; margin: 0; }\n" ++
+    "h1, p { padding-left: 10px; }\n" ++
+    "code.url { background-color: #eeeeee; font-family:monospace; padding:0 2px;}\n" ++
+    "</style>\n";
 
 fn certMtime(path: []const u8) i128 {
     const f = std.Io.Dir.cwd().openFile(platform.io, path, .{}) catch return 0;
@@ -741,8 +920,12 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     var watch_mtime: i128 = if (config.watch) maxPhpMtime(doc_root) else 0;
     var first_run = true;
 
+    cli_server_routing = config.cli_server_routing;
     while (true) {
-        const source = std.Io.Dir.cwd().readFileAlloc(platform.io, config.file, allocator, .limited(1024 * 1024 * 10)) catch |err| {
+        // php -S routes every request itself: a document root with no
+        // index.php has nothing to run up front
+        const no_index = config.cli_server_routing and !fileExists(config.file);
+        const source = if (no_index) try allocator.dupe(u8, "<?php ") else std.Io.Dir.cwd().readFileAlloc(platform.io, config.file, allocator, .limited(1024 * 1024 * 10)) catch |err| {
             try writeStderr("error: could not read '");
             try writeStderr(config.file);
             try writeStderr("'\n");
@@ -1227,6 +1410,19 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
 
     const trace = beginTrace(w, &req, c.bytes_out);
 
+    if (cli_server_routing) {
+        var cli_dispatch: Dispatch = undefined;
+        switch (cliServerRoute(w, c, &req, trace.id_header, &cli_dispatch)) {
+            .sent => |status| {
+                endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, status, c.bytes_out);
+                shiftBuffer(c, consumed);
+                if (!c.keep_alive) c.state = .closing;
+                return;
+            },
+            .script => return runDispatch(w, c, &req, &trace, consumed, cli_dispatch),
+        }
+    }
+
     // static file
     if (tryServeStatic(w.allocator, c, w.doc_root, &req, c.keep_alive, trace.id_header)) |status| {
         endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, status, c.bytes_out);
@@ -1237,16 +1433,29 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
 
     // PHP execution - php-fpm dispatch: an existing .php file runs directly,
     // anything else routes to the front-controller entry
-    const dispatch = resolveDispatch(w, &req);
+    runDispatch(w, c, &req, &trace, consumed, resolveDispatch(w, &req));
+}
+
+fn runDispatch(w: *Worker, c: *Connection, req_in: *const Request, trace: *const Trace, consumed: usize, dispatch_in: Dispatch) void {
+    var req = req_in.*;
     Umask.restore(w.umask);
     w.vm.reset();
+    // php -S's names move into the request's strings, which live until the
+    // next reset
+    var dispatch = dispatch_in;
+    if (dispatch.script_name) |name| {
+        defer w.allocator.free(name);
+        defer w.allocator.free(dispatch_in.path_info);
+        dispatch.script_name = requestString(&w.vm, name);
+        dispatch.path_info = requestString(&w.vm, dispatch_in.path_info) orelse "";
+    }
     const mock_conn = net.Server.Connection{
         .stream = c.stream,
         .address = net.Address{ .in = .{ .sa = .{ .port = 0, .addr = c.addr_bytes, .zero = @as([8]u8, @splat(0)) } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller, w.request_id.id()) catch |err| {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch, w.request_id.id()) catch |err| {
         logRequestError(w, "could not set up the request", @errorName(err));
-        endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, 500, c.bytes_out);
+        endTrace(w, trace, &req, "HTTP/1.1", c.addr_bytes, 500, c.bytes_out);
         c.state = .closing;
         return;
     };
@@ -1280,7 +1489,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
             }) catch "500 Internal Server Error";
             logRequestError(w, "request failed", @errorName(interp_err));
             writeResponse(c, 500, "text/plain", null, body, c.keep_alive, false, w.allocator, trace.id_header) catch {};
-            endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, 500, c.bytes_out);
+            endTrace(w, trace, &req, "HTTP/1.1", c.addr_bytes, 500, c.bytes_out);
             shiftBuffer(c, consumed);
             if (!c.keep_alive) c.state = .closing;
             return;
@@ -1308,7 +1517,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     const extra_headers = w.vm.response_headers;
 
     writeResponse(c, code, ct, extra_headers, w.vm.output.items, c.keep_alive, acceptsGzip(&req), w.allocator, trace.id_header) catch {};
-    endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, code, c.bytes_out);
+    endTrace(w, trace, &req, "HTTP/1.1", c.addr_bytes, code, c.bytes_out);
     shiftBuffer(c, consumed);
     if (!c.keep_alive) c.state = .closing;
 }
@@ -1435,7 +1644,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
         .stream = conn.stream,
         .address = net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = @as([8]u8, @splat(0)) } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller, rid) catch |err| {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch, rid) catch |err| {
         logRequestError(w, "could not set up the request", @errorName(err));
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error", rid);
         endTrace(w, &trace, &req, "HTTP/2.0", conn.addr_bytes, 500, "Internal Server Error".len);
@@ -1648,7 +1857,9 @@ fn parseRequest(raw: []const u8) Request {
     return req;
 }
 
-fn populateSuperglobals(vm: *VM, req: *const Request, conn: net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, doc_root: []const u8, script_filename: []const u8, front_controller: bool, request_id: []const u8) !void {
+fn populateSuperglobals(vm: *VM, req: *const Request, conn: net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, doc_root: []const u8, dispatch: Dispatch, request_id: []const u8) !void {
+    const script_filename = dispatch.script_filename;
+    const front_controller = dispatch.front_controller;
     const a = vm.allocator;
     const server_arr = try vm.allocArray();
 
@@ -1681,6 +1892,12 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: net.Server.Connectio
         php_self = try std.fmt.allocPrint(a, "{s}{s}", .{ script_name, req.path });
         try vm.strings.append(a, php_self);
         path_info = req.path;
+    } else if (dispatch.script_name) |name| {
+        // php -S: the script the path led to, and what followed it
+        script_name = name;
+        path_info = dispatch.path_info;
+        php_self = try std.fmt.allocPrint(a, "{s}{s}", .{ script_name, path_info });
+        try vm.strings.append(a, php_self);
     } else {
         // direct .php execution (php-fpm style): SCRIPT_NAME and PHP_SELF are the
         // request path to the script itself, no PATH_INFO. wp-login.php and other
@@ -1693,7 +1910,9 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: net.Server.Connectio
     try server_arr.set(a, .{ .string = Value.String.borrowed("SCRIPT_FILENAME") }, .{ .string = Value.String.borrowed(script_filename) });
     try server_arr.set(a, .{ .string = Value.String.borrowed("DOCUMENT_ROOT") }, .{ .string = Value.String.borrowed(doc_root) });
     try server_arr.set(a, .{ .string = Value.String.borrowed("PHP_SELF") }, .{ .string = Value.String.borrowed(php_self) });
-    try server_arr.set(a, .{ .string = Value.String.borrowed("PATH_INFO") }, .{ .string = Value.String.borrowed(path_info) });
+    // php -S sets PATH_INFO only when the path went past the script
+    if (dispatch.script_name == null or path_info.len > 0)
+        try server_arr.set(a, .{ .string = Value.String.borrowed("PATH_INFO") }, .{ .string = Value.String.borrowed(path_info) });
     // SCRIPT_FILENAME + DOCUMENT_ROOT + GATEWAY_INTERFACE + SERVER_SOFTWARE -
     // WordPress / Symfony / Laravel all read these during request setup
     try server_arr.set(a, .{ .string = Value.String.borrowed("SERVER_SOFTWARE") }, .{ .string = Value.String.borrowed("zphp") });
