@@ -321,6 +321,13 @@ fn storeOf(ctx: *NativeContext, context: ?*PhpObject, mode: Mode) RuntimeError!S
 // php_stream_error_operation_begin: context is the one the operation reports
 // with (the default context when null)
 pub fn begin(ctx: *NativeContext, context: ?*PhpObject) RuntimeError!void {
+    return beginOp(ctx, context, true);
+}
+
+// collect false: an operation whose errors are reported as they come unless
+// its context asks for more (opendir, scandir and dir, which raise each
+// error as an operation of its own in php)
+fn beginOp(ctx: *NativeContext, context: ?*PhpObject, collect: bool) RuntimeError!void {
     const vm = ctx.vm;
     const state = &vm.stream_errors;
     if (state.ops.items.len >= max_depth) {
@@ -329,11 +336,14 @@ pub fn begin(ctx: *NativeContext, context: ?*PhpObject) RuntimeError!void {
         state.refused += 1;
         return @import("filesystem.zig").docrefBody(ctx, E_WARNING, msg);
     }
+    // the errors wait for the end of the operation (php_stream_error_add),
+    // so a warning raised meanwhile by code the operation runs (a user
+    // wrapper's method) comes first
     const reporting = context orelse vm.default_stream_context;
-    const collects = hasErrorOptions(reporting);
-    if (collects) VM.objRetain(reporting.?);
-    state.ops.append(vm.allocator, .{ .context = if (collects) reporting else null, .collecting = collects, .saved_quiet = state.quiet }) catch |err| {
-        if (collects) vm.releaseValue(.{ .resource = reporting.? });
+    const collects = collect or hasErrorOptions(reporting);
+    if (reporting) |r| VM.objRetain(r);
+    state.ops.append(vm.allocator, .{ .context = reporting, .collecting = collects, .saved_quiet = state.quiet }) catch |err| {
+        if (reporting) |r| vm.releaseValue(.{ .resource = r });
         return err;
     };
     state.quiet = 0;
@@ -363,6 +373,18 @@ pub fn end(ctx: *NativeContext) RuntimeError!void {
         return;
     }
     return report(ctx, op.context, &op.entries);
+}
+
+// the errors the running operation collected so far, reported now, for a
+// native that ends its operation before it throws
+pub fn reportCollected(ctx: *NativeContext) RuntimeError!void {
+    const state = &ctx.vm.stream_errors;
+    const op = currentOp(state) orelse return;
+    if (op.entries.items.len == 0) return;
+    var entries = op.entries;
+    op.entries = .empty;
+    defer entries.deinit(ctx.vm.allocator);
+    return report(ctx, op.context, &entries);
 }
 
 // an operation unwound by exit: its errors go unreported
@@ -686,6 +708,10 @@ const op_specs = .{
     .{ "stream_isatty", Spec{ .stream = 0 } },
 };
 
+fn immediate(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "opendir") or std.mem.eql(u8, name, "scandir") or std.mem.eql(u8, name, "dir");
+}
+
 fn specFor(comptime name: []const u8) ?Spec {
     @setEvalBranchQuota(100000);
     inline for (op_specs) |s| {
@@ -719,7 +745,7 @@ pub fn wrap(comptime name: []const u8, comptime f: anytype) NativeFn {
                 .stream => |i| streamContext(args, i),
                 .none => null,
             };
-            try begin(ctx, context);
+            try beginOp(ctx, context, comptime !immediate(name));
             const result = f(ctx, args) catch |err| {
                 if (ctx.vm.exit_requested or err == error.OutOfMemory) {
                     abort(ctx.vm);

@@ -157,6 +157,9 @@ fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!N
 
     const sets = try watchStreams(ctx, args, &watched, &pollfds);
     if (sets == 0) {
+        // php ends the operation, reporting the streams it couldn't use,
+        // before it throws
+        try @import("stream_errors.zig").reportCollected(ctx);
         try ctx.vm.setPendingException("ValueError", "No stream arrays were passed");
         return error.RuntimeError;
     }
