@@ -4288,6 +4288,8 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     self.trait_const_values = true;
     for (const_decls.items) |pi| {
         const pmember = self.ast.nodes[pi];
+        if (std.ascii.eqlIgnoreCase(self.ast.tokenSlice(pmember.main_token), "namespace"))
+            try self.warn(pmember.main_token, 8192, "Declaring trait constant called 'namespace' is deprecated", .{});
         if (pmember.data.lhs != 0) try self.compileNode(pmember.data.lhs);
     }
     defer self.trait_const_values = outer_trait_consts;
@@ -4549,6 +4551,9 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .enum_case) {
+            // a case is a class constant (zend_declare_class_constant_ex)
+            if (std.ascii.eqlIgnoreCase(self.ast.tokenSlice(member.main_token), "namespace"))
+                try self.warn(member.main_token, 8192, "Declaring enum constant called 'namespace' is deprecated", .{});
             if (member.data.lhs != 0) {
                 if (!foldsAtCompileTime(self.ast, member.data.lhs) or defaultNamesClassOr(self, member, self.ast.tokenSlice(node.main_token))) {
                     // the enum isn't declared yet: a value reading a
