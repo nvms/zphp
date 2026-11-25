@@ -754,8 +754,27 @@ const PhpArray = @import("runtime/value.zig").PhpArray;
 
 const env = @import("env.zig");
 
+// variables_order names the superglobals php fills: without S, $_SERVER is
+// an empty array (php_auto_globals_create_server), without E, $_ENV is
+fn variablesOrderHas(vm: *VM, comptime letter: u8) bool {
+    const order = vm.ini_settings.get("variables_order") orelse @import("ini_config.zig").get("variables_order") orelse "EGPCS";
+    return std.mem.indexOfScalar(u8, order, letter) != null or std.mem.indexOfScalar(u8, order, std.ascii.toLower(letter)) != null;
+}
+
 fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
     const arr = try vm.allocArray();
+    defer {
+        const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES" };
+        inline for (superglobal_names) |sg_name| {
+            if (vm.allocArray()) |sg_arr| {
+                vm.putRequestVar(sg_name, .{ .array = sg_arr }) catch {};
+            } else |_| {}
+        }
+    }
+    if (!variablesOrderHas(vm, 'E')) {
+        try vm.putRequestVar("$_ENV", .{ .array = try vm.allocArray() });
+    } else try env.populateEnvSuperglobal(vm, a, null);
+    if (!variablesOrderHas(vm, 'S')) return vm.putRequestVar("$_SERVER", .{ .array = arr });
 
     // php's cli: the environment (php_import_environment_variables), then
     // what sapi_cli_register_variables and php_register_server_variables
@@ -780,13 +799,6 @@ fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
     try arr.set(a, .{ .string = Value.String.borrowed("argv") }, .null);
     try arr.set(a, .{ .string = Value.String.borrowed("argc") }, .{ .int = 0 });
     try vm.putRequestVar("$_SERVER", .{ .array = arr });
-
-    const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES" };
-    inline for (superglobal_names) |sg_name| {
-        const sg_arr = try vm.allocArray();
-        try vm.putRequestVar(sg_name, .{ .array = sg_arr });
-    }
-    try env.populateEnvSuperglobal(vm, a, null);
 }
 
 fn initArgv(vm: *VM, a: std.mem.Allocator, script_path: []const u8, script_args: []const []const u8) !void {
@@ -802,6 +814,7 @@ fn initArgv(vm: *VM, a: std.mem.Allocator, script_path: []const u8, script_args:
 
     // also update $_SERVER['argv'] and $_SERVER['argc'], plus the script-
     // path keys that CLI PHP populates for the running file
+    if (!variablesOrderHas(vm, 'S')) return;
     if (vm.request_vars.get("$_SERVER")) |sv| {
         if (sv == .array) {
             try sv.array.set(a, .{ .string = Value.String.borrowed("argv") }, .{ .array = argv_arr });
