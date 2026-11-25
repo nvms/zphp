@@ -550,6 +550,10 @@ fn constExprWalk(self: *Compiler, idx: u32, allow_dynamic: bool) Error!void {
         },
         .dynamic_class_const => {
             const class_node = ast.nodes[node.data.lhs];
+            // a literal folds to a value, which names no class unless it is
+            // a string (zend_compile_const_expr_class_const)
+            if (class_node.tag != .string_literal and @import("compiler_expr.zig").foldsToConstant(self, node.data.lhs))
+                return self.fail(self.const_expr_at, "Class name must be a valid object or a string");
             if (class_node.tag != .identifier and class_node.tag != .qualified_name)
                 return self.fail(self.const_expr_at, "Dynamic class names are not allowed in compile-time class constant references");
             if (class_node.tag == .identifier and std.ascii.eqlIgnoreCase(ast.tokenSlice(class_node.main_token), "static"))

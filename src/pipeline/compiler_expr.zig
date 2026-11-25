@@ -3675,7 +3675,7 @@ fn staticClassOperand(self: *Compiler, class_node: Ast.Node) ![]const u8 {
 }
 
 // an operator expression over literals, which php folds while compiling
-fn foldsToConstant(self: *Compiler, idx: u32) bool {
+pub fn foldsToConstant(self: *Compiler, idx: u32) bool {
     const n = self.ast.nodes[idx];
     return switch (n.tag) {
         .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal, .string_literal => n.tag != .string_literal or self.ast.tokens[n.main_token].tag != .heredoc,
