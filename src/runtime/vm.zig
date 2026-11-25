@@ -16565,7 +16565,7 @@ pub const VM = struct {
         if (sensitive == 0 or index >= 64 or sensitive & (@as(u64, 1) << @intCast(index)) == 0) return v;
         const obj = try self.allocUserObject("SensitiveParameterValue");
         try self.initObjectProperties(obj, "SensitiveParameterValue");
-        try obj.set(self.allocator, "__value", v);
+        try obj.set(self.allocator, "value", v);
         return .{ .object = obj };
     }
 

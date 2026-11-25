@@ -203,9 +203,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionConstant::__toString", rconstToString);
 
     // SensitiveParameterValue (PHP 8.2) - returned by debug_backtrace for
-    // redacted sensitive params. simple value wrapper
-    // the value is internal state, so listings show none
-    var spv_def = ClassDef{ .name = "SensitiveParameterValue", .is_final = true, .no_dynamic_properties = true };
+    // redacted sensitive params: its stub's private readonly $value, which
+    // __debugInfo hides from dumps
+    var spv_def = ClassDef{ .name = "SensitiveParameterValue", .is_final = true, .no_dynamic_properties = true, .native_properties = spvProperties };
+    try spv_def.properties.append(a, .{ .name = "value", .default = .undef, .visibility = .private, .set_visibility = .private, .is_readonly = true, .type_str = "mixed" });
     try spv_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try spv_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
     try spv_def.methods.put(a, "__debugInfo", .{ .name = "__debugInfo", .arity = 0 });
@@ -3722,13 +3723,19 @@ fn spvConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         try ctx.vm.setPendingException("ArgumentCountError", "SensitiveParameterValue::__construct() expects exactly 1 argument, 0 given");
         return error.RuntimeError;
     }
-    try this.set(ctx.allocator, "__value", args[0]);
+    try this.set(ctx.allocator, "value", args[0]);
     return NativeResult.scalar(.null);
 }
 
 fn spvGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return NativeResult.share(this.get("__value"));
+    return NativeResult.share(this.get("value"));
+}
+
+// zend_attribute_sensitive_parameter_value_get_properties_for: no listing
+// shows the value
+fn spvProperties(ctx: *NativeContext, _: *PhpObject, _: object_properties.Purpose) RuntimeError!?*PhpArray {
+    return try ctx.vm.allocArray();
 }
 
 fn spvDebugInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
