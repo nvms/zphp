@@ -21754,7 +21754,9 @@ pub const VM = struct {
     // an internal unit enum: each case a `name`-only object the class holds
     pub fn registerUnitEnum(vm: *VM, name: []const u8, cases: []const []const u8) !void {
         const allocator = vm.allocator;
-        var def = ClassDef{ .name = name, .is_enum = true };
+        var def = ClassDef{ .name = name, .is_enum = true, .no_dynamic_properties = true };
+        // a case's name is its public readonly property, as for a user enum
+        try def.properties.append(allocator, .{ .name = "name", .default = .null, .is_readonly = true, .has_set_visibility = true, .type_str = "string" });
         for (cases) |case| {
             const case_obj = try allocator.create(PhpObject);
             case_obj.* = .{ .class_name = name, .enum_case = true };
