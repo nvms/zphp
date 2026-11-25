@@ -32,7 +32,7 @@ fn dropIdent() void {
 
 fn native_openlog(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const p = Args.init(ctx, "openlog", args);
-    const ident = try p.str(0, "prefix");
+    const ident = try p.path(0, "prefix");
     const option = try p.longAs(1, "flags", "int");
     const facility = try p.longAs(2, "facility", "int");
     if (has_syslog) {

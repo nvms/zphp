@@ -5385,6 +5385,11 @@ pub fn ownedText(ctx: *NativeContext, v: Value) RuntimeError![]const u8 {
 
 fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3 or (args[0] != .string and args[0] != .array)) return NativeResult.scalar(.{ .bool = false });
+    // Z_PARAM_PATH_OR_NULL, before the command is looked at
+    if (args.len >= 4 and args[3] == .string and std.mem.indexOfScalar(u8, args[3].string.bytes(), 0) != null) {
+        try ctx.vm.setPendingException("ValueError", "proc_open(): Argument #4 ($cwd) must not contain any null bytes");
+        return error.RuntimeError;
+    }
     var words: std.ArrayListUnmanaged([]const u8) = .empty;
     defer words.deinit(ctx.allocator);
     if (args[0] == .array) {
