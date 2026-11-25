@@ -26877,6 +26877,9 @@ pub const VM = struct {
             if (!self.magicGuarded(obj, name, .isset)) {
                 const present = try self.callMagicProperty(obj, .isset, name, .null);
                 if (!present.isTruthy()) return .null;
+                // __isset may have written the property: its value is the
+                // result, without a __get call (GH-12695)
+                if (!inaccessible) if (self.materializedProperty(obj, name)) |v| return v;
             }
             if (self.magicApplies(obj, name, .get)) return self.callMagicGet(obj, name);
             return .null;
@@ -26892,6 +26895,21 @@ pub const VM = struct {
             }
         }
         return .null;
+    }
+
+    // the property a magic method left in the table, as php's re-check after
+    // __isset: a declared slot the scope sees that isn't undef, or a dynamic
+    // property. null when there is none
+    fn materializedProperty(self: *VM, obj: *PhpObject, name: []const u8) ?Value {
+        const vr = self.findPropertyVisibility(obj.class_name, name);
+        if (vr.declared) {
+            if (!self.propVisible(vr, name, vr.visibility)) return null;
+            const slots = obj.slots orelse return null;
+            const idx = obj.getSlotIndexForScope(name, vr.defining_class) orelse return null;
+            if (slots[idx] == .undef or obj.isUnset(name)) return null;
+            return slots[idx];
+        }
+        return obj.properties.get(name);
     }
 
     // an access the magic methods don't take: a property the scope can't
