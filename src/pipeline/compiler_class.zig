@@ -2295,6 +2295,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
+    errdefer self.keepWarningsOf(&sub);
 
     for (param_nodes, 0..) |_, i| {
         if (i < ref_flags.len and ref_flags[i]) continue;
@@ -2507,6 +2508,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
+    errdefer self.keepWarningsOf(&sub);
 
     for (param_nodes, 0..) |_, i| {
         if (i < 16 and ref_flags_buf[i]) continue;
@@ -4811,6 +4813,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
+    errdefer self.keepWarningsOf(&sub);
 
     // php 8.6 deprecates a generator constructor or destructor
     if (method_gen) {
@@ -5145,6 +5148,7 @@ fn compileInitializer(self: *Compiler, name: []const u8, scope: InitializerScope
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
+    errdefer self.keepWarningsOf(&sub);
     const scoped = scope == .argument or class_name.len > 0;
     switch (scope) {
         .argument => {
@@ -5228,6 +5232,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
+    errdefer self.keepWarningsOf(&sub);
 
     const cname_idx = try sub.addConstant(.{ .string = Value.String.borrowed(class_name) });
     // the defaults are evaluated in the class's scope: a closure among them
@@ -5365,6 +5370,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
+    errdefer self.keepWarningsOf(&sub);
 
     _ = sub.getOrCreateSlot("$this");
     for (param_names) |pn| _ = sub.getOrCreateSlot(pn);

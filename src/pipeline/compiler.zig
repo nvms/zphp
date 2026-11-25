@@ -2722,6 +2722,20 @@ pub const Compiler = struct {
         out.deinit();
     }
 
+    // a sub-compiler that failed: the warnings it raised before the fatal
+    // were raised in php by then, so they reach the diagnostic too
+    pub fn keepWarningsOf(self: *Compiler, sub: *const Compiler) void {
+        for (sub.warnings.items) |w| {
+            self.warnings.ensureUnusedCapacity(self.allocator, 1) catch return;
+            self.string_allocs.ensureUnusedCapacity(self.allocator, 1) catch return;
+            const message = self.allocator.dupe(u8, w.message) catch return;
+            self.string_allocs.appendAssumeCapacity(message);
+            var kept = w;
+            kept.message = message;
+            self.warnings.appendAssumeCapacity(kept);
+        }
+    }
+
     // moves a finished sub-compiler's output into this one. capacity is
     // reserved up front so the move either happens whole or not at all
     pub fn adopt(self: *Compiler, sub: *Compiler) Error!void {
