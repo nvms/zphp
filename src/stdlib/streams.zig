@@ -887,12 +887,15 @@ pub fn setReadBuffer(ctx: *NativeContext, obj: *PhpObject, none: bool) RuntimeEr
 
 // what php does to a stream before its handle closes: flush what was
 // written (through the write filters), then let the filters go
-pub fn beforeClose(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
-    const s = get(obj) orelse return;
-    if (s.in_free) return;
+// _php_stream_free's flush of a stream written to: false when it failed,
+// which fails the close
+pub fn beforeClose(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
+    const s = get(obj) orelse return true;
+    if (s.in_free) return true;
     s.in_free = true;
     defer s.in_free = false;
-    if (s.was_written or s.writefilters.head != null) _ = try flush(ctx, obj, true);
+    if (s.was_written or s.writefilters.head != null) return flush(ctx, obj, true);
+    return true;
 }
 
 pub fn removeFilters(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
@@ -918,7 +921,7 @@ pub fn destroyed(vm: *VM, obj: *PhpObject) void {
     var ctx = vm.makeContext(null);
     // the resource is gone already: a filter sees no stream
     obj.set(s.allocator, "__open", .{ .bool = false }) catch {};
-    beforeClose(&ctx, obj) catch {};
+    _ = beforeClose(&ctx, obj) catch false;
     s.in_free = true;
     if (fs.fileHandleWrapper(obj)) |w| user_streams.close(&ctx, obj, w) catch {};
     removeFilters(&ctx, obj) catch {};

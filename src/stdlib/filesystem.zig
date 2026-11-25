@@ -1405,6 +1405,16 @@ fn putContentsData(ctx: *NativeContext, data: Value, out: *std.ArrayListUnmanage
     }
 }
 
+// file_put_contents's end: a short write warns, then the stream closes; a
+// failed close (its final flush) fails the call too
+fn putContentsFinish(ctx: *NativeContext, fh: *PhpObject, written: isize, len: usize) RuntimeError!NativeResult {
+    const short = written >= 0 and written < len;
+    if (short) try warn(ctx, "file_put_contents(): Only {d} of {d} bytes written, possibly out of free disk space", .{ written, len });
+    const closed = try closeStream(ctx, fh);
+    if (written < 0 or short or !closed) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = written });
+}
+
 fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]const u8, flags: i64) RuntimeError!NativeResult {
     if (std.ascii.startsWithIgnoreCase(spelled_path, "php://filter/") or (std.ascii.startsWithIgnoreCase(spelled_path, "data:") and !isWrapperUnregistered(ctx.vm, "data"))) {
         const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
@@ -1413,13 +1423,7 @@ fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]con
         fh.retain();
         defer ctx.vm.releaseValue(opened);
         const written = try streams.write(ctx, fh, data);
-        _ = try closeStream(ctx, fh);
-        if (written < 0) return NativeResult.scalar(.{ .bool = false });
-        if (written < data.len) {
-            try warn(ctx, "file_put_contents(): Only {d} of {d} bytes written, possibly out of free disk space", .{ written, data.len });
-            return NativeResult.scalar(.{ .bool = false });
-        }
-        return NativeResult.scalar(.{ .int = written });
+        return putContentsFinish(ctx, fh, written, data.len);
     }
     if (userWrapperFor(ctx.vm, spelled_path)) |class_name| {
         const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
@@ -1428,13 +1432,7 @@ fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]con
         fh.retain();
         defer ctx.vm.releaseValue(opened);
         const written = try streams.write(ctx, fh, data);
-        _ = try closeStream(ctx, fh);
-        if (written < 0) return NativeResult.scalar(.{ .bool = false });
-        if (written < data.len) {
-            try warn(ctx, "file_put_contents(): Only {d} of {d} bytes written, possibly out of free disk space", .{ written, data.len });
-            return NativeResult.scalar(.{ .bool = false });
-        }
-        return NativeResult.scalar(.{ .int = written });
+        return putContentsFinish(ctx, fh, written, data.len);
     }
     if (extractScheme(spelled_path)) |s| {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
@@ -1936,7 +1934,9 @@ fn copyThroughStreams(ctx: *NativeContext, source: []const u8, dest: []const u8,
         if (!ok) break;
     }
     _ = try closeStream(ctx, src);
-    _ = try closeStream(ctx, dst);
+    // php_copy_file_ctx: a destination whose close (its final flush) fails
+    // fails the copy
+    if (!try closeStream(ctx, dst)) ok = false;
     return NativeResult.scalar(.{ .bool = ok });
 }
 
@@ -3431,8 +3431,10 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 pub fn closeStream(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
     // a flush that throws still closes the stream; the exception follows
     var failed: ?RuntimeError = null;
-    streams.beforeClose(ctx, obj) catch |err| {
+    // a close that succeeds still reports a failed flush
+    const flushed = streams.beforeClose(ctx, obj) catch |err| blk: {
         failed = err;
+        break :blk true;
     };
     // watchers leave the poll backends while the descriptor is still open
     if (streams.get(obj)) |s| if (s.poll_watchers.items.len > 0) @import("io_poll.zig").streamClosing(ctx.vm, obj);
@@ -3444,7 +3446,7 @@ pub fn closeStream(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
         failed = failed orelse err;
     };
     if (failed) |err| return err;
-    return ok;
+    return ok and flushed;
 }
 
 // _php_stream_temp_create_ex: a php://temp stream (data: is one too) keeps
