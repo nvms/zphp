@@ -5410,6 +5410,15 @@ fn checkLazyCompatible(ctx: *NativeContext, this: *PhpObject, method: []const u8
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
     }
+    // an internal class with its own write_property handler can't be lazy
+    // (the reflectors, ArrayObject and ArrayIterator)
+    if (object) |o| if (ctx.vm.isReflectionObject(o.class_name) or ctx.vm.isSplArray(o)) {
+        if (ctx.vm.classes.get(o.class_name)) |cd| if (cd.is_internal) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot use {s}() on internal class {s}", .{ method, o.class_name });
+            defer ctx.allocator.free(msg);
+            return throwReflection(ctx, msg);
+        };
+    };
 }
 
 const WriteMode = enum { value, raw, raw_without_lazy };

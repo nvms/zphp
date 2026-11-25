@@ -27112,7 +27112,7 @@ pub const VM = struct {
     }
 
     // whether a class is one of the reflection extension's, or extends one
-    fn isReflectionObject(self: *VM, class_name: []const u8) bool {
+    pub fn isReflectionObject(self: *VM, class_name: []const u8) bool {
         var current: ?[]const u8 = class_name;
         var depth: usize = 0;
         while (current) |cn| : (depth += 1) {
@@ -31928,7 +31928,7 @@ pub const VM = struct {
         return self.hasMethod(obj.class_name, method) and !self.magicGuarded(obj, name, kind);
     }
 
-    fn isSplArray(self: *VM, obj: *PhpObject) bool {
+    pub fn isSplArray(self: *VM, obj: *PhpObject) bool {
         return self.isInstanceOf(obj.class_name, "ArrayObject") or self.isInstanceOf(obj.class_name, "ArrayIterator");
     }
 
