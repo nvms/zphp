@@ -60,14 +60,17 @@ ensure_container() {
     if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)" != true ]; then
         docker image inspect "$image" >/dev/null 2>&1 || build_image
         docker rm -f "$name" >/dev/null 2>&1 || true
-        local mounts=(-v "$root:$root" -v /tmp:/tmp)
+        # the host's users and groups, so posix_getpwuid() and friends find
+        # the calling user as a local php would
+        local mounts=(-v "$root:$root" -v /tmp:/tmp -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro)
         local extra
         IFS=: read -ra extra <<<"${PHP_REF_MOUNTS:-}"
         for d in "${extra[@]}"; do
             [ -n "$d" ] && mounts+=(-v "$d:$d")
         done
-        # the host's open file limits (php://fd and others report them)
-        docker run -d --name "$name" --network host --init "${mounts[@]}" \
+        # the host's open file limits (php://fd and others report them); the
+        # host's process ids, so php sees a real parent process
+        docker run -d --name "$name" --network host --pid host --init "${mounts[@]}" \
             --ulimit "nofile=$(ulimit -Sn):$(ulimit -Hn)" \
             --entrypoint sleep "$image" infinity >/dev/null
     fi
