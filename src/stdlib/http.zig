@@ -200,6 +200,9 @@ fn setcookieCommon(ctx: *NativeContext, args: []const Value, comptime func: []co
     if (domain) |s| if (std.mem.indexOfAny(u8, cs(s), ",; \t\r\n\x0b\x0c") != null) return cookieError(ctx, "ValueError", func ++ "(): \"domain\" option cannot contain " ++ illegal_cookie_chars, .{});
     if (expires >= 253402300800) return cookieError(ctx, "ValueError", func ++ "(): \"expires\" option cannot have a year greater than 9999", .{});
     if (partitioned and !secure) return cookieError(ctx, "ValueError", func ++ "(): \"partitioned\" option cannot be used without \"secure\" option", .{});
+    // php_is_valid_samesite_value (8.6)
+    if (samesite) |s| if (s.len > 0 and !std.ascii.eqlIgnoreCase(s, "Strict") and !std.ascii.eqlIgnoreCase(s, "Lax") and !std.ascii.eqlIgnoreCase(s, "None"))
+        return cookieError(ctx, "ValueError", func ++ "(): \"samesite\" option must be \"Strict\", \"Lax\", \"None\", or \"\"", .{});
 
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(a);
