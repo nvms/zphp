@@ -963,12 +963,17 @@ fn native_is_uploaded_file(_: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn native_sys_get_temp_dir(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.copyString(ctx.allocator, systemTempDir());
+    return NativeResult.copyString(ctx.allocator, systemTempDir(ctx.vm));
 }
 
-// php's temporary directory: TMPDIR (TEMP, TMP) without a trailing slash,
-// or the platform's default
-fn systemTempDir() []const u8 {
+// php_get_temporary_directory: the sys_temp_dir setting, else TMPDIR (TEMP,
+// TMP), without a trailing slash, or the platform's default
+fn systemTempDir(vm: *VM) []const u8 {
+    if (vm.ini_settings.get("sys_temp_dir")) |v| {
+        const sep = if (platform.is_windows) '\\' else '/';
+        if (v.len >= 2 and v[v.len - 1] == sep) return v[0 .. v.len - 1];
+        if (v.len >= 1 and v[v.len - 1] != sep) return v;
+    }
     const env_keys = [_][]const u8{ "TMPDIR", "TEMP", "TMP" };
     for (env_keys) |k| {
         if (platform.getenv(k)) |v| {
@@ -1002,8 +1007,8 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         if (try createTempFile(ctx, dir, prefix)) |path| return NativeResult.takeString(path);
         try ctx.vm.raiseError(8, "tempnam(): file created in the system's temporary directory");
     }
-    if (limited and !try open_basedir.allows(ctx.vm, "tempnam", systemTempDir())) return NativeResult.scalar(.{ .bool = false });
-    if (try createTempFile(ctx, systemTempDir(), prefix)) |path| return NativeResult.takeString(path);
+    if (limited and !try open_basedir.allows(ctx.vm, "tempnam", systemTempDir(ctx.vm))) return NativeResult.scalar(.{ .bool = false });
+    if (try createTempFile(ctx, systemTempDir(ctx.vm), prefix)) |path| return NativeResult.takeString(path);
     return NativeResult.scalar(.{ .bool = false });
 }
 
