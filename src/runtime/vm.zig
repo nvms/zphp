@@ -26577,6 +26577,10 @@ pub const VM = struct {
         const obj = if (object_lhs) a.object else b.object;
         const other = if (object_lhs) b else a;
         const sign: i64 = if (object_lhs) 1 else -1;
+        // an enum's compare handler is zend_objects_not_comparable: past the
+        // null and bool pairs zend_compare settles first, it is
+        // uncomparable (1) either way round, without converting
+        if (obj.enum_case and other != .null and other != .undef and other != .bool) return 1;
         switch (other) {
             .null, .undef => return sign,
             .bool => {
