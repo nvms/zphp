@@ -178,6 +178,10 @@ pub const entries = .{
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 3) {
+        try ctx.vm.raiseError(8192, "define(): Argument #3 ($case_insensitive) is ignored and treated as false since declaration of case-insensitive constants is no longer supported, passing the argument explicitly is unnecessary");
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
     if (std.mem.indexOf(u8, args[0].string.bytes(), "::") != null) {
         try ctx.vm.setPendingException("ValueError", "define(): Argument #1 ($constant_name) cannot be a class constant");
         return error.RuntimeError;
@@ -1533,7 +1537,11 @@ fn isAImpl(ctx: *NativeContext, args: []const Value, only_subclass: bool) Runtim
     const instance: []const u8 = switch (args[0]) {
         .object => |o| o.class_name,
         .string => |str| blk: {
-            if (!allow_string) return NativeResult.scalar(.{ .bool = false });
+            if (!allow_string) {
+                try ctx.vm.raiseError(8192, if (only_subclass) "Calling is_subclass_of() with a string when $allow_string is false" else "Calling is_a() with a string when $allow_string is false");
+                if (ctx.vm.pending_exception != null) return error.RuntimeError;
+                return NativeResult.scalar(.{ .bool = false });
+            }
             const raw = str.bytes();
             try ctx.vm.tryAutoload(raw);
             if (ctx.vm.pending_exception != null) return error.RuntimeError;

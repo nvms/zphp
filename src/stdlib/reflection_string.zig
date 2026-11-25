@@ -904,6 +904,8 @@ fn appendClassConstant(w: *Writer, declaring: []const u8, name: []const u8, valu
     switch (value) {
         .array => try w.str("Array"),
         .object => try w.str("Object"),
+        // php 8.6 writes booleans as true and false
+        .bool => |b| try w.str(if (b) "true" else "false"),
         .float => |f| try appendDouble(w, f, false),
         else => try value.format(&w.buf, ctx.allocator),
     }
@@ -1359,6 +1361,7 @@ pub fn constantString(ctx: *NativeContext, name: []const u8, value: Value, persi
     try w.fmt("{s} {s} ] {{ ", .{ zvalTypeName(value), name });
     switch (value) {
         .array => try w.str("Array"),
+        .bool => |b| try w.str(if (b) "true" else "false"),
         .float => |f| try appendDouble(&w, f, false),
         .object => try w.str("Object"),
         else => try value.format(&w.buf, ctx.allocator),

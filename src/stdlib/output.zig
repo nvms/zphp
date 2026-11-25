@@ -317,9 +317,14 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             obj.recursion |= flag;
             defer obj.recursion &= ~flag;
 
-            // PHP enum cases dump as `enum(ClassName::CaseName)\n`
+            // PHP enum cases dump as `enum(ClassName::CaseName)\n`, or with
+            // what their __debugInfo gives (php 8.6)
+            var enum_case: ?[]const u8 = null;
             if (ctx.vm.classes.get(obj.class_name)) |cls_def| {
-                if (cls_def.is_enum) {
+                if (cls_def.is_enum and ctx.vm.hasMethod(obj.class_name, "__debugInfo")) {
+                    const name_v = obj.get("name");
+                    if (name_v == .string) enum_case = name_v.string.bytes();
+                } else if (cls_def.is_enum) {
                     const name_v = obj.get("name");
                     if (name_v == .string) {
                         try appendIndent(out, a, indent);
@@ -341,12 +346,16 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
 
             try appendIndent(out, a, indent);
             try out.appendSlice(a, marker);
-            try out.appendSlice(a, object_properties.lazyPrefix(obj));
-            try out.appendSlice(a, "object(");
-            try out.appendSlice(a, obj.class_name);
             var initialized: usize = 0;
             for (listing.items.items) |prop| initialized += @intFromBool(prop.uninitialized == null);
-            try out.print(a, ")#{d} ({d}) {{\n", .{ obj.id, initialized });
+            if (enum_case) |case| {
+                try out.print(a, "enum({s}::{s}) ({d}) {{\n", .{ obj.class_name, case, initialized });
+            } else {
+                try out.appendSlice(a, object_properties.lazyPrefix(obj));
+                try out.appendSlice(a, "object(");
+                try out.appendSlice(a, obj.class_name);
+                try out.print(a, ")#{d} ({d}) {{\n", .{ obj.id, initialized });
+            }
             for (listing.items.items) |prop| {
                 // php_array_element_dump / php_object_property_dump
                 if (stack_limit.overflowed()) {

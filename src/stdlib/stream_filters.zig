@@ -1338,6 +1338,10 @@ const ZlibData = struct {
 const MAX_WBITS = 15;
 
 fn createZlib(ctx: *NativeContext, name: []const u8, params: ?Value) RuntimeError!?*Filter {
+    if (params) |p| if (p == .object) {
+        try fs.deprecatedDocref(ctx, "Passing an object for filter parameters for {s} is deprecated, call get_object_vars() first instead", .{name});
+        if (ctx.vm.pending_exception != null) return null;
+    };
     const z = try ctx.allocator.create(ZlibData);
     z.* = .{ .strm = std.mem.zeroes(zlib.z_stream) };
     z.strm.avail_out = z.outbuf.len;

@@ -42,9 +42,22 @@ pub const entries = .{
 fn native_session_set_save_handler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len >= 1) try refuseWhileUploadProgress(ctx);
     // legacy 6-callable form: session_set_save_handler(open, close, read, write, destroy, gc, ...)
-    if (args.len >= 6 and args[0] != .object) return NativeResult.scalar(.{ .bool = true });
+    if (args.len >= 6 and args[0] != .object) {
+        try @import("filesystem.zig").deprecatedDocref(ctx, "Providing individual callbacks instead of an object implementing SessionHandlerInterface is deprecated", .{});
+        return NativeResult.scalar(.{ .bool = true });
+    }
     // OO form: session_set_save_handler($handler [, $register_shutdown = true])
     if (args.len >= 1 and args[0] == .object) {
+        // php 8.6 deprecates a handler that can't create or validate ids
+        const class = args[0].object.class_name;
+        if (!ctx.vm.isInstanceOf(class, "SessionIdInterface") and !ctx.vm.hasMethod(class, "create_sid")) {
+            try @import("filesystem.zig").deprecatedDocref(ctx, "Providing an object to argument #1 ($sessionhandler) which does not have the create_sid() method defined is deprecated", .{});
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        }
+        if (!ctx.vm.isInstanceOf(class, "SessionUpdateTimestampHandlerInterface") and !ctx.vm.hasMethod(class, "validateId")) {
+            try @import("filesystem.zig").deprecatedDocref(ctx, "Providing an object to argument #1 ($sessionhandler) which does not have the validateId() method defined is deprecated", .{});
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        }
         try setSessionVar(ctx, "__session_handler", args[0]);
         return NativeResult.scalar(.{ .bool = true });
     }

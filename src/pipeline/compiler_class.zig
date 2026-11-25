@@ -2169,6 +2169,8 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     defer self.named_signature = outer_named_signature;
     if (!std.mem.startsWith(u8, raw_name, "__closure_")) {
         // zend_begin_func_decl: assert() is compiled specially
+        if (std.ascii.eqlIgnoreCase(raw_name, "readonly") or std.ascii.eqlIgnoreCase(raw_name, "let") or std.ascii.eqlIgnoreCase(raw_name, "is"))
+            try self.warn(name_tok, 8192, "Calling a function \"{s}\" is deprecated since 8.6", .{raw_name});
         if (std.ascii.eqlIgnoreCase(raw_name, "assert")) return self.fail(name_tok, "Defining a custom assert() function is not allowed, as the function has special semantics");
         try checkImportCollision(self, name_tok, .function, name);
         try checkParams(self, name, name_tok, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), (node.data.rhs & (1 << 30)) != 0, .outside);
@@ -3745,7 +3747,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     try self.emitU16(cname_idx);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .const_decl) try emitClassConstant(self, class_name, cname_idx, member);
+        if (member.tag == .const_decl) try emitClassConstant(self, class_name, cname_idx, member, "");
     }
     // set static-property defaults after the constants block so a default
     // expression like `public static $x = self::CONST` sees the class and
@@ -3870,7 +3872,14 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 
 // zend_assert_valid_class_name's deprecation
 fn warnUnderscoreName(self: *Compiler, token: u32, comptime kind: []const u8) Error!void {
-    if (std.mem.eql(u8, self.ast.tokenSlice(token), "_")) try self.warn(token, 8192, "Using \"_\" as " ++ kind ++ " is deprecated since 8.4", .{});
+    const name = self.ast.tokenSlice(token);
+    if (std.mem.eql(u8, name, "_")) {
+        try self.warn(token, 8192, "Using \"_\" as " ++ kind ++ " is deprecated since 8.4", .{});
+    } else if (std.ascii.eqlIgnoreCase(name, "let")) {
+        try self.warn(token, 8192, "Using \"let\" as " ++ kind ++ " is deprecated since 8.6", .{});
+    } else if (std.ascii.eqlIgnoreCase(name, "is")) {
+        try self.warn(token, 8192, "Using \"is\" as " ++ kind ++ " is deprecated since 8.6", .{});
+    }
 }
 
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
@@ -4037,7 +4046,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU16(name_idx);
     for (members) |m| {
         const member = self.ast.nodes[m];
-        if (member.tag == .const_decl) try emitClassConstant(self, iface_name, name_idx, member);
+        if (member.tag == .const_decl) try emitClassConstant(self, iface_name, name_idx, member, "interface");
     }
     try self.emitOp(.leave_class_scope);
 
@@ -4649,7 +4658,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU16(cname_idx);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .const_decl) try emitClassConstant(self, enum_name, cname_idx, member);
+        if (member.tag == .const_decl) try emitClassConstant(self, enum_name, cname_idx, member, "enum");
     }
     try self.emitOp(.leave_class_scope);
 }
@@ -4984,8 +4993,13 @@ fn isDeferredDefault(ast: *const Ast, member: Ast.Node) bool {
 // a class constant's value: a constant expression folded while compiling
 // is set now; any other waits for the constant's first access, as php
 // evaluates it, through its own initializer function
-fn emitClassConstant(self: *Compiler, class_name: []const u8, class_idx: u16, member: Ast.Node) Error!void {
+fn emitClassConstant(self: *Compiler, class_name: []const u8, class_idx: u16, member: Ast.Node, comptime kind: []const u8) Error!void {
     const const_name = self.ast.tokenSlice(member.main_token);
+    if (std.ascii.eqlIgnoreCase(const_name, "namespace")) {
+        if (kind.len == 0) {
+            try self.warn(member.main_token, 8192, "Declaring {s} constant called 'namespace' is deprecated", .{if (self.in_trait) "trait" else "class"});
+        } else try self.warn(member.main_token, 8192, "Declaring " ++ kind ++ " constant called 'namespace' is deprecated", .{});
+    }
     const cprop_idx = try self.addConstant(.{ .string = Value.String.borrowed(const_name) });
     if (foldsAtCompileTime(self.ast, member.data.lhs)) {
         try self.compileNode(member.data.lhs);

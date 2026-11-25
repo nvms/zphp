@@ -10,7 +10,7 @@ foreach ([
 ] as $code) {
     $file = tempnam(sys_get_temp_dir(), 'kw');
     file_put_contents($file, "<?php\n$code\n");
-    $out = shell_exec(escapeshellarg(PHP_BINARY) . ' -d display_errors=1 -d log_errors=0 ' . escapeshellarg($file) . ' 2>&1');
+    $out = shell_exec(escapeshellarg(PHP_BINARY) . ' -d display_errors=1 -d log_errors=0 -d error_reporting=-1 ' . escapeshellarg($file) . ' 2>&1');
     echo $code, "\n  ", trim(str_replace($file, 'FILE', $out)), "\n";
     unlink($file);
 }

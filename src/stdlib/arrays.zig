@@ -854,6 +854,10 @@ fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         try ctx.vm.setPendingException("TypeError", msg);
         return error.RuntimeError;
     }
+    if (args[0] == .object) {
+        try @import("filesystem.zig").deprecatedDocref(ctx, "Passing an object for argument #1 $array to array_walk() is deprecated, call get_object_vars() first instead", .{});
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
     const userdata: ?Value = if (args.len >= 3) args[2] else null;
     try walkTop(ctx, args, userdata, false);
     return NativeResult.scalar(.{ .bool = true });
@@ -968,6 +972,10 @@ fn array_walk_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!N
         defer ctx.allocator.free(msg);
         try ctx.vm.setPendingException("TypeError", msg);
         return error.RuntimeError;
+    }
+    if (args[0] == .object) {
+        try @import("filesystem.zig").deprecatedDocref(ctx, "Passing an object for argument #1 $array to array_walk_recursive() is deprecated, call get_object_vars() first instead", .{});
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
     }
     const userdata: ?Value = if (args.len >= 3) args[2] else null;
     try walkTop(ctx, args, userdata, true);

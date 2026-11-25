@@ -5384,6 +5384,13 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
     }
     if (args[0] != .object) return zpp.typeError(ctx, label, 0, "object", "object", args[0]);
     const target = args[0].object;
+    // php 8.6 deprecates an object of another class than the reflected one
+    if (mode != .raw_without_lazy) if (reflectedClass(this)) |reflected| if (!ctx.vm.isInstanceOf(target.class_name, reflected)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Calling {s}() with a given object that is not an instance of the class this property was declared in is deprecated", .{label});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    };
     const scope = reflectedClass(this) orelse target.class_name;
     const decl = ctx.vm.propertyDeclaration(target.class_name, prop_name);
     const slot_scope = privateScopeFor(ctx.vm, target.class_name, prop_name, scope) orelse decl.defining_class;
@@ -6052,6 +6059,14 @@ fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) Runtim
     if (args.len > 0 and args[0].closureName() != null) closure_target = args[0] else object = try zpp.optObject(ctx, label, args, 0, "object");
     const named: ?*PhpArray = if (variadic) ctx.named_args else try zpp.array(ctx, label, args, 1, "args");
     const is_static = this.get("__is_static") == .bool and this.get("__is_static").bool;
+    if (is_static and (object != null or closure_target != null)) {
+        const shown = if (this.get("name") == .string) this.get("name").string.bytes() else method_name;
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Calling {s}() for static method {s}::{s}() does not need an object parameter", .{ label, declaring, shown });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        object = null;
+    }
     if (!is_static) {
         if (closure_target) |closure| {
             const rest = if (variadic) args[1..] else &[_]Value{};

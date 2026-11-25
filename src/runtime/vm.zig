@@ -17772,6 +17772,18 @@ pub const VM = struct {
                 name = try self.internName(buf);
             }
         }
+        // php 8.6 deprecates a constant named _, let or is
+        {
+            const unqualified = if (std.mem.lastIndexOfScalar(u8, name, '\\')) |sep| name[sep + 1 ..] else name;
+            const qualified = unqualified.len != name.len;
+            if (std.mem.eql(u8, unqualified, "_")) {
+                try self.raiseError(E_DEPRECATED, "Calling a constant \"_\" is deprecated since 8.6");
+            } else if (if (qualified) std.mem.eql(u8, unqualified, "let") else std.ascii.eqlIgnoreCase(name, "let")) {
+                try self.raiseError(E_DEPRECATED, "Calling a constant \"let\" is deprecated since 8.6");
+            } else if (if (qualified) std.mem.eql(u8, unqualified, "is") else std.ascii.eqlIgnoreCase(name, "is")) {
+                try self.raiseError(E_DEPRECATED, "Calling a constant \"is\" is deprecated since 8.6");
+            }
+        }
         // zend_register_constant: __COMPILER_HALT_OFFSET__ is never defined
         if (self.php_constants.contains(name) or std.mem.eql(u8, name, "__COMPILER_HALT_OFFSET__")) {
             const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} already defined, this will be an error in PHP 9", .{name});
@@ -21542,6 +21554,22 @@ pub const VM = struct {
 
         try self.checkOverrides(class_name, &def);
 
+        // php 8.6's session_handler_interface_gets_implemented: a session
+        // handler that will need create_sid() and validateId() in php 9
+        if (self.isInstanceOf(class_name, "SessionHandlerInterface")) {
+            const shown = class_names.display(class_name);
+            if (!self.hasMethod(class_name, "create_sid") and !self.isInstanceOf(class_name, "SessionIdInterface")) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Class {s} implementing SessionHandlerInterface is missing the create_sid() method which will be required in PHP 9.0", .{shown});
+                defer self.allocator.free(msg);
+                try self.raiseErrorAt(E_WARNING, msg, .{ .file = def.file_path, .line = def.start_line });
+            }
+            if (!self.hasMethod(class_name, "validateId") and !self.isInstanceOf(class_name, "SessionUpdateTimestampHandlerInterface")) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Class {s} implementing SessionHandlerInterface is missing the validateId() method which will be required in PHP 9.0", .{shown});
+                defer self.allocator.free(msg);
+                try self.raiseErrorAt(E_WARNING, msg, .{ .file = def.file_path, .line = def.start_line });
+            }
+        }
+
         // zend_implement_serializable: every class that implements Serializable,
         // itself or through a parent, unless explicitly abstract or serializing
         // with __serialize and __unserialize
@@ -21935,7 +21963,7 @@ pub const VM = struct {
             defer self.allocator.free(msg);
             return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
         }
-        for ([_][]const u8{ "__construct", "__destruct", "__clone", "__get", "__set", "__unset", "__isset", "__toString", "__debugInfo", "__serialize", "__unserialize", "__sleep", "__wakeup", "__set_state" }) |magic| {
+        for ([_][]const u8{ "__construct", "__destruct", "__clone", "__get", "__set", "__unset", "__isset", "__toString", "__serialize", "__unserialize", "__sleep", "__wakeup", "__set_state" }) |magic| {
             if (!def.methods.contains(magic)) continue;
             const msg = try std.fmt.allocPrint(self.allocator, "Enum {s} cannot include magic method {s}", .{ enum_name, magic });
             defer self.allocator.free(msg);

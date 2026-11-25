@@ -597,6 +597,10 @@ pub fn warnDocref(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) 
     return docref(ctx, 2, fmt, args);
 }
 
+pub fn deprecatedDocref(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError!void {
+    return docref(ctx, 8192, fmt, args);
+}
+
 pub fn noticeDocref(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError!void {
     return docref(ctx, 8, fmt, args);
 }
@@ -1463,7 +1467,7 @@ fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]con
 }
 
 fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const spelled = localPath(try strArg(ctx, args, "file_exists", 0, "filename", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const spelled = localPath(try strArg(ctx, args, "file_exists", 0, "filename", true)) orelse return NativeResult.scalar(.{ .bool = false });
     if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     if (try basedirDenies(ctx, "file_exists", spelled)) return NativeResult.scalar(.{ .bool = false });
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1500,7 +1504,7 @@ fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 
 fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const spelled = localPath(try strArg(ctx, args, "is_file", 0, "filename", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const spelled = localPath(try strArg(ctx, args, "is_file", 0, "filename", true)) orelse return NativeResult.scalar(.{ .bool = false });
     if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     if (try basedirDenies(ctx, "is_file", spelled)) return NativeResult.scalar(.{ .bool = false });
     const path = bundle.osPath(&os_buf, spelled);
@@ -1531,7 +1535,7 @@ fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 
 fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const spelled = localPath(try strArg(ctx, args, "is_dir", 0, "filename", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const spelled = localPath(try strArg(ctx, args, "is_dir", 0, "filename", true)) orelse return NativeResult.scalar(.{ .bool = false });
     if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     if (try basedirDenies(ctx, "is_dir", spelled)) return NativeResult.scalar(.{ .bool = false });
     const path = bundle.osPath(&os_buf, spelled);
@@ -2551,7 +2555,7 @@ fn globMatchFlags(pattern: []const u8, name: []const u8, flags: i64) bool {
 // file info
 
 fn native_is_readable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const spelled = localPath(try strArg(ctx, args, "is_readable", 0, "filename", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const spelled = localPath(try strArg(ctx, args, "is_readable", 0, "filename", true)) orelse return NativeResult.scalar(.{ .bool = false });
     if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     if (try basedirDenies(ctx, "is_readable", spelled)) return NativeResult.scalar(.{ .bool = false });
     if (std.mem.startsWith(u8, spelled, "phar://")) return native_is_file(ctx, args);
@@ -2563,7 +2567,7 @@ fn native_is_readable(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 }
 
 fn native_is_writable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const spelled = localPath(try strArg(ctx, args, "is_writable", 0, "filename", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const spelled = localPath(try strArg(ctx, args, "is_writable", 0, "filename", true)) orelse return NativeResult.scalar(.{ .bool = false });
     if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     if (try basedirDenies(ctx, "is_writable", spelled)) return NativeResult.scalar(.{ .bool = false });
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2588,7 +2592,7 @@ fn writableAncestor(path: []const u8) bool {
 }
 
 fn native_is_executable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const spelled = localPath(try strArg(ctx, args, "is_executable", 0, "filename", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const spelled = localPath(try strArg(ctx, args, "is_executable", 0, "filename", true)) orelse return NativeResult.scalar(.{ .bool = false });
     if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     if (try basedirDenies(ctx, "is_executable", spelled)) return NativeResult.scalar(.{ .bool = false });
     const path = spelled;
@@ -2781,7 +2785,7 @@ const StatField = enum { size, atime, mtime, ctime, ino, mode, uid, gid };
 
 // filesize, fileinode, fileperms and the rest: one field of the path's stat
 fn statOne(ctx: *NativeContext, args: []const Value, comptime field: StatField, comptime fn_name: []const u8) RuntimeError!NativeResult {
-    const st = (try phpStat(ctx, try strArg(ctx, args, fn_name, 0, "filename", false), fn_name, false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const st = (try phpStat(ctx, try strArg(ctx, args, fn_name, 0, "filename", true), fn_name, false)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .int = @field(st, @tagName(field)) });
 }
 
@@ -2806,7 +2810,7 @@ fn native_fileinode(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 }
 
 fn native_filetype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const st = (try phpStat(ctx, try strArg(ctx, args, "filetype", 0, "filename", false), "filetype", true)) orelse return NativeResult.scalar(.{ .bool = false });
+    const st = (try phpStat(ctx, try strArg(ctx, args, "filetype", 0, "filename", true), "filetype", true)) orelse return NativeResult.scalar(.{ .bool = false });
     const name: []const u8 = switch (st.mode & 0o170000) {
         0o120000 => "link",
         0o010000 => "fifo",
@@ -4617,7 +4621,7 @@ fn changeOwner(ctx: *NativeContext, args: []const Value, comptime func: []const 
 }
 
 fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const st = (try phpStat(ctx, try strArg(ctx, args, "stat", 0, "filename", false), "stat", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const st = (try phpStat(ctx, try strArg(ctx, args, "stat", 0, "filename", true), "stat", false)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, st) });
 }
 
@@ -4747,7 +4751,7 @@ fn native_filegroup(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 }
 
 fn native_is_link(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const spelled = localPath(try strArg(ctx, args, "is_link", 0, "filename", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const spelled = localPath(try strArg(ctx, args, "is_link", 0, "filename", true)) orelse return NativeResult.scalar(.{ .bool = false });
     if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     if (try basedirDenies(ctx, "is_link", spelled)) return NativeResult.scalar(.{ .bool = false });
     const path = spelled;
@@ -4824,7 +4828,7 @@ fn wrapperStatArray(ctx: *NativeContext, st: WrapperStat) !*PhpArray {
 }
 
 fn native_lstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const st = (try phpStat(ctx, try strArg(ctx, args, "lstat", 0, "filename", false), "lstat", true)) orelse return NativeResult.scalar(.{ .bool = false });
+    const st = (try phpStat(ctx, try strArg(ctx, args, "lstat", 0, "filename", true), "lstat", true)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, st) });
 }
 

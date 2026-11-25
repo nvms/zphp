@@ -744,6 +744,10 @@ fn native_getenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return NativeResult.borrowed(.{ .array = arr });
     }
     if (args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    if (std.mem.indexOfScalar(u8, args[0].string.bytes(), 0) != null) {
+        try ctx.vm.setPendingException("ValueError", "getenv(): Argument #1 ($name) must not contain any null bytes");
+        return error.RuntimeError;
+    }
     const val = platform.getenvOwned(ctx.allocator, args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, val));
 }
@@ -762,6 +766,7 @@ extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
 fn native_putenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const p = @import("string_ports.zig").Args.init(ctx, "putenv", args);
     const setting = try p.str(0, "assignment");
+    if (std.mem.indexOfScalar(u8, setting, 0) != null) return p.valueError(0, "assignment", "must not contain any null bytes");
     if (setting.len == 0 or setting[0] == '=') return p.valueError(0, "assignment", "must have a valid syntax");
     if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
         const name = setting[0..eq];

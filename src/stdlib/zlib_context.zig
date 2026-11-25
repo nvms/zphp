@@ -101,6 +101,13 @@ fn optionLong(options: Value, name: []const u8, default: i64) i64 {
     return v.toInt();
 }
 
+// php 8.6 deprecates options given as an object
+fn objectOptionsDeprecated(ctx: *NativeContext, comptime func: []const u8, options: Value) RuntimeError!void {
+    if (options != .object) return;
+    try @import("filesystem.zig").deprecatedDocref(ctx, "Passing an object for argument #2 $option to " ++ func ++ "() is deprecated, call get_object_vars() first instead", .{});
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+}
+
 fn optionsArg(p: Args, index: usize) RuntimeError!Value {
     if (index >= p.args.len) return .null;
     const v = p.args[index];
@@ -155,6 +162,7 @@ fn native_deflate_init(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     const p = Args.init(ctx, func, args);
     const encoding = try p.long(0, "encoding");
     const options = try optionsArg(p, 1);
+    try objectOptionsDeprecated(ctx, func, options);
     const level = optionLong(options, "level", -1);
     if (level < -1 or level > 9) return throwFmt(ctx, "ValueError", "deflate_init(): \"level\" option must be between -1 and 9", .{});
     const memory = optionLong(options, "memory", 8);
@@ -239,6 +247,7 @@ fn native_inflate_init(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     const p = Args.init(ctx, func, args);
     const encoding = try p.long(0, "encoding");
     const options = try optionsArg(p, 1);
+    try objectOptionsDeprecated(ctx, func, options);
     const window = optionLong(options, "window", 15);
     if (window < 8 or window > 15) return throwFmt(ctx, "ValueError", "zlib window size (logarithm) ({d}) must be within 8..15", .{window});
     if (!validEncoding(encoding)) return throwFmt(ctx, "ValueError", "inflate_init(): Argument #1 ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE", .{});

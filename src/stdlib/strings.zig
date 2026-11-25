@@ -1052,13 +1052,18 @@ fn native_utf8_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try out.toOwnedSlice(ctx.allocator)));
 }
 
-fn convertVarEncoding(ctx: *NativeContext, val: Value, to: []const u8, from: []const u8) RuntimeError!NativeResult {
+fn convertVarEncoding(ctx: *NativeContext, val: Value, to: []const u8, from: []const u8, arg_num: usize) RuntimeError!NativeResult {
     return switch (val) {
         .string => try native_mb_convert_encoding(ctx, &.{ val, .{ .string = Value.String.borrowed(to) }, .{ .string = Value.String.borrowed(from) } }),
+        .object => blk: {
+            try @import("filesystem.zig").deprecatedDocref(ctx, "Passing an object for argument #{d} $vars to mb_convert_variables() is deprecated, call get_object_vars() first instead", .{arg_num});
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            break :blk NativeResult.borrowed(val);
+        },
         .array => blk: {
             const arr = try ctx.createArray();
             for (val.array.entries.items) |e| {
-                const converted = try convertVarEncoding(ctx, e.value, to, from);
+                const converted = try convertVarEncoding(ctx, e.value, to, from, arg_num);
                 defer if (converted.value == .string) converted.value.string.release();
                 try arr.set(ctx.allocator, e.key, converted.value);
             }
@@ -1091,7 +1096,7 @@ fn native_mb_convert_variables(ctx: *NativeContext, args: []const Value) Runtime
     };
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
-        const converted = try convertVarEncoding(ctx, args[i], to, from);
+        const converted = try convertVarEncoding(ctx, args[i], to, from, i + 1);
         defer if (converted.value == .string) converted.value.string.release();
         ctx.setCallerVar(i, args.len, converted.value);
     }
@@ -2853,6 +2858,10 @@ fn native_http_build_query(ctx: *NativeContext, args: []const Value) RuntimeErro
         try ctx.vm.setPendingException("TypeError", msg);
         return error.RuntimeError;
     };
+    if (data == .object) {
+        try @import("filesystem.zig").deprecatedDocref(ctx, "Passing an object for argument #1 $data to http_build_query() is deprecated, call get_object_vars() first instead", .{});
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
     var sep: []const u8 = sep_arg orelse (ctx.vm.ini_settings.get("arg_separator.output") orelse "&");
     if (sep.len == 0) sep = "&";
     var q = QueryBuilder{ .ctx = ctx, .sep = sep, .rfc3986 = enc_type == 2 };
@@ -3090,6 +3099,10 @@ fn urlDecodeSlice(ctx: *NativeContext, s: []const u8) !Value.String {
 fn native_parse_str(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
     const s = args[0].string.bytes();
+    if (std.mem.indexOfScalar(u8, s, 0) != null) {
+        try ctx.vm.setPendingException("ValueError", "parse_str(): Argument #1 ($string) must not contain any null bytes");
+        return error.RuntimeError;
+    }
 
     const arr = try ctx.createArray();
     // php_default_treat_data splits at any character of arg_separator.input
