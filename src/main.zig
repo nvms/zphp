@@ -68,6 +68,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer allocator.free(args);
 
     if (args.len < 2) {
+        // php's options with no script after them: the script is stdin
+        if (raw_args.len >= 2) return runStdin(allocator, &.{});
         try writeStdout("zphp 0.10.0\n");
         return;
     }
@@ -226,6 +228,9 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try buildFile(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
         try writeStdout("zphp 0.10.0\n");
+    } else if (std.mem.eql(u8, cmd, "--")) {
+        // `php -- args`: the script is stdin, the rest its arguments
+        try runStdin(allocator, args[2..]);
     } else if (isScriptPath(cmd)) {
         // `zphp script.php args`, the way php is invoked and the way tools
         // re-launch PHP_BINARY
@@ -821,10 +826,12 @@ fn initArgv(vm: *VM, a: std.mem.Allocator, script_path: []const u8, script_args:
             try sv.array.set(a, .{ .string = Value.String.borrowed("argc") }, .{ .int = @intCast(1 + script_args.len) });
             const dup_path = try a.dupe(u8, script_path);
             try vm.strings.append(a, dup_path);
-            try sv.array.set(a, .{ .string = Value.String.borrowed("SCRIPT_FILENAME") }, .{ .string = Value.String.borrowed(dup_path) });
+            // code from -r or stdin has a name but no file
+            const file: []const u8 = if (std.mem.eql(u8, script_path, "Standard input code")) "" else dup_path;
+            try sv.array.set(a, .{ .string = Value.String.borrowed("SCRIPT_FILENAME") }, .{ .string = Value.String.borrowed(file) });
             try sv.array.set(a, .{ .string = Value.String.borrowed("SCRIPT_NAME") }, .{ .string = Value.String.borrowed(dup_path) });
             try sv.array.set(a, .{ .string = Value.String.borrowed("PHP_SELF") }, .{ .string = Value.String.borrowed(dup_path) });
-            try sv.array.set(a, .{ .string = Value.String.borrowed("PATH_TRANSLATED") }, .{ .string = Value.String.borrowed(dup_path) });
+            try sv.array.set(a, .{ .string = Value.String.borrowed("PATH_TRANSLATED") }, .{ .string = Value.String.borrowed(file) });
         }
     }
 }
@@ -862,6 +869,19 @@ fn runCode(allocator: std.mem.Allocator, code: []const u8, script_args: []const 
     const cwd = try platform.getCwdAlloc(allocator);
     defer allocator.free(cwd);
     var result = try compileFrom(allocator, source, .{ .file_path = "Command line code", .dir = cwd });
+    defer result.deinit();
+    try runWithVM(allocator, &result, "Standard input code", script_args);
+}
+
+// php with no script file reads one from stdin, "Standard input code" to
+// itself, __DIR__ the working directory
+fn runStdin(allocator: std.mem.Allocator, script_args: []const []const u8) !void {
+    const stdin = platform.fileFromFd(platform.stdinFd()) orelse return error.FileNotFound;
+    const source = try platform.readToEndAlloc(stdin, allocator, 256 * 1024 * 1024);
+    defer allocator.free(source);
+    const cwd = try platform.getCwdAlloc(allocator);
+    defer allocator.free(cwd);
+    var result = try compileFrom(allocator, source, .{ .file_path = "Standard input code", .dir = cwd });
     defer result.deinit();
     try runWithVM(allocator, &result, "Standard input code", script_args);
 }
