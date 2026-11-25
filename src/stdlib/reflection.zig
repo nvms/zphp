@@ -3259,7 +3259,7 @@ fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Val
         method_name = text[sep + 2 ..];
     }
     if (class_text) |text| class_name = try classArgument(ctx, .{ .string = Value.String.borrowed(text) });
-    if (arg1.closureName() != null and isInvokeName(method_name)) {
+    if ((arg1.closureName() != null or (arg1 == .object and arg1.object.fakeCallable() != .null)) and isInvokeName(method_name)) {
         try setClosureInvokeMethod(ctx, this, arg1);
         return NativeResult.scalar(.null);
     }
@@ -3312,8 +3312,39 @@ fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Val
 // the key a method's function is filed under: "Class::method", or for a
 // closure's __invoke the closure itself
 pub fn methodKey(this: *PhpObject, buf: []u8, declaring: []const u8, method_name: []const u8) []const u8 {
-    if (this.get("__closure").closureName()) |instance| return instance;
+    if (closureFunctionKey(buf, this.get("__closure"))) |key| return key;
     return class_names.memberKey(buf, declaring, method_name);
+}
+
+// what makes two closures run the same function (php compares op_arrays):
+// a closure expression's compiled function, which its instances share, or
+// the function a Closure made from a callable calls
+fn closureIdentity(vm: *VM, buf: []u8, closure: Value) []const u8 {
+    if (closure.closureName()) |instance| return if (vm.functions.get(instance)) |func| func.name else instance;
+    return closureFunctionKey(buf, closure) orelse "";
+}
+
+// the function a closure runs: a closure expression's instance, or the
+// function or method a Closure made from a callable calls
+fn closureFunctionKey(buf: []u8, closure: Value) ?[]const u8 {
+    if (closure.closureName()) |instance| return instance;
+    if (closure != .object) return null;
+    switch (closure.object.fakeCallable()) {
+        .string => |s| return s.bytes(),
+        .array => |arr| if (arr.entries.items.len == 2) {
+            const target = arr.entries.items[0].value;
+            const method = arr.entries.items[1].value;
+            if (method != .string) return null;
+            const class = switch (target) {
+                .object => |o| o.class_name,
+                .string => |cs| cs.bytes(),
+                else => return null,
+            };
+            return class_names.memberKey(buf, class, method.string.bytes());
+        },
+        else => {},
+    }
+    return null;
 }
 
 // a ReflectionMethod of a closure's __invoke: php's
@@ -3328,10 +3359,14 @@ fn setClosureInvokeMethod(ctx: *NativeContext, obj: *PhpObject, closure: Value) 
     try obj.set(ctx.allocator, "__is_static", .{ .bool = false });
     try obj.set(ctx.allocator, "__visibility", .{ .int = @backingInt(ClassDef.Visibility.public) });
     try obj.set(ctx.allocator, "__closure", if (closure == .null) .{ .bool = true } else closure);
-    const key = closure.closureName() orelse "";
+    var key_buf: [256]u8 = undefined;
+    const key = closureFunctionKey(&key_buf, closure) orelse "";
     if (ctx.vm.functions.get(key)) |func| {
         try obj.set(ctx.allocator, "__arity", .{ .int = func.arity });
         try obj.set(ctx.allocator, "__required_params", .{ .int = func.required_params });
+    } else if (native_params.get(key)) |sig| {
+        try obj.set(ctx.allocator, "__arity", .{ .int = @intCast(sig.params.len) });
+        try obj.set(ctx.allocator, "__required_params", .{ .int = @intCast(nativeRequiredCount(sig)) });
     } else {
         try obj.set(ctx.allocator, "__arity", .{ .int = 0 });
         try obj.set(ctx.allocator, "__required_params", .{ .int = 0 });
@@ -4338,7 +4373,7 @@ fn appendStaticVariables(ctx: *NativeContext, result: *PhpArray, fn_name: []cons
             try ctx.vm.arrayAddEntry(result, k, .{ .key = k, .value = cell.* }, cell);
             continue;
         }
-        const value = if (ctx.vm.statics.get(storage)) |v| v else try ctx.vm.resolveDefault(sv.initial);
+        const value = if (ctx.vm.statics.get(storage)) |v| v else try staticShown(ctx.vm, fn_name, sv.initial);
         try result.setCopiedKey(ctx.allocator, key, value);
     }
 }
@@ -4842,6 +4877,49 @@ fn closureProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_prope
     return table;
 }
 
+// a static variable before its declaration runs: the compiler's value when
+// it is a literal; one that reads a constant or anything else at run time is
+// null in php's table until the declaration evaluates it
+fn staticShown(vm: *VM, owner: []const u8, initial: Value) RuntimeError!Value {
+    // the class the function was compiled in: a method's, a closure's scope
+    const scope: ?[]const u8 = if (std.mem.indexOf(u8, owner, "::")) |sep| owner[0..sep] else vm.closureScopeByName(owner);
+    if (needsRuntime(vm, scope, initial)) return .null;
+    return vm.resolveDefault(initial);
+}
+
+fn needsRuntime(vm: *VM, scope: ?[]const u8, v: Value) bool {
+    switch (v) {
+        .string => |s| {
+            const b = s.bytes();
+            if (std.mem.startsWith(u8, b, "\x00CC\x00")) {
+                // the compiler substitutes an internal constant
+                // (zend_try_ct_eval_const)
+                const rest = b[4..];
+                const sep = std.mem.lastIndexOfScalar(u8, rest, 0) orelse return true;
+                const name = rest[sep + 1 ..];
+                // and a constant of the class being compiled
+                // (zend_try_ct_eval_class_const)
+                const class = rest[0..sep];
+                if (std.ascii.eqlIgnoreCase(class, "self")) return false;
+                if (scope) |own| if (std.ascii.eqlIgnoreCase(std.mem.trimStart(u8, class, "\\"), own)) return false;
+                if (sep != 0 or std.mem.indexOfScalar(u8, name, '\\') != null) return true;
+                const index = vm.php_constants.getIndex(name) orelse return true;
+                return index >= vm.builtin_constant_count;
+            }
+            return bytecode.isDeferredExprSentinel(b) or bytecode.isNewDefaultSentinel(b);
+        },
+        .array => |arr| {
+            if (v.isEmptyArrayDefault()) return false;
+            for (arr.entries.items) |e| {
+                if (e.key == .string and bytecode.isDeferredKeySentinel(e.key.string.bytes()) and needsRuntime(vm, scope, .{ .string = e.key.string })) return true;
+                if (needsRuntime(vm, scope, e.value)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
 fn setNamed(ctx: *NativeContext, table: *PhpArray, key: []const u8, value: Value) RuntimeError!void {
     try table.setCopiedKey(ctx.allocator, key, value);
 }
@@ -4868,7 +4946,7 @@ fn closureInstanceTable(ctx: *NativeContext, table: *PhpArray, name: []const u8)
     for (func.static_vars) |sv| {
         var buf: [256]u8 = undefined;
         const storage = class_names.memberKey(&buf, name, sv.name);
-        const value = if (vm.statics_cells.get(storage)) |cell| cell.* else if (vm.statics.get(storage)) |v| v else try vm.resolveDefault(sv.initial);
+        const value = if (vm.statics_cells.get(storage)) |cell| cell.* else if (vm.statics.get(storage)) |v| v else try staticShown(vm, name, sv.initial);
         const key = if (sv.name.len > 0 and sv.name[0] == '$') sv.name[1..] else sv.name;
         try statics.setCopiedKey(ctx.allocator, key, value);
     }
@@ -4914,7 +4992,7 @@ fn callableClosureTable(ctx: *NativeContext, table: *PhpArray, callable: Value) 
         for (func.static_vars) |sv| {
             var key_buf: [256]u8 = undefined;
             const storage = class_names.memberKey(&key_buf, key_name, sv.name);
-            const value = if (ctx.vm.statics_cells.get(storage)) |cell| cell.* else if (ctx.vm.statics.get(storage)) |v| v else try ctx.vm.resolveDefault(sv.initial);
+            const value = if (ctx.vm.statics_cells.get(storage)) |cell| cell.* else if (ctx.vm.statics.get(storage)) |v| v else try staticShown(ctx.vm, key_name, sv.initial);
             const key = if (sv.name.len > 0 and sv.name[0] == '$') sv.name[1..] else sv.name;
             try statics.setCopiedKey(ctx.allocator, key, value);
         }
@@ -6146,6 +6224,14 @@ fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) Runtim
             if (target != .null and target != .object) return zpp.typeError(ctx, label, 0, "object", "?object", target);
             return throwReflection(ctx, "Given object is not an instance of the class this method was declared in");
         }
+        // the closure must run the reflected one's function (closures made
+        // by one declaration share it)
+        var reflected_buf: [256]u8 = undefined;
+        var given_buf: [256]u8 = undefined;
+        const reflected = closureIdentity(ctx.vm, &reflected_buf, this.get("__closure"));
+        const given = closureIdentity(ctx.vm, &given_buf, target);
+        if (this.get("__closure") == .object and (!std.mem.eql(u8, reflected, given) or (this.get("__closure").closureName() == null) != (target.closureName() == null)))
+            return throwReflection(ctx, "Given Closure is not the same as the reflected Closure");
         const named: ?*PhpArray = if (variadic) ctx.named_args else try zpp.array(ctx, label, args, 1, "args");
         const rest = if (variadic and args.len > 1) args[1..] else &[_]Value{};
         const key = target.closureName() orelse "";
@@ -6436,8 +6522,7 @@ fn rpGetClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const type_val = this.get("__type_name");
     if (type_val != .string) return NativeResult.scalar(.null);
-    const type_name = std.mem.trimStart(u8, type_val.string.bytes(), "?");
-    if (type_name.len == 0 or std.mem.indexOfAny(u8, type_name, "|&(") != null or isBuiltinType(type_name)) return NativeResult.scalar(.null);
+    const type_name = singleTypeClass(std.mem.trimStart(u8, type_val.string.bytes(), "?")) orelse return NativeResult.scalar(.null);
     const is_self = std.ascii.eqlIgnoreCase(type_name, "self");
     const is_parent = std.ascii.eqlIgnoreCase(type_name, "parent");
     if (is_self or is_parent) {
@@ -6450,6 +6535,27 @@ fn rpGetClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     }
     const found = (try lookupClass(ctx, type_name)) orelse return throwReflectionFmt(ctx, "Class \"{s}\" does not exist", .{type_name});
     return NativeResult.borrowed(.{ .object = try classObject(ctx, found) });
+}
+
+// ZEND_TYPE_HAS_NAME: the type's one class name beside builtin types
+// (`?A`, `A|int|null`, and iterable, which is Traversable|array); null for
+// a type of builtins only, or of several classes or an intersection
+fn singleTypeClass(type_name: []const u8) ?[]const u8 {
+    if (std.mem.indexOfAny(u8, type_name, "&(") != null) return null;
+    var found: ?[]const u8 = null;
+    var it = std.mem.splitScalar(u8, type_name, '|');
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        if (std.ascii.eqlIgnoreCase(part, "iterable")) {
+            if (found != null) return null;
+            found = "Traversable";
+            continue;
+        }
+        if (isBuiltinType(part)) continue;
+        if (found != null) return null;
+        found = part;
+    }
+    return found;
 }
 
 // the class scope of a parameter's function: a method's class, a closure's
