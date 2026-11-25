@@ -2306,8 +2306,13 @@ fn native_register_tick_function(ctx: *NativeContext, args: []const Value) Runti
 fn native_unregister_tick_function(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     const list = &ctx.vm.tick_functions;
+    // zend_fcc_equals: compared by what each resolves to, so a Closure made
+    // from a callable matches the callable
+    const spl_autoload = @import("spl_autoload.zig");
+    const want = try spl_autoload.identity(ctx, args[0]);
     for (list.items, 0..) |entry, i| {
-        if (!sameCallable(entry.callable, args[0])) continue;
+        const matches = if (want) |w| if (try spl_autoload.identity(ctx, entry.callable)) |have| spl_autoload.same(have, w) else false else sameCallable(entry.callable, args[0]);
+        if (!matches) continue;
         if (entry.calling) {
             try ctx.vm.setPendingException("Error", "Registered tick function cannot be unregistered while it is being executed");
             return error.RuntimeError;

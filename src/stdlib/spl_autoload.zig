@@ -53,11 +53,14 @@ const Identity = struct {
     // the calling scope a static method is listed under
     class: []const u8 = "",
     closure: ?*PhpObject = null,
+    // what is listed for the entry when it isn't the target itself: a Closure
+    // made from a callable, or an object called through __invoke
+    listed: ?*PhpObject = null,
 };
 
 // the entry's resolution, or null when it no longer resolves. key and
 // name live in ctx allocations
-fn identity(ctx: *NativeContext, callable: Value) RuntimeError!?Identity {
+pub fn identity(ctx: *NativeContext, callable: Value) RuntimeError!?Identity {
     const vm = ctx.vm;
     if (callable == .string and std.mem.eql(u8, callable.string.bytes(), "spl_autoload")) {
         return .{ .name = "spl_autoload", .key = "spl_autoload" };
@@ -71,14 +74,29 @@ fn identity(ctx: *NativeContext, callable: Value) RuntimeError!?Identity {
         .failure => return null,
     };
     switch (callee) {
-        .closure => |c| return .{ .kind = .closure, .closure = c, .key = "{closure}" },
+        .closure => |c| {
+            // zend_fcc_equals: a Closure made from a callable is the function
+            // it calls, so `f(...)` and 'f' are one autoloader
+            const inner = c.fakeCallable();
+            if (inner != .null and !(inner == .object and std.mem.eql(u8, inner.object.class_name, "Closure"))) {
+                if (try identity(ctx, inner)) |target| {
+                    var id = target;
+                    id.listed = c;
+                    return id;
+                }
+            }
+            return .{ .kind = .closure, .closure = c, .key = "{closure}" };
+        },
         .function => |name| {
             const declared = vm.functions.getKey(name) orelse vm.native_fns.getKey(name) orelse name;
             return .{ .name = declared, .key = try lower(ctx, declared) };
         },
         // php keeps any object it was given as the callable, as it keeps a
         // Closure, and lists it that way
-        .invoke => |o| return .{ .kind = .closure, .closure = o, .key = "{closure}" },
+        .invoke => |o| {
+            const full = vm.resolveMethod(o.class_name, "__invoke") catch "__invoke";
+            return .{ .kind = .method, .object = o, .name = methodPart(full), .key = try lower(ctx, full), .listed = o };
+        },
         .method => |m| {
             const full = m.registered orelse (vm.resolveMethod(m.object.class_name, m.name) catch m.name);
             return .{ .kind = .method, .object = m.object, .name = methodPart(full), .key = try lower(ctx, full) };
@@ -108,7 +126,7 @@ fn lower(ctx: *NativeContext, s: []const u8) RuntimeError![]const u8 {
 }
 
 // autoload_func_info_equals
-fn same(a: Identity, b: Identity) bool {
+pub fn same(a: Identity, b: Identity) bool {
     if (a.kind != b.kind) return false;
     if (a.closure != b.closure or a.object != b.object) return false;
     if (!std.mem.eql(u8, a.key, b.key)) return false;
@@ -216,6 +234,10 @@ fn functions(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const out = try ctx.createArray();
     for (ctx.vm.autoload_callbacks.items) |cb| {
         const id = (try identity(ctx, cb)) orelse continue;
+        if (id.listed) |o| {
+            try out.append(ctx.allocator, .{ .object = o });
+            continue;
+        }
         switch (id.kind) {
             .closure => try out.append(ctx.allocator, .{ .object = id.closure.? }),
             .method => {
