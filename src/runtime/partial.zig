@@ -882,6 +882,17 @@ pub fn create(vm: *VM, req: Request) RuntimeError!Value {
     return vm.newPartialInstance(compile_name, caps.items, this, scope, t.called_class);
 }
 
+fn warnDeprecatedTypeNames(vm: *VM, ty: []const u8) RuntimeError!void {
+    var parts = std.mem.tokenizeAny(u8, ty, "|&()? ");
+    while (parts.next()) |part| {
+        const word = compiler_class.deprecatedClassNameWord(part) orelse continue;
+        const msg = try std.fmt.allocPrint(vm.allocator, "Using \"{s}\" as a type name is deprecated since {s}", .{ word, if (std.mem.eql(u8, word, "_")) "8.4" else "8.6" });
+        defer vm.allocator.free(msg);
+        try vm.raiseError(VM.E_DEPRECATED, msg);
+        if (vm.pending_exception != null) return error.RuntimeError;
+    }
+}
+
 // compiles the closure's source as php compiles the generated AST, and
 // fixes up what source can't say: the defaults the callee keeps compiled,
 // the declared types, php's name for it and where it was made
@@ -951,6 +962,12 @@ fn compileClosure(vm: *VM, t: *const Target, req: Request, source: []const u8, o
     }
     if (!replaced) try heap_result.type_hints.append(vm.allocator, .{ .name = f.name, .param_types = types, .return_type = t.return_type });
     try vm.registerResultFunctions(heap_result);
+    // what compiling the generated closure raised, once per call site. the
+    // types aren't in the source: php's compile of them deprecates `_`, `let`
+    // and `is` as type names again
+    try vm.raiseCompileWarnings(heap_result);
+    for (types) |ty| try warnDeprecatedTypeNames(vm, ty);
+    try warnDeprecatedTypeNames(vm, t.return_type);
     // #[\NoDiscard] is inherited with its arguments as the callee has them
     f.no_discard = t.no_discard;
     if (t.no_discard != null) if (t.user) |u| if (vm.functionAttributesOf(u).attrs) |attrs| {
