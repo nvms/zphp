@@ -12731,7 +12731,7 @@ pub const VM = struct {
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
                     const raw_class_name = if (name_val == .string) name_val.string.bytes() else if (name_val == .object) name_val.object.class_name else {
-                        self.setErrorMsg("Fatal error: Class name must be a valid object or a string", .{});
+                        if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
                         return error.RuntimeError;
                     };
                     // strip leading backslash from fully-qualified class names
