@@ -6037,6 +6037,13 @@ fn accessMagicGet(ctx: *NativeContext, check: AccessCheck) RuntimeError!NativeRe
         };
         return NativeResult.scalar(.{ .bool = true });
     }
+    // an uninitialized lazy object is initialized to see whether the
+    // property exists
+    if (check.object) |obj| if (obj.lazy != null) {
+        try ctx.vm.triggerLazyInit(obj);
+        const s = obj.storage();
+        return NativeResult.scalar(.{ .bool = s.properties.contains(check.name) and !s.isUnset(check.name) });
+    };
     return NativeResult.scalar(.{ .bool = false });
 }
 
