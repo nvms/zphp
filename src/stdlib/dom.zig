@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
 
+const object_properties = @import("../runtime/object_properties.zig");
 pub const tree = @import("libxml_tree.zig");
 pub const c = tree.c;
 
@@ -646,9 +647,10 @@ fn domGenericGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 fn domGenericSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.null);
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
     const prop = args[0].string.bytes();
     const val = args[1];
+    try refusePrivateSet(ctx, obj, prop);
+    const node = getNodePtr(obj) orelse return setDynamic(ctx, obj, prop, val);
 
     if (std.mem.eql(u8, prop, "nodeValue") or std.mem.eql(u8, prop, "textContent")) {
         const s = if (val == .string) val.string.bytes() else "";
@@ -665,8 +667,92 @@ fn domGenericSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     }
     // unrecognized property: fall back to stashing in PhpObject (matches the
     // legacy dynamic-property behavior so tests aren't surprised)
+    return setDynamic(ctx, obj, prop, val);
+}
+
+// a property php's DOM doesn't declare becomes a dynamic one, with the
+// deprecation php gives for creating it
+fn setDynamic(ctx: *NativeContext, obj: *PhpObject, prop: []const u8, val: Value) RuntimeError!NativeResult {
+    if (!obj.properties.contains(prop)) switch (ctx.vm.dynamicPropertyRule(obj)) {
+        .allowed => {},
+        .deprecated => {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, prop });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+        },
+        .forbidden => {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot create dynamic property {s}::${s}", .{ obj.class_name, prop });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("Error", msg);
+            return error.RuntimeError;
+        },
+    };
     try obj.set(ctx.allocator, prop, val);
     return NativeResult.scalar(.null);
+}
+
+// generated from php 8.6's ext/dom/php_dom.stub.php: each legacy DOM
+// class, its parent there and the properties it declares, private(set) or not
+const DomPropClass = struct { name: []const u8, parent: ?[]const u8, props: []const DomProp };
+const DomProp = struct { name: []const u8, private_set: bool };
+const dom_prop_classes = [_]DomPropClass{
+    .{ .name = "DOMDocumentType", .parent = "DOMNode", .props = &.{ .{ .name = "name", .private_set = true }, .{ .name = "entities", .private_set = true }, .{ .name = "notations", .private_set = true }, .{ .name = "publicId", .private_set = true }, .{ .name = "systemId", .private_set = true }, .{ .name = "internalSubset", .private_set = true } } },
+    .{ .name = "DOMCdataSection", .parent = "DOMText", .props = &.{} },
+    .{ .name = "DOMComment", .parent = "DOMCharacterData", .props = &.{} },
+    .{ .name = "DOMNode", .parent = null, .props = &.{ .{ .name = "nodeName", .private_set = true }, .{ .name = "nodeValue", .private_set = false }, .{ .name = "nodeType", .private_set = true }, .{ .name = "parentNode", .private_set = true }, .{ .name = "parentElement", .private_set = true }, .{ .name = "childNodes", .private_set = true }, .{ .name = "firstChild", .private_set = true }, .{ .name = "lastChild", .private_set = true }, .{ .name = "previousSibling", .private_set = true }, .{ .name = "nextSibling", .private_set = true }, .{ .name = "attributes", .private_set = true }, .{ .name = "isConnected", .private_set = true }, .{ .name = "ownerDocument", .private_set = true }, .{ .name = "namespaceURI", .private_set = true }, .{ .name = "prefix", .private_set = false }, .{ .name = "localName", .private_set = true }, .{ .name = "baseURI", .private_set = true }, .{ .name = "textContent", .private_set = false } } },
+    .{ .name = "DOMNameSpaceNode", .parent = null, .props = &.{ .{ .name = "nodeName", .private_set = true }, .{ .name = "nodeValue", .private_set = true }, .{ .name = "nodeType", .private_set = true }, .{ .name = "prefix", .private_set = true }, .{ .name = "localName", .private_set = true }, .{ .name = "namespaceURI", .private_set = true }, .{ .name = "isConnected", .private_set = true }, .{ .name = "ownerDocument", .private_set = true }, .{ .name = "parentNode", .private_set = true }, .{ .name = "parentElement", .private_set = true } } },
+    .{ .name = "DOMDocumentFragment", .parent = "DOMNode", .props = &.{ .{ .name = "firstElementChild", .private_set = true }, .{ .name = "lastElementChild", .private_set = true }, .{ .name = "childElementCount", .private_set = true } } },
+    .{ .name = "DOMNodeList", .parent = null, .props = &.{ .{ .name = "length", .private_set = true } } },
+    .{ .name = "DOMCharacterData", .parent = "DOMNode", .props = &.{ .{ .name = "data", .private_set = false }, .{ .name = "length", .private_set = true }, .{ .name = "previousElementSibling", .private_set = true }, .{ .name = "nextElementSibling", .private_set = true } } },
+    .{ .name = "DOMAttr", .parent = "DOMNode", .props = &.{ .{ .name = "name", .private_set = true }, .{ .name = "specified", .private_set = true }, .{ .name = "value", .private_set = false }, .{ .name = "ownerElement", .private_set = true }, .{ .name = "schemaTypeInfo", .private_set = true } } },
+    .{ .name = "DOMElement", .parent = "DOMNode", .props = &.{ .{ .name = "tagName", .private_set = true }, .{ .name = "className", .private_set = false }, .{ .name = "id", .private_set = false }, .{ .name = "schemaTypeInfo", .private_set = true }, .{ .name = "firstElementChild", .private_set = true }, .{ .name = "lastElementChild", .private_set = true }, .{ .name = "childElementCount", .private_set = true }, .{ .name = "previousElementSibling", .private_set = true }, .{ .name = "nextElementSibling", .private_set = true } } },
+    .{ .name = "DOMDocument", .parent = "DOMNode", .props = &.{ .{ .name = "doctype", .private_set = true }, .{ .name = "implementation", .private_set = true }, .{ .name = "documentElement", .private_set = true }, .{ .name = "actualEncoding", .private_set = true }, .{ .name = "encoding", .private_set = false }, .{ .name = "xmlEncoding", .private_set = true }, .{ .name = "standalone", .private_set = false }, .{ .name = "xmlStandalone", .private_set = false }, .{ .name = "version", .private_set = false }, .{ .name = "xmlVersion", .private_set = false }, .{ .name = "strictErrorChecking", .private_set = false }, .{ .name = "documentURI", .private_set = false }, .{ .name = "config", .private_set = true }, .{ .name = "formatOutput", .private_set = false }, .{ .name = "validateOnParse", .private_set = false }, .{ .name = "resolveExternals", .private_set = false }, .{ .name = "preserveWhiteSpace", .private_set = false }, .{ .name = "recover", .private_set = false }, .{ .name = "substituteEntities", .private_set = false }, .{ .name = "firstElementChild", .private_set = true }, .{ .name = "lastElementChild", .private_set = true }, .{ .name = "childElementCount", .private_set = true } } },
+    .{ .name = "DOMText", .parent = "DOMCharacterData", .props = &.{ .{ .name = "wholeText", .private_set = true } } },
+    .{ .name = "DOMNamedNodeMap", .parent = null, .props = &.{ .{ .name = "length", .private_set = true } } },
+    .{ .name = "DOMEntity", .parent = "DOMNode", .props = &.{ .{ .name = "publicId", .private_set = true }, .{ .name = "systemId", .private_set = true }, .{ .name = "notationName", .private_set = true }, .{ .name = "actualEncoding", .private_set = true }, .{ .name = "encoding", .private_set = true }, .{ .name = "version", .private_set = true } } },
+    .{ .name = "DOMEntityReference", .parent = "DOMNode", .props = &.{} },
+    .{ .name = "DOMNotation", .parent = "DOMNode", .props = &.{ .{ .name = "publicId", .private_set = true }, .{ .name = "systemId", .private_set = true } } },
+    .{ .name = "DOMProcessingInstruction", .parent = "DOMNode", .props = &.{ .{ .name = "target", .private_set = true }, .{ .name = "data", .private_set = false } } },
+    .{ .name = "DOMXPath", .parent = null, .props = &.{ .{ .name = "document", .private_set = true }, .{ .name = "registerNodeNamespaces", .private_set = false } } },
+};
+
+
+fn domPropClass(name: []const u8) ?*const DomPropClass {
+    for (&dom_prop_classes) |*cls| if (std.mem.eql(u8, cls.name, name)) return cls;
+    return null;
+}
+
+// the class whose private(set) declaration a write of `prop` meets: php's
+// chain is walked from the object's nearest DOM class, and the first class
+// declaring the name decides
+fn privateSetOwner(vm: *VM, class_name: []const u8, prop: []const u8) ?[]const u8 {
+    var entry: ?*const DomPropClass = null;
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        if (domPropClass(name)) |cls| {
+            entry = cls;
+            break;
+        }
+        current = if (vm.classes.getPtr(name)) |def| def.parent else null;
+    }
+    while (entry) |cls| {
+        for (cls.props) |p| if (std.mem.eql(u8, p.name, prop)) return if (p.private_set) cls.name else null;
+        entry = if (cls.parent) |parent| domPropClass(parent) else null;
+    }
+    return null;
+}
+
+// php 8.6 declares the DOM properties it documented as readonly
+// `public private(set)`: no scope outside the DOM class may write them
+fn refusePrivateSet(ctx: *NativeContext, obj: *PhpObject, prop: []const u8) RuntimeError!void {
+    const owner = privateSetOwner(ctx.vm, obj.class_name, prop) orelse return;
+    const msg = if (ctx.vm.currentDefiningClass()) |scope|
+        try std.fmt.allocPrint(ctx.allocator, "Cannot modify private(set) property {s}::${s} from scope {s}", .{ owner, prop, scope })
+    else
+        try std.fmt.allocPrint(ctx.allocator, "Cannot modify private(set) property {s}::${s} from global scope", .{ owner, prop });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("Error", msg);
+    return error.RuntimeError;
 }
 
 // libxml frees the children it replaces; the ones a wrapper holds are taken
@@ -1283,7 +1369,6 @@ fn makeNodeList(ctx: *NativeContext, nodes: []*c.xmlNode) RuntimeError!NativeRes
     }
     try list_obj.set(ctx.allocator, "__items", .{ .array = arr });
     try list_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
-    try list_obj.set(ctx.allocator, "length", .{ .int = @intCast(nodes.len) });
     return NativeResult.borrowed(.{ .object = list_obj });
 }
 
@@ -1378,7 +1463,6 @@ fn makeNamedNodeMap(ctx: *NativeContext, element: *c.xmlNode) RuntimeError!Nativ
     try map_obj.set(ctx.allocator, "__items", .{ .array = arr });
     try map_obj.set(ctx.allocator, "__named", .{ .array = named });
     try map_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
-    try map_obj.set(ctx.allocator, "length", .{ .int = @intCast(i) });
     return NativeResult.borrowed(.{ .object = map_obj });
 }
 
@@ -1488,7 +1572,6 @@ fn buildXpathNodeList(ctx: *NativeContext, xset: *c.xmlNodeSet) RuntimeError!Nat
     }
     try list_obj.set(ctx.allocator, "__items", .{ .array = arr });
     try list_obj.set(ctx.allocator, "__pos", .{ .int = 0 });
-    try list_obj.set(ctx.allocator, "length", .{ .int = @intCast(xset.nodeNr) });
     return NativeResult.borrowed(.{ .object = list_obj });
 }
 
@@ -1573,8 +1656,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var ns_def = ClassDef{ .name = "DOMNameSpaceNode" };
     ns_def.parent = "DOMNode";
     try ns_def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try ns_def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "DOMNameSpaceNode", ns_def);
     try vm.native_fns.put(a, "DOMNameSpaceNode::__get", domGenericGet);
+    try vm.native_fns.put(a, "DOMNameSpaceNode::__set", domGenericSet);
     try registerNodeListClass(vm, a);
     try registerNamedNodeMapClass(vm, a);
     try registerXPathClass(vm, a);
@@ -1619,6 +1704,7 @@ fn registerDocClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "hasAttributes", .{ .name = "hasAttributes", .arity = 0 });
     try def.methods.put(a, "isSameNode", .{ .name = "isSameNode", .arity = 1 });
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "DOMDocument", def);
 
     try vm.native_fns.put(a, "DOMDocument::__construct", domDocConstruct);
@@ -1651,6 +1737,7 @@ fn registerDocClass(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DOMDocument::hasAttributes", domNodeHasAttributes);
     try vm.native_fns.put(a, "DOMDocument::isSameNode", domNodeIsSameNode);
     try vm.native_fns.put(a, "DOMDocument::__get", domGenericGet);
+    try vm.native_fns.put(a, "DOMDocument::__set", domGenericSet);
 }
 
 fn registerNodeClass(vm: *VM, a: Allocator) !void {
@@ -1777,7 +1864,7 @@ fn registerAttrClass(vm: *VM, a: Allocator) !void {
 }
 
 fn registerNodeListClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "DOMNodeList" };
+    var def = ClassDef{ .name = "DOMNodeList", .native_properties = listProperties };
     try def.interfaces.append(a, "Countable");
     try def.interfaces.append(a, "IteratorAggregate");
     try def.interfaces.append(a, "ArrayAccess");
@@ -1789,7 +1876,9 @@ fn registerNodeListClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
     try def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
     try def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
+    try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "DOMNodeList", def);
+    try vm.native_fns.put(a, "DOMNodeList::__set", domListSet);
 
     try vm.native_fns.put(a, "DOMNodeList::item", domNodeListItem);
     try vm.native_fns.put(a, "DOMNodeList::count", domNodeListCount);
@@ -1851,8 +1940,28 @@ fn domNodeListGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Na
     return NativeResult.borrowed(.{ .object = iter_obj });
 }
 
+// the debug view of a node list or map: its properties, then the length
+// __get serves (php's dom_get_debug_info), which no write may change
+fn listProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    if (purpose != .debug) return null;
+    const t = try object_properties.ownTable(ctx.vm, obj);
+    const items = obj.get("__items");
+    const len: i64 = if (items == .array) @intCast(items.array.entries.items.len) else 0;
+    try object_properties.setMangled(ctx.vm, t, "length", .public, obj.class_name, .{ .int = len });
+    return t;
+}
+
+// __set for the DOM classes that wrap no node: their private(set)
+// properties are refused, anything else is a dynamic property
+fn domListSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    try refusePrivateSet(ctx, obj, args[0].string.bytes());
+    return setDynamic(ctx, obj, args[0].string.bytes(), args[1]);
+}
+
 fn registerNamedNodeMapClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "DOMNamedNodeMap" };
+    var def = ClassDef{ .name = "DOMNamedNodeMap", .native_properties = listProperties };
     try def.interfaces.append(a, "Countable");
     try def.interfaces.append(a, "IteratorAggregate");
     try def.methods.put(a, "getNamedItem", .{ .name = "getNamedItem", .arity = 1 });
@@ -1860,7 +1969,9 @@ fn registerNamedNodeMapClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "count", .{ .name = "count", .arity = 0 });
     try def.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "DOMNamedNodeMap", def);
+    try vm.native_fns.put(a, "DOMNamedNodeMap::__set", domListSet);
 
     try vm.native_fns.put(a, "DOMNamedNodeMap::getNamedItem", domNNMGetNamedItem);
     try vm.native_fns.put(a, "DOMNamedNodeMap::item", domNNMItem);
@@ -1875,7 +1986,9 @@ fn registerXPathClass(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "query", .{ .name = "query", .arity = 1 });
     try def.methods.put(a, "evaluate", .{ .name = "evaluate", .arity = 1 });
     try def.methods.put(a, "registerNamespace", .{ .name = "registerNamespace", .arity = 2 });
+    try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "DOMXPath", def);
+    try vm.native_fns.put(a, "DOMXPath::__set", domListSet);
 
     try vm.native_fns.put(a, "DOMXPath::__construct", domXpathConstruct);
     try vm.native_fns.put(a, "DOMXPath::query", domXpathQuery);
