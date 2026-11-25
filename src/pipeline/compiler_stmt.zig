@@ -885,6 +885,11 @@ fn compileFinallyCopyIn(self: *Compiler, finally_node: u32, scope: Compiler.Jump
     defer before.deinit(self.allocator);
     var it = self.labels.keyIterator();
     while (it.next()) |k| try before.put(self.allocator, k.*, {});
+    const copy = (try self.finally_compiled.getOrPut(self.allocator, finally_node)).found_existing;
+    if (copy) self.mute_warnings += 1;
+    defer if (copy) {
+        self.mute_warnings -= 1;
+    };
     _ = try self.pushScope(scope);
     try self.compileNode(finally_node);
     self.popJumpScope();

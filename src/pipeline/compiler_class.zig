@@ -2266,6 +2266,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const returns_ref = (node.data.rhs & (1 << 30)) != 0;
 
     var sub = Compiler{
+        .mute_warnings = self.mute_warnings,
         .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
@@ -2473,6 +2474,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     var sub = Compiler{
+        .mute_warnings = self.mute_warnings,
         .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
@@ -4778,6 +4780,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const method_returns_ref = (member.data.rhs & (1 << 27)) != 0;
 
     var sub = Compiler{
+        .mute_warnings = self.mute_warnings,
         .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
@@ -5111,6 +5114,7 @@ fn compileInitializer(self: *Compiler, name: []const u8, scope: InitializerScope
         .argument => self.current_class,
     };
     var sub = Compiler{
+        .mute_warnings = self.mute_warnings,
         .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
@@ -5193,6 +5197,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
     try self.string_allocs.append(self.allocator, name);
 
     var sub = Compiler{
+        .mute_warnings = self.mute_warnings,
         .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
@@ -5326,6 +5331,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     @memset(defaults, .null);
 
     var sub = Compiler{
+        .mute_warnings = self.mute_warnings,
         .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,

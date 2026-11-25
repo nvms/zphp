@@ -501,6 +501,10 @@ pub const Compiler = struct {
     warnings: std.ArrayListUnmanaged(CompileWarning) = .empty,
     // the tokens warnOnce already warned for
     warned_once: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    // php compiles a finally block once; zphp compiles it once per way out
+    // of the try, so only the first copy (and the closures in it) warns
+    finally_compiled: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    mute_warnings: u32 = 0,
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
@@ -875,6 +879,7 @@ pub const Compiler = struct {
     // a warning or deprecation php raises while compiling, reported at the
     // line of `token`
     pub fn warn(self: *Compiler, token: u32, level: u16, comptime fmt: []const u8, args: anytype) Error!void {
+        if (self.mute_warnings > 0) return;
         try self.warnings.ensureUnusedCapacity(self.allocator, 1);
         try self.string_allocs.ensureUnusedCapacity(self.allocator, 1);
         const message = try std.fmt.allocPrint(self.allocator, fmt, args);
@@ -889,6 +894,7 @@ pub const Compiler = struct {
 
     // the same, at a line
     pub fn warnAtLine(self: *Compiler, line: u32, level: u16, comptime fmt: []const u8, args: anytype) Error!void {
+        if (self.mute_warnings > 0) return;
         try self.warnings.ensureUnusedCapacity(self.allocator, 1);
         try self.string_allocs.ensureUnusedCapacity(self.allocator, 1);
         const message = try std.fmt.allocPrint(self.allocator, fmt, args);
@@ -898,6 +904,7 @@ pub const Compiler = struct {
 
     // the same, at a byte offset of the source
     pub fn warnAtOffset(self: *Compiler, offset: usize, level: u16, comptime fmt: []const u8, args: anytype) Error!void {
+        if (self.mute_warnings > 0) return;
         try self.warnings.ensureUnusedCapacity(self.allocator, 1);
         try self.string_allocs.ensureUnusedCapacity(self.allocator, 1);
         const message = try std.fmt.allocPrint(self.allocator, fmt, args);
@@ -2637,6 +2644,7 @@ pub const Compiler = struct {
         self.handler_patches.deinit(a);
         self.jump_scopes.deinit(a);
         self.warned_once.deinit(a);
+        self.finally_compiled.deinit(a);
         self.labels.deinit(a);
         self.label_sites.deinit(a);
         self.local_slots.deinit(a);
