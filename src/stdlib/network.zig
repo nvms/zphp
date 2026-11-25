@@ -1130,6 +1130,33 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
     try finiteTimeout(ctx, args, 3, "stream_socket_client(): Argument #4 ($timeout)");
     const flags: i64 = if (args.len > 4) Value.toInt(args[4]) else 4;
     _ = try streamContext(ctx, if (args.len > 5) args[5] else null);
+    // without STREAM_CLIENT_CONNECT php makes the transport's stream and
+    // never parses the address or connects: a socket stream with no socket
+    if ((flags & 4) == 0) unconnected: {
+        const target = args[0].string.bytes();
+        const scheme, _ = splitScheme(target);
+        const sock_type: []const u8 = if (std.ascii.eqlIgnoreCase(scheme, "tcp"))
+            "tcp_socket/ssl"
+        else if (std.ascii.eqlIgnoreCase(scheme, "udp"))
+            "udp_socket"
+        else if (std.ascii.eqlIgnoreCase(scheme, "unix"))
+            "unix_socket"
+        else if (std.ascii.eqlIgnoreCase(scheme, "udg"))
+            "udg_socket"
+        else
+            break :unconnected;
+        try reportSocketError(ctx, args, 1, null);
+        const obj = try ctx.createResource("FileHandle");
+        try obj.set(ctx.allocator, "__fd", .{ .int = -1 });
+        try obj.set(ctx.allocator, "__open", .{ .bool = true });
+        try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r+") });
+        try obj.set(ctx.allocator, "__net", .{ .bool = true });
+        try obj.setCopiedString(ctx.allocator, "__path", target);
+        try obj.set(ctx.allocator, "__sock_type", .{ .string = Value.String.borrowed(sock_type) });
+        if ((flags & 1) != 0) try obj.set(ctx.allocator, "__persistent", .{ .bool = true });
+        try filesystem.attachContext(ctx, obj, if (args.len > 5) args[5] else null);
+        return NativeResult.borrowed(.{ .resource = obj });
+    }
     const result = try connectStream(ctx, args, 1, args[0].string.bytes(), if (args.len > 3) args[3] else null, (flags & 2) != 0, "stream_socket_client");
     // the socket keeps the context it was made with (php_stream_xport_create)
     if (result.value == .resource) try filesystem.attachContext(ctx, result.value.resource, if (args.len > 5) args[5] else null);
