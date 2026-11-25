@@ -7823,6 +7823,8 @@ pub const VM = struct {
                     const ik = Value.toArrayKey(inner_key);
                     var existing: Value = .null;
                     var base_is_array_access_obj = false;
+                    var aa_ref: ?*Value = null;
+                    defer if (aa_ref) |cell| self.unbindCell(cell);
                     var wb_key = outer_key;
                     if (base == .array) {
                         // the outer offset is fetched first, then the inner; an
@@ -7874,6 +7876,7 @@ pub const VM = struct {
                         retainValue(v);
                         retainValue(inner_key);
                         retainValue(outer_key);
+                        self.setReturnRef(null);
                         existing = self.offsetGetForWrite(base.object, outer_key) catch {
                             self.releaseValue(v);
                             self.releaseValue(inner_key);
@@ -7881,6 +7884,11 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        // a reference an &offsetGet() returned is written
+                        // through, not handed to offsetSet()
+                        if (!isWeakMap(base.object) and self.offsetGetReturnsRef(base.object) and !(try self.splOwnOffsetGet(base.object))) {
+                            if (try self.takeHookReturnCell()) |cell| aa_ref = cell;
+                        }
                         // php writes into the element it fetched; the write back
                         // goes to the key the fetch turned the offset into
                         if (try self.splOwnOffsetGet(base.object)) wb_key = @import("../stdlib/spl.zig").plainKey(outer_key);
@@ -7967,6 +7975,8 @@ pub const VM = struct {
                         defer written.release();
                         if (base == .array) {
                             try self.arraySetOwned(base.array, ok, .{ .string = written });
+                        } else if (aa_ref) |cell| {
+                            try self.writeReference(cell, .{ .string = written });
                         } else if (base_is_array_access_obj) {
                             _ = self.callMethod(base.object, "offsetSet", &.{ wb_key, .{ .string = written } }) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -7993,6 +8003,9 @@ pub const VM = struct {
                             if (base == .array) {
                                 try self.arraySetOwned(base.array, ok, .{ .array = inner });
                                 inner.refcount -= 1;
+                            } else if (aa_ref) |cell| {
+                                try self.writeReference(cell, .{ .array = inner });
+                                inner.refcount -= 1;
                             } else if (base_is_array_access_obj) {
                                 _ = self.callMethod(base.object, "offsetSet", &.{ wb_key, .{ .array = inner } }) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -8014,6 +8027,8 @@ pub const VM = struct {
                         try new_arr.set(self.allocator, ik, v);
                         if (base == .array) {
                             try self.arraySetOwned(base.array, ok, .{ .array = new_arr });
+                        } else if (aa_ref) |cell| {
+                            try self.writeReference(cell, .{ .array = new_arr });
                         } else if (base_is_array_access_obj) {
                             _ = self.callMethod(base.object, "offsetSet", &.{ wb_key, .{ .array = new_arr } }) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
