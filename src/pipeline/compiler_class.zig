@@ -3502,7 +3502,12 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             const promoted: u8 = if (member.data.rhs & ast_mod.PropertyHooks.prop_promoted != 0) 0x40 else 0;
             try self.emitByte(@as(u8, @intCast(member.data.rhs & 0xff)) | promoted);
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
-            try self.emitU16(try docCommentConst(self, member.main_token));
+            // a promoted property's doc comment is its parameter's, which may
+            // follow the variable
+            if (promoted != 0) {
+                const doc = paramDocComment(self, member.main_token);
+                try self.emitU16(if (doc.len == 0) 0xffff else @intCast(try self.addConstant(.{ .string = Value.String.borrowed(doc) })));
+            } else try self.emitU16(try docCommentConst(self, member.main_token));
         }
     }
     // trait properties (own + hook variants)
@@ -5378,12 +5383,23 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     // a #[\Deprecated] hook warns as "Method C::$prop::get() is deprecated"
     // (#[\NoDiscard] is refused on hooks elsewhere)
     var deprecated: ?[]const u8 = null;
+    // the hook's doc comment, and its set parameter's
+    var doc_comment: []const u8 = "";
     if (member.tag == .class_property_hooks) {
         var it = hookIterator(self, member);
         while (it.next()) |hook| {
-            if (std.mem.endsWith(u8, hook.method, suffix)) deprecated = (try callAttributes(self, hook.token, "", "method")).deprecated;
+            if (!std.mem.endsWith(u8, hook.method, suffix)) continue;
+            deprecated = (try callAttributes(self, hook.token, "", "method")).deprecated;
+            doc_comment = docCommentForToken(self, hook.token);
         }
     }
+    const param_doc: []const u8 = if (kind == .set and set_param_tok != 0) paramDocComment(self, set_param_tok) else "";
+    const param_docs: []const []const u8 = if (param_doc.len > 0) blk: {
+        const docs = try self.allocator.alloc([]const u8, 1);
+        docs[0] = param_doc;
+        break :blk docs;
+    } else &.{};
+    errdefer if (!handed_over and param_docs.len > 0) self.allocator.free(param_docs);
     if (deprecated != null and !is_generator) try sub.emitOp(.check_deprecated);
 
     if (is_short) {
@@ -5438,6 +5454,8 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .returns_ref = (hook_flags & 4) != 0,
         .has_param_types = param_types.len > 0 and param_types[0].len > 0,
         .deprecated = deprecated,
+        .doc_comment = doc_comment,
+        .param_docs = param_docs,
     });
     handed_over = true;
 
