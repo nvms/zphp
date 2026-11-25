@@ -6,6 +6,8 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Guarded;
 use Illuminate\Database\Eloquent\Attributes\Initialize;
 use Illuminate\Database\Eloquent\Attributes\Unguarded;
+use Illuminate\Database\Eloquent\Relations\Pivot;
+use Illuminate\Support\Str;
 
 trait GuardsAttributes
 {
@@ -45,15 +47,15 @@ trait GuardsAttributes
     #[Initialize]
     public function initializeGuardsAttributes()
     {
-        if (empty($this->fillable)) {
-            $this->fillable = static::resolveClassAttribute(Fillable::class, 'columns') ?? [];
-        }
+        $this->mergeFillable(static::resolveClassAttribute(Fillable::class, 'columns') ?? []);
 
-        if ($this->guarded === ['*']) {
+        $default = $this instanceof Pivot ? [] : ['*'];
+
+        if ($this->guarded === $default) {
             if (static::resolveClassAttribute(Unguarded::class) !== null) {
                 $this->guarded = [];
             } else {
-                $this->guarded = static::resolveClassAttribute(Guarded::class, 'columns') ?? ['*'];
+                $this->guarded = static::resolveClassAttribute(Guarded::class, 'columns') ?? $default;
             }
         }
     }
@@ -89,6 +91,10 @@ trait GuardsAttributes
      */
     public function mergeFillable(array $fillable)
     {
+        if ($fillable === []) {
+            return $this;
+        }
+
         $this->fillable = array_values(array_unique(array_merge($this->fillable, $fillable)));
 
         return $this;
@@ -229,9 +235,25 @@ trait GuardsAttributes
             return false;
         }
 
-        return $this->getGuarded() == ['*'] ||
-               ! empty(preg_grep('/^'.preg_quote($key, '/').'$/i', $this->getGuarded())) ||
-               ! $this->isGuardableColumn($key);
+        if ($this->getGuarded() == ['*']) {
+            return true;
+        }
+
+        // Normalize the key to match against guarded list by using the same
+        // normalization applied in attribute resolution paths (studly/camel).
+        // This prevents bypass via alternate spellings like 'is-admin' vs 'is_admin'.
+        $normalizedKey = Str::studly($key);
+
+        foreach ($this->getGuarded() as $guardedKey) {
+            // Compare both the raw key (for backward compatibility with exact matches)
+            // and the normalized key (to prevent bypass via delimiter/case variations).
+            if (preg_match('/^'.preg_quote($key, '/').'$/i', $guardedKey) ||
+                preg_match('/^'.preg_quote($normalizedKey, '/').'$/i', Str::studly($guardedKey))) {
+                return true;
+            }
+        }
+
+        return ! $this->isGuardableColumn($key);
     }
 
     /**

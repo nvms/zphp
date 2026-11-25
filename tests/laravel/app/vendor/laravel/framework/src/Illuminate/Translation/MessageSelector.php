@@ -58,7 +58,7 @@ class MessageSelector
      */
     private function extractFromString($part, $number)
     {
-        preg_match('/^[\{\[]([-?\d|*,\.*]*)[\}\]](.*)/s', $part, $matches);
+        preg_match('/^\s*[\{\[]\s*([-?\d|*,\.*]*)\s*[\}\]](.*)/s', $part, $matches);
 
         if (count($matches) !== 3) {
             return null;
@@ -92,7 +92,7 @@ class MessageSelector
     private function stripConditions($segments)
     {
         return (new Collection($segments))
-            ->map(fn ($part) => preg_replace('/^[\{\[][-?\d|*,\.*]*[\}\]]/', '', $part))
+            ->map(fn ($part) => preg_replace('/^\s*[\{\[]\s*[-?\d|*,\.*]*\s*[\}\]]/', '', $part))
             ->all();
     }
 
@@ -109,6 +109,10 @@ class MessageSelector
      */
     public function getPluralIndex($locale, $number)
     {
+        if (is_numeric($number)) {
+            $number = abs($number);
+        }
+
         switch ($locale) {
             case 'az':
             case 'az_AZ':

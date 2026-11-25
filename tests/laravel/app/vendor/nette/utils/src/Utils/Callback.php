@@ -1,16 +1,14 @@
-<?php
+<?php declare(strict_types=1);
 
 /**
  * This file is part of the Nette Framework (https://nette.org)
  * Copyright (c) 2004 David Grudl (https://davidgrudl.com)
  */
 
-declare(strict_types=1);
-
 namespace Nette\Utils;
 
 use Nette;
-use function explode, func_get_args, ini_get, is_array, is_callable, is_object, is_string, preg_replace, restore_error_handler, set_error_handler, sprintf, str_contains, str_ends_with;
+use function func_get_args, ini_get, is_array, is_object, is_string, sprintf;
 
 
 /**
@@ -28,19 +26,21 @@ final class Callback
 	 */
 	public static function invokeSafe(string $function, array $args, callable $onError): mixed
 	{
-		$prev = set_error_handler(function (int $severity, string $message, string $file, int $line) use ($onError, &$prev, $function): bool {
-			if ($file === __FILE__) {
-				$msg = ini_get('html_errors')
-					? Html::htmlToText($message)
-					: $message;
-				$msg = (string) preg_replace("#^$function\\(.*?\\): #", '', $msg);
-				if ($onError($msg, $severity) !== false) {
-					return true;
+		$prev = set_error_handler(
+			function (int $severity, string $message, string $file, int $line) use ($onError, &$prev, $function): bool {
+				if ($file === __FILE__) {
+					$msg = ini_get('html_errors')
+						? Html::htmlToText($message)
+						: $message;
+					$msg = (string) preg_replace("#^$function\\(.*?\\): #", '', $msg);
+					if ($onError($msg, $severity) !== false) {
+						return true;
+					}
 				}
-			}
 
-			return $prev ? $prev(...func_get_args()) !== false : false;
-		});
+				return $prev ? $prev(...func_get_args()) !== false : false;
+			},
+		);
 
 		try {
 			return $function(...$args);
@@ -51,8 +51,8 @@ final class Callback
 
 
 	/**
-	 * Checks that $callable is valid PHP callback. Otherwise throws exception. If the $syntax is set to true, only verifies
-	 * that $callable has a valid structure to be used as a callback, but does not verify if the class or method actually exists.
+	 * Checks that $callable is a valid PHP callback and returns it. With $syntax set to true, only verifies
+	 * the structural validity without checking whether the class or method actually exists.
 	 * @return callable
 	 * @throws Nette\InvalidArgumentException
 	 */
@@ -61,8 +61,8 @@ final class Callback
 		if (!is_callable($callable, $syntax)) {
 			throw new Nette\InvalidArgumentException(
 				$syntax
-				? 'Given value is not a callable type.'
-				: sprintf("Callback '%s' is not callable.", self::toString($callable)),
+					? 'Given value is not a callable type.'
+					: sprintf("Callback '%s' is not callable.", self::toString($callable)),
 			);
 		}
 

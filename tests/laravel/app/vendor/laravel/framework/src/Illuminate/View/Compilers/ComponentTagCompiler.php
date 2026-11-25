@@ -250,7 +250,7 @@ class ComponentTagCompiler
 
             $parameters = [
                 'view' => $view,
-                'data' => '['.$this->attributesToString($data->all(), $escapeBound = false).']',
+                'data' => '['.$this->attributesToString($data->all(), escapeBound: false).']',
             ];
 
             $class = AnonymousComponent::class;
@@ -258,11 +258,19 @@ class ComponentTagCompiler
             $parameters = $data->all();
         }
 
-        return "##BEGIN-COMPONENT-CLASS##@component('{$class}', '{$component}', [".$this->attributesToString($parameters, $escapeBound = false).'])
+        $escapeAttributes = $class !== DynamicComponent::class;
+
+        $boundAttributes = $escapeAttributes ? '' : '<?php $component->withBoundAttributes(['.$attributes->keys()
+            ->filter(fn ($key) => isset($this->boundAttributes[$key]))
+            ->map(fn ($key) => "'{$key}'")
+            ->implode(',').']); ?>
+';
+
+        return "##BEGIN-COMPONENT-CLASS##@component('{$class}', '{$component}', [".$this->attributesToString($parameters, escapeBound: false).'])
 <?php if (isset($attributes) && $attributes instanceof Illuminate\View\ComponentAttributeBag): ?>
 <?php $attributes = $attributes->except(\\'.$class.'::ignoredParameterNames()); ?>
 <?php endif; ?>
-<?php $component->withAttributes(['.$this->attributesToString($attributes->all(), $escapeAttributes = $class !== DynamicComponent::class).']); ?>';
+'.$boundAttributes.'<?php $component->withAttributes(['.$this->attributesToString($attributes->all(), $escapeAttributes).']); ?>';
     }
 
     /**

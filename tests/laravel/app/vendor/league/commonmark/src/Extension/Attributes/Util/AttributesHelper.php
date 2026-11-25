@@ -23,8 +23,26 @@ use League\CommonMark\Util\RegexHelper;
  */
 final class AttributesHelper
 {
-    private const SINGLE_ATTRIBUTE = '\s*([.]-?[_a-z][^\s.}]*|[#][^\s}]+|' . RegexHelper::PARTIAL_ATTRIBUTENAME . RegexHelper::PARTIAL_ATTRIBUTEVALUESPEC . ')\s*';
-    private const ATTRIBUTE_LIST   = '/^{:?(' . self::SINGLE_ATTRIBUTE . ')+}/i';
+    /**
+     * Each token can only be split from its neighbors one way, and the repeated parts are possessive,
+     * so a failed match can't backtrack exponentially. An unquoted value may contain '}' only if
+     * another '}' follows in the same run; the last one closes the list.
+     */
+    private const SINGLE_ATTRIBUTE = '\s*+(?:[.]-?[_a-z][^\s.}]*+|[#][^\s}]++|' . RegexHelper::PARTIAL_ATTRIBUTENAME . '\s*+=\s*+(?:(?:[^"\'=<>`\x00-\x20}]++|}(?=[^"\'=<>`\x00-\x20}]*+}))++|\'[^\']*+\'|"[^"]*+"))\s*+';
+    private const ATTRIBUTE_LIST   = '/^{:?+(?:' . self::SINGLE_ATTRIBUTE . ')++}/i';
+
+    /**
+     * Each '{' is a potential list, so the text examined for one must be bounded; otherwise a
+     * line with many of them costs quadratic time.
+     */
+    private const MAX_ATTRIBUTE_LIST_BYTES = 8192;
+
+    /**
+     * PCRE's `\s` matches the form feed that PHP's default trim charlist omits, so the
+     * separators SINGLE_ATTRIBUTE accepts must be trimmed with this list instead - otherwise
+     * that byte survives inside an attribute name, where a browser reads it as a separator.
+     */
+    private const WHITESPACE = " \t\n\r\0\x0B\x0C";
 
     /**
      * @return array<string, mixed>
@@ -41,25 +59,26 @@ final class AttributesHelper
             return [];
         }
 
-        // Attempt to match the entire attribute list expression
-        // While this is less performant than checking for '{' now and '}' later, it simplifies
-        // matching individual attributes since they won't need to look ahead for the closing '}'
-        // while dealing with the fact that attributes can technically contain curly braces.
-        // So we'll just match the start and end braces up front.
-        $attributeExpression = $cursor->match(self::ATTRIBUTE_LIST);
-        if ($attributeExpression === null) {
+        // Match the whole list up front, so nothing is consumed unless it's valid. The cursor is on
+        // the '{', so no partially-consumed tab can be pending.
+        $window = \substr($cursor->getLine(), $cursor->getBytePosition(), self::MAX_ATTRIBUTE_LIST_BYTES);
+        if (\preg_match(self::ATTRIBUTE_LIST, $window, $matches) !== 1) {
             $cursor->restoreState($state);
 
             return [];
         }
 
-        // Trim the leading '{' or '{:' and the trailing '}'
-        $attributeExpression = \ltrim(\substr($attributeExpression, 1, -1), ':');
+        $attributeExpression = $matches[0];
+        $cursor->advanceBy(\mb_strlen($attributeExpression, 'UTF-8'));
+
+        // Trim the leading '{' or '{:'; the closing '}' stays, since SINGLE_ATTRIBUTE needs it to
+        // decide whether a '}' belongs to an unquoted value
+        $attributeExpression = \ltrim(\substr($attributeExpression, 1), ':');
         $attributeCursor     = new Cursor($attributeExpression);
 
         /** @var array<string, mixed> $attributes */
         $attributes = [];
-        while ($attribute = \trim((string) $attributeCursor->match('/^' . self::SINGLE_ATTRIBUTE . '/i'))) {
+        while ($attribute = \trim((string) $attributeCursor->matchInPlace('/\G' . self::SINGLE_ATTRIBUTE . '/i'), self::WHITESPACE)) {
             if ($attribute[0] === '#') {
                 $attributes['id'] = \substr($attribute, 1);
 
@@ -75,23 +94,28 @@ final class AttributesHelper
             /** @psalm-suppress PossiblyUndefinedArrayOffset */
             [$name, $value] = \explode('=', $attribute, 2);
 
-            if ($value === 'true') {
+            $name      = \trim($name, self::WHITESPACE);
+            $lowerName = \strtolower($name);
+
+            // A bare `true` makes a boolean attribute, except where other code expects a string
+            if ($value === 'true' && $lowerName !== 'class' && $lowerName !== 'id') {
                 $attributes[$name] = true;
                 continue;
             }
 
+            $value = \trim($value, self::WHITESPACE);
             $first = $value[0];
             $last  = \substr($value, -1);
-            if (($first === '"' && $last === '"') || ($first === "'" && $last === "'") && \strlen($value) > 1) {
-                $value = \substr($value, 1, -1);
+            if (\strlen($value) > 1 && (($first === '"' && $last === '"') || ($first === "'" && $last === "'"))) {
+                $value = \trim(\substr($value, 1, -1), self::WHITESPACE);
             }
 
-            if (\strtolower(\trim($name)) === 'class') {
-                foreach (\array_filter(\explode(' ', \trim($value))) as $class) {
+            if ($lowerName === 'class') {
+                foreach (\array_filter(\explode(' ', $value)) as $class) {
                     $attributes['class'][] = $class;
                 }
             } else {
-                $attributes[\trim($name)] = \trim($value);
+                $attributes[$name] = $value;
             }
         }
 
@@ -119,11 +143,7 @@ final class AttributesHelper
             /** @var array<string, mixed> $arg */
             $arg = (array) $arg;
             if (isset($arg['class'])) {
-                if (\is_string($arg['class'])) {
-                    $arg['class'] = \array_filter(\explode(' ', \trim($arg['class'])));
-                }
-
-                foreach ($arg['class'] as $class) {
+                foreach (self::classList($arg['class']) as $class) {
                     $attributes['class'][] = $class;
                 }
 
@@ -141,6 +161,22 @@ final class AttributesHelper
     }
 
     /**
+     * Split a `class` attribute value into the individual classes it contributes to a merge
+     *
+     * @param mixed $class
+     *
+     * @return list<string>
+     */
+    public static function classList($class): array
+    {
+        if (\is_string($class)) {
+            return \array_values(\array_filter(\explode(' ', \trim($class))));
+        }
+
+        return \array_values((array) $class);
+    }
+
+    /**
      * @param array<string, mixed> $attributes
      * @param list<string>         $allowList
      *
@@ -151,7 +187,15 @@ final class AttributesHelper
         $allowList = \array_fill_keys($allowList, true);
 
         foreach ($attributes as $name => $value) {
-            $attrNameLower = \strtolower($name);
+            // The checks below compare against literal names, and the renderer emits names
+            // without escaping them, so anything that isn't a well-formed attribute name
+            // would slip past both
+            if (\preg_match('/^' . RegexHelper::PARTIAL_ATTRIBUTENAME . '$/i', (string) $name) !== 1) {
+                unset($attributes[$name]);
+                continue;
+            }
+
+            $attrNameLower = \strtolower((string) $name);
 
             // Remove any unsafe links
             if (! $allowUnsafeLinks && ($attrNameLower === 'href' || $attrNameLower === 'src') && \is_string($value) && RegexHelper::isLinkPotentiallyUnsafe($value)) {

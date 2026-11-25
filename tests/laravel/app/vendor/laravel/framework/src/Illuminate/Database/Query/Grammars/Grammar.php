@@ -111,7 +111,7 @@ class Grammar extends BaseGrammar
         foreach ($this->selectComponents as $component) {
             if (isset($query->$component)) {
                 $method = 'compile'.ucfirst($component);
-                $val = $query->$component;
+
                 $sql[$component] = $this->$method($query, $query->$component);
             }
         }
@@ -139,7 +139,7 @@ class Grammar extends BaseGrammar
             $column = 'distinct '.$column;
         }
 
-        return 'select '.$aggregate['function'].'('.$column.') as aggregate';
+        return 'select '.$aggregate['function'].'('.$column.') as '.$this->wrap('aggregate');
     }
 
     /**
@@ -309,6 +309,20 @@ class Grammar extends BaseGrammar
         $operator = str_replace('?', '??', $where['operator']);
 
         return $this->wrap($where['column']).' '.$operator.' '.$value;
+    }
+
+    /**
+     * Compile a "where binary" clause.
+     *
+     * @param  \Illuminate\Database\Query\Builder  $query
+     * @param  array  $where
+     * @return string
+     *
+     * @throws \RuntimeException
+     */
+    protected function whereBinary(Builder $query, $where)
+    {
+        throw new RuntimeException('This database engine does not support binary comparison operations.');
     }
 
     /**
@@ -585,7 +599,9 @@ class Grammar extends BaseGrammar
      */
     protected function whereColumn(Builder $query, $where)
     {
-        return $this->wrap($where['first']).' '.$where['operator'].' '.$this->wrap($where['second']);
+        $operator = str_replace('?', '??', $where['operator']);
+
+        return $this->wrap($where['first']).' '.$operator.' '.$this->wrap($where['second']);
     }
 
     /**
@@ -845,6 +861,29 @@ class Grammar extends BaseGrammar
     public function whereExpression(Builder $query, $where)
     {
         return $where['column']->getValue($this);
+    }
+
+    /**
+     * Compile a vector distance expression for the given column.
+     *
+     * @param  string  $column
+     * @return string
+     *
+     * @throws \RuntimeException
+     */
+    public function compileVectorDistanceExpression($column)
+    {
+        throw new RuntimeException('This database engine does not support vector distance queries.');
+    }
+
+    /**
+     * Determine if the grammar supports vector distance queries.
+     *
+     * @return bool
+     */
+    public function supportsVectorDistance()
+    {
+        return false;
     }
 
     /**
@@ -1226,6 +1265,17 @@ class Grammar extends BaseGrammar
     }
 
     /**
+     * Compile an "exists" subquery as a selectable column.
+     *
+     * @param  string  $sql
+     * @return string
+     */
+    public function compileExistsColumn($sql)
+    {
+        return 'exists('.$sql.')';
+    }
+
+    /**
      * Compile an insert statement into SQL.
      *
      * @param  \Illuminate\Database\Query\Builder  $query
@@ -1519,6 +1569,18 @@ class Grammar extends BaseGrammar
     protected function compileLock(Builder $query, $value)
     {
         return is_string($value) ? $value : '';
+    }
+
+    /**
+     * Get the lock value for updating rows without blocking foreign key checks.
+     *
+     * Grammars without a weaker update lock fall back to the regular update lock.
+     *
+     * @return string|bool
+     */
+    public function getNoKeyUpdateLock()
+    {
+        return true;
     }
 
     /**

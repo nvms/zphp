@@ -6,10 +6,21 @@ namespace GuzzleHttp\Promise;
 
 final class Create
 {
+    private function __construct()
+    {
+    }
+
     /**
-     * Creates a promise for a value if the value is not a promise.
+     * Returns `$value` when it is already a Guzzle promise, wraps foreign
+     * thenables in a Guzzle promise, or returns a fulfilled promise for plain
+     * values.
      *
-     * @param mixed $value Promise or value.
+     * @template TValue
+     * @template TPromise of PromiseInterface<mixed, mixed> = PromiseInterface<mixed, mixed>
+     *
+     * @param TValue|TPromise $value Promise or value.
+     *
+     * @return ($value is PromiseInterface ? TPromise : FulfilledPromise<TValue, never>)
      */
     public static function promiseFor($value): PromiseInterface
     {
@@ -22,7 +33,15 @@ final class Create
             $wfn = method_exists($value, 'wait') ? [$value, 'wait'] : null;
             $cfn = method_exists($value, 'cancel') ? [$value, 'cancel'] : null;
             $promise = new Promise($wfn, $cfn);
-            $value->then([$promise, 'resolve'], [$promise, 'reject']);
+            try {
+                $value->then([$promise, 'resolve'], [$promise, 'reject']);
+            } catch (\Throwable $e) {
+                if (State::isPending($promise)) {
+                    // The thenable may still hold the callbacks.
+                    $promise = new Promise();
+                    $promise->reject($e);
+                }
+            }
 
             return $promise;
         }
@@ -31,10 +50,16 @@ final class Create
     }
 
     /**
-     * Creates a rejected promise for a reason if the reason is not a promise.
-     * If the provided reason is a promise, then it is returned as-is.
+     * Returns `$reason` when it is already a promise, or returns a rejected
+     * promise for plain reasons.
      *
-     * @param mixed $reason Promise or reason.
+     * @template TReason
+     * @template TValue = never
+     * @template TPromise of PromiseInterface<mixed, mixed> = PromiseInterface<mixed, mixed>
+     *
+     * @param TReason|TPromise $reason Promise or reason.
+     *
+     * @return ($reason is PromiseInterface ? TPromise : RejectedPromise<TValue, TReason>)
      */
     public static function rejectionFor($reason): PromiseInterface
     {
@@ -46,9 +71,12 @@ final class Create
     }
 
     /**
-     * Create an exception for a rejected promise value.
+     * Returns throwable reasons as-is, or wraps non-throwable reasons in
+     * `RejectionException`.
      *
-     * @param mixed $reason
+     * @template TReason
+     *
+     * @param TReason $reason
      */
     public static function exceptionFor($reason): \Throwable
     {
@@ -60,11 +88,17 @@ final class Create
     }
 
     /**
-     * Returns an iterator for the given value.
+     * Returns an iterator for arrays, iterators, iterator aggregates, and
+     * traversables.
      *
-     * @param mixed $value
+     * @template TKey of array-key
+     * @template TValue
+     *
+     * @param iterable<TKey, TValue> $value
+     *
+     * @return \Iterator<TKey, TValue>
      */
-    public static function iterFor($value): \Iterator
+    public static function iterFor(iterable $value): \Iterator
     {
         if ($value instanceof \Iterator) {
             return $value;
@@ -74,6 +108,10 @@ final class Create
             return new \ArrayIterator($value);
         }
 
-        return new \ArrayIterator([$value]);
+        if ($value instanceof \IteratorAggregate) {
+            return self::iterFor($value->getIterator());
+        }
+
+        return new \IteratorIterator($value);
     }
 }

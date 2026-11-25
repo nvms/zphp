@@ -62,6 +62,13 @@ final class TableParser extends AbstractBlockContinueParser implements BlockCont
     private int $remainingAutocompletedCells;
 
     /**
+     * Whether the current line may be added to the table as a lazy continuation line
+     *
+     * @psalm-readonly-allow-private-mutation
+     */
+    private bool $canHaveLazyContinuationLines = false;
+
+    /**
      * @param array<int, string|null> $columns
      * @param array<int, string>      $headerCells
      *
@@ -80,7 +87,7 @@ final class TableParser extends AbstractBlockContinueParser implements BlockCont
 
     public function canHaveLazyContinuationLines(): bool
     {
-        return true;
+        return $this->canHaveLazyContinuationLines;
     }
 
     public function getBlock(): Table
@@ -90,7 +97,11 @@ final class TableParser extends AbstractBlockContinueParser implements BlockCont
 
     public function tryContinue(Cursor $cursor, BlockContinueParserInterface $activeBlockParser): ?BlockContinue
     {
-        if (\strpos($cursor->getLine(), '|') === false) {
+        // A line without a pipe can still become a row via lazy continuation. This is only reached when all
+        // enclosing containers matched; lines whose containers didn't match must not be added lazily.
+        $this->canHaveLazyContinuationLines = \strpos($cursor->getLine(), '|') === false;
+
+        if ($this->canHaveLazyContinuationLines) {
             return BlockContinue::none();
         }
 
@@ -99,6 +110,8 @@ final class TableParser extends AbstractBlockContinueParser implements BlockCont
 
     public function addLine(string $line): void
     {
+        $this->canHaveLazyContinuationLines = false;
+
         if ($this->nextIsSeparatorLine) {
             $this->nextIsSeparatorLine = false;
         } else {
@@ -168,24 +181,28 @@ final class TableParser extends AbstractBlockContinueParser implements BlockCont
      */
     public static function split(string $line): array
     {
-        $cursor = new Cursor(\trim($line));
+        // Scan raw bytes: the only significant characters are ASCII, and copying the other bytes through one at a
+        // time reassembles multibyte sequences unchanged. This is several times faster than stepping a Cursor.
+        $line   = \trim($line);
+        $length = \strlen($line);
 
-        if ($cursor->getCurrentCharacter() === '|') {
-            $cursor->advanceBy(1);
+        $i = 0;
+        if ($length > 0 && $line[0] === '|') {
+            $i = 1;
         }
 
         $cells = [];
         $sb    = '';
 
-        while (! $cursor->isAtEnd()) {
-            switch ($c = $cursor->getCurrentCharacter()) {
+        for (; $i < $length; $i++) {
+            switch ($c = $line[$i]) {
                 case '\\':
-                    if ($cursor->peek() === '|') {
+                    if ($i + 1 < $length && $line[$i + 1] === '|') {
                         // Pipe is special for table parsing. An escaped pipe doesn't result in a new cell, but is
                         // passed down to inline parsing as an unescaped pipe. Note that that applies even for the `\|`
                         // in an input like `\\|` - in other words, table parsing doesn't support escaping backslashes.
                         $sb .= '|';
-                        $cursor->advanceBy(1);
+                        $i++;
                     } else {
                         // Preserve backslash before other characters or at end of line.
                         $sb .= '\\';
@@ -199,8 +216,6 @@ final class TableParser extends AbstractBlockContinueParser implements BlockCont
                 default:
                     $sb .= $c;
             }
-
-            $cursor->advanceBy(1);
         }
 
         if ($sb !== '') {

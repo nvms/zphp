@@ -9,12 +9,17 @@ use Illuminate\Contracts\Queue\ShouldBeEncrypted;
 use Illuminate\Contracts\Queue\ShouldQueueAfterCommit;
 use Illuminate\Queue\Attributes\Backoff;
 use Illuminate\Queue\Attributes\Connection;
+use Illuminate\Queue\Attributes\CountCrashesAsExceptions;
+use Illuminate\Queue\Attributes\DeleteWhenMissingModels;
+use Illuminate\Queue\Attributes\FailOnTimeout;
 use Illuminate\Queue\Attributes\MaxExceptions;
 use Illuminate\Queue\Attributes\Queue as QueueAttribute;
 use Illuminate\Queue\Attributes\ReadsQueueAttributes;
+use Illuminate\Queue\Attributes\RetryFor;
 use Illuminate\Queue\Attributes\Timeout;
 use Illuminate\Queue\Attributes\Tries;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Support\Carbon;
 
 class SendQueuedMailable
 {
@@ -44,7 +49,7 @@ class SendQueuedMailable
     /**
      * The maximum number of unhandled exceptions to allow before failing.
      *
-     * @return int|null
+     * @var int|null
      */
     public $maxExceptions;
 
@@ -54,6 +59,25 @@ class SendQueuedMailable
      * @var bool
      */
     public $shouldBeEncrypted = false;
+
+    /**
+     * Indicates if the job should be deleted when models are missing.
+     */
+    public bool $deleteWhenMissingModels = false;
+
+    /**
+     * Indicates if the job should be marked as failed on timeout.
+     *
+     * @var bool
+     */
+    public $failOnTimeout = false;
+
+    /**
+     * Indicates if worker crashes should count towards the maximum exceptions.
+     *
+     * @var bool
+     */
+    public $countCrashesAsExceptions = false;
 
     /**
      * Create a new job instance.
@@ -76,6 +100,9 @@ class SendQueuedMailable
         $this->shouldBeEncrypted = $mailable instanceof ShouldBeEncrypted;
         $this->timeout = $this->getAttributeValue($mailable, Timeout::class, 'timeout');
         $this->tries = $this->getAttributeValue($mailable, Tries::class, 'tries');
+        $this->deleteWhenMissingModels = $this->getAttributeValue($mailable, DeleteWhenMissingModels::class, 'deleteWhenMissingModels') ?? false;
+        $this->failOnTimeout = $this->getAttributeValue($mailable, FailOnTimeout::class, 'failOnTimeout') ?? false;
+        $this->countCrashesAsExceptions = $this->getAttributeValue($mailable, CountCrashesAsExceptions::class, 'countCrashesAsExceptions') ?? false;
     }
 
     /**
@@ -113,7 +140,9 @@ class SendQueuedMailable
     public function retryUntil()
     {
         if (! method_exists($this->mailable, 'retryUntil') && ! isset($this->mailable->retryUntil)) {
-            return;
+            $retryFor = $this->getAttributeValue($this->mailable, RetryFor::class);
+
+            return is_null($retryFor) ? null : Carbon::now()->addSeconds($retryFor);
         }
 
         return $this->mailable->retryUntil ?? $this->mailable->retryUntil();

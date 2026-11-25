@@ -62,7 +62,9 @@ class DatabaseTransactionsManager
      * @param  string  $connection
      * @param  int  $levelBeingCommitted
      * @param  int  $newTransactionLevel
-     * @return array
+     * @return \Illuminate\Support\Collection<int, \Illuminate\Database\DatabaseTransactionRecord>|array{}
+     *
+     * @phpstan-return ($newTransactionLevel is 0 ? \Illuminate\Support\Collection<int, \Illuminate\Database\DatabaseTransactionRecord> : \Illuminate\Support\Collection<int, \Illuminate\Database\DatabaseTransactionRecord>|array{})
      */
     public function commit($connection, $levelBeingCommitted, $newTransactionLevel)
     {
@@ -158,11 +160,17 @@ class DatabaseTransactionsManager
      */
     protected function removeAllTransactionsForConnection($connection)
     {
-        if ($this->currentTransaction) {
-            for ($currentTransaction = $this->currentTransaction[$connection]; isset($currentTransaction); $currentTransaction = $currentTransaction->parent) {
-                $currentTransaction->executeCallbacksForRollback();
-            }
+        $transactions = $this->committedTransactions->filter(
+            fn ($transaction) => $transaction->connection == $connection
+        );
+
+        for ($transaction = $this->currentTransaction[$connection] ?? null; isset($transaction); $transaction = $transaction->parent) {
+            $transactions->push($transaction);
         }
+
+        $transactions
+            ->sortByDesc(fn ($transaction) => $transaction->level)
+            ->each(fn ($transaction) => $transaction->executeCallbacksForRollback());
 
         $this->currentTransaction[$connection] = null;
 
@@ -194,6 +202,8 @@ class DatabaseTransactionsManager
         $removedTransactions->each(
             fn ($transaction) => $this->removeCommittedTransactionsThatAreChildrenOf($transaction)
         );
+
+        $removedTransactions->each(fn ($transaction) => $transaction->executeCallbacksForRollback());
     }
 
     /**
@@ -248,7 +258,7 @@ class DatabaseTransactionsManager
     /**
      * Get all of the pending transactions.
      *
-     * @return \Illuminate\Support\Collection
+     * @return \Illuminate\Support\Collection<int, \Illuminate\Database\DatabaseTransactionRecord>
      */
     public function getPendingTransactions()
     {
@@ -258,7 +268,7 @@ class DatabaseTransactionsManager
     /**
      * Get all of the committed transactions.
      *
-     * @return \Illuminate\Support\Collection
+     * @return \Illuminate\Support\Collection<int, \Illuminate\Database\DatabaseTransactionRecord>
      */
     public function getCommittedTransactions()
     {

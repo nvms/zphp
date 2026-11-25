@@ -41,13 +41,13 @@ class Uuid extends AbstractUid
         $type = preg_match('{^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$}Di', $uuid) ? (int) $uuid[14] : false;
 
         if (false === $type || (static::TYPE ?: $type) !== $type) {
-            throw new InvalidArgumentException(\sprintf('Invalid UUID%s.', static::TYPE ? 'v'.static::TYPE : ''));
+            throw new InvalidArgumentException(\sprintf('Invalid UUID%s.', static::TYPE ? 'v'.static::TYPE : ''), $uuid);
         }
 
         $this->uid = strtolower($uuid);
 
         if ($checkVariant && !\in_array($this->uid[19], ['8', '9', 'a', 'b'], true)) {
-            throw new InvalidArgumentException(\sprintf('Invalid UUID%s.', static::TYPE ? 'v'.static::TYPE : ''));
+            throw new InvalidArgumentException(\sprintf('Invalid UUID%s.', static::TYPE ? 'v'.static::TYPE : ''), $uuid);
         }
     }
 
@@ -167,15 +167,6 @@ class Uuid extends AbstractUid
     public function toRfc4122(): string
     {
         return $this->uid;
-    }
-
-    public function compare(AbstractUid $other): int
-    {
-        if (false !== $cmp = uuid_compare($this->uid, $other->uid)) {
-            return $cmp;
-        }
-
-        return parent::compare($other);
     }
 
     private static function format(string $uuid, string $version): string

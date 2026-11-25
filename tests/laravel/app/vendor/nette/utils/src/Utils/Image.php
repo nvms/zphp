@@ -1,17 +1,14 @@
-<?php
+<?php declare(strict_types=1);
 
 /**
  * This file is part of the Nette Framework (https://nette.org)
  * Copyright (c) 2004 David Grudl (https://davidgrudl.com)
  */
 
-declare(strict_types=1);
-
 namespace Nette\Utils;
 
 use Nette;
-use function is_array, is_int, is_string;
-use const IMG_BMP, IMG_FLIP_BOTH, IMG_FLIP_HORIZONTAL, IMG_FLIP_VERTICAL, IMG_GIF, IMG_JPG, IMG_PNG, IMG_WEBP, PATHINFO_EXTENSION;
+use function extension_loaded, is_array, is_int, is_string;
 
 
 /**
@@ -138,7 +135,11 @@ class Image
 
 	public const EmptyGIF = "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
 
-	private const Formats = [ImageType::JPEG => 'jpeg', ImageType::PNG => 'png', ImageType::GIF => 'gif', ImageType::WEBP => 'webp', ImageType::AVIF => 'avif', ImageType::BMP => 'bmp'];
+	private const Formats = [
+		ImageType::JPEG => 'jpeg', ImageType::PNG => 'png', ImageType::GIF => 'gif', ImageType::WEBP => 'webp', ImageType::AVIF => 'avif',
+		ImageType::BMP => 'bmp',
+	];
+	private const Sentinel = "\0";
 
 	private \GdImage $image;
 
@@ -160,11 +161,13 @@ class Image
 
 
 	/**
-	 * Reads an image from a file and returns its type in $type.
+	 * Reads an image from a file and returns its type in $type. If $warnings is passed, recoverable decoder
+	 * warnings are returned in it instead of being raised as a PHP warning.
+	 * @param-out ?string  $warnings
 	 * @throws Nette\NotSupportedException if gd extension is not loaded
 	 * @throws UnknownImageFileException if file not found or file type is not known
 	 */
-	public static function fromFile(string $file, ?int &$type = null): static
+	public static function fromFile(string $file, ?int &$type = null, ?string &$warnings = self::Sentinel): static
 	{
 		self::ensureExtension();
 		$type = self::detectTypeFromFile($file);
@@ -172,16 +175,18 @@ class Image
 			throw new UnknownImageFileException(is_file($file) ? "Unknown type of file '$file'." : "File '$file' not found.");
 		}
 
-		return self::invokeSafe('imagecreatefrom' . self::Formats[$type], $file, "Unable to open file '$file'.", __METHOD__);
+		return self::invokeSafe('imagecreatefrom' . self::Formats[$type], $file, "Unable to open file '$file'.", __METHOD__, $warnings);
 	}
 
 
 	/**
-	 * Reads an image from a string and returns its type in $type.
+	 * Reads an image from a string and returns its type in $type. If $warnings is passed, recoverable decoder
+	 * warnings are returned in it instead of being raised as a PHP warning.
+	 * @param-out ?string  $warnings
 	 * @throws Nette\NotSupportedException if gd extension is not loaded
 	 * @throws ImageException
 	 */
-	public static function fromString(string $s, ?int &$type = null): static
+	public static function fromString(string $s, ?int &$type = null, ?string &$warnings = self::Sentinel): static
 	{
 		self::ensureExtension();
 		$type = self::detectTypeFromString($s);
@@ -189,22 +194,31 @@ class Image
 			throw new UnknownImageFileException('Unknown type of image.');
 		}
 
-		return self::invokeSafe('imagecreatefromstring', $s, 'Unable to open image from string.', __METHOD__);
+		return self::invokeSafe('imagecreatefromstring', $s, 'Unable to open image from string.', __METHOD__, $warnings);
 	}
 
 
 	/** @param  callable-string  $func */
-	private static function invokeSafe(string $func, string $arg, string $message, string $callee): static
+	private static function invokeSafe(
+		string $func,
+		string $arg,
+		string $message,
+		string $callee,
+		?string &$warnings = self::Sentinel,
+	): static
 	{
 		$errors = [];
 		$res = Callback::invokeSafe($func, [$arg], function (string $message) use (&$errors): void {
 			$errors[] = $message;
 		});
 
+		$raiseWarning = $warnings === self::Sentinel;
+		$warnings = $errors ? implode(', ', $errors) : null;
+
 		if (!$res) {
-			throw new ImageException($message . ' Errors: ' . implode(', ', $errors));
-		} elseif ($errors) {
-			trigger_error($callee . '(): ' . implode(', ', $errors), E_USER_WARNING);
+			throw new ImageException($message . ' Errors: ' . $warnings);
+		} elseif ($errors && $raiseWarning) {
+			trigger_error($callee . '(): ' . $warnings, E_USER_WARNING);
 		}
 
 		return new static($res);
@@ -304,6 +318,7 @@ class Image
 
 
 	/**
+	 * Checks whether the given image type is supported by the GD extension.
 	 * @param  ImageType::*  $type
 	 */
 	public static function isTypeSupported(int $type): bool
@@ -314,14 +329,17 @@ class Image
 			ImageType::PNG => IMG_PNG,
 			ImageType::GIF => IMG_GIF,
 			ImageType::WEBP => IMG_WEBP,
-			ImageType::AVIF => 256, // IMG_AVIF,
+			ImageType::AVIF => IMG_AVIF,
 			ImageType::BMP => IMG_BMP,
 			default => 0,
 		});
 	}
 
 
-	/** @return  ImageType::*[] */
+	/**
+	 * Returns list of image types supported by the GD extension.
+	 * @return  ImageType::*[]
+	 */
 	public static function getSupportedTypes(): array
 	{
 		self::ensureExtension();
@@ -331,7 +349,7 @@ class Image
 			$flag & IMG_JPG ? ImageType::JPEG : null,
 			$flag & IMG_PNG ? ImageType::PNG : null,
 			$flag & IMG_WEBP ? ImageType::WEBP : null,
-			$flag & 256 ? ImageType::AVIF : null, // IMG_AVIF
+			$flag & IMG_AVIF ? ImageType::AVIF : null,
 			$flag & IMG_BMP ? ImageType::BMP : null,
 		]);
 	}
@@ -597,9 +615,9 @@ class Image
 
 			for ($x = 0; $x < $width; $x++) {
 				for ($y = 0; $y < $height; $y++) {
-					$c = \imagecolorat($input, $x, $y);
+					$c = imagecolorat($input, $x, $y);
 					$c = ($c & 0xFFFFFF) + ($tbl[$c >> 24] << 24);
-					\imagesetpixel($output, $x, $y, $c);
+					imagesetpixel($output, $x, $y, $c);
 				}
 			}
 
@@ -645,7 +663,7 @@ class Image
 
 
 	/**
-	 * Draw a rectangle.
+	 * Draws a rectangle using top-left coordinates and dimensions instead of two corner coordinates.
 	 */
 	public function rectangleWH(int $x, int $y, int $width, int $height, ImageColor $color): void
 	{
@@ -656,7 +674,7 @@ class Image
 
 
 	/**
-	 * Draw a filled rectangle.
+	 * Draws a filled rectangle using top-left coordinates and dimensions instead of two corner coordinates.
 	 */
 	public function filledRectangleWH(int $x, int $y, int $width, int $height, ImageColor $color): void
 	{
@@ -667,7 +685,7 @@ class Image
 
 
 	/**
-	 * Saves image to the file. Quality is in the range 0..100 for JPEG (default 85), WEBP (default 80) and AVIF (default 30) and 0..9 for PNG (default 9).
+	 * Saves image to the file. Quality is 0..100 for JPEG (default 85), WEBP (default 80) and AVIF (default 30), 0..9 for PNG (default 9).
 	 * @param  ?ImageType::*  $type
 	 * @throws ImageException
 	 */
@@ -679,7 +697,7 @@ class Image
 
 
 	/**
-	 * Outputs image to string. Quality is in the range 0..100 for JPEG (default 85), WEBP (default 80) and AVIF (default 30) and 0..9 for PNG (default 9).
+	 * Outputs image to string. Quality is 0..100 for JPEG (default 85), WEBP (default 80) and AVIF (default 30), 0..9 for PNG (default 9).
 	 * @param  ImageType::*  $type
 	 */
 	public function toString(int $type = ImageType::JPEG, ?int $quality = null): string
@@ -700,7 +718,7 @@ class Image
 
 
 	/**
-	 * Outputs image to browser. Quality is in the range 0..100 for JPEG (default 85), WEBP (default 80) and AVIF (default 30) and 0..9 for PNG (default 9).
+	 * Outputs image to browser. Quality is 0..100 for JPEG (default 85), WEBP (default 80) and AVIF (default 30), 0..9 for PNG (default 9).
 	 * @param  ImageType::*  $type
 	 * @throws ImageException
 	 */
@@ -735,7 +753,7 @@ class Image
 
 		Callback::invokeSafe('image' . self::Formats[$type], $args, function (string $message) use ($file): void {
 			if ($file !== null) {
-				@unlink($file);
+				@unlink($file); // @ file may not exist
 			}
 			throw new ImageException($message);
 		});
@@ -804,6 +822,7 @@ class Image
 
 
 	/**
+	 * Resolves a color to a GD color index for the current image.
 	 * @param  ImageColor|array{red: int, green: int, blue: int, alpha?: int}  $color
 	 */
 	public function resolveColor(ImageColor|array $color): int

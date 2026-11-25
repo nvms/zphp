@@ -493,10 +493,22 @@ trait HasRelationships
      *
      * @param  string  $class
      * @return string
+     *
+     * @throws \Illuminate\Database\ClassMorphViolationException
      */
     public static function getActualClassNameForMorph($class)
     {
-        return Arr::get(Relation::morphMap() ?: [], $class, $class);
+        $morphMap = Relation::morphMap() ?: [];
+
+        if (array_key_exists($class, $morphMap)) {
+            return $morphMap[$class];
+        }
+
+        if (Relation::requiresMorphMap()) {
+            throw new ClassMorphViolationException($class);
+        }
+
+        return $class;
     }
 
     /**
@@ -678,15 +690,17 @@ trait HasRelationships
      * Define a many-to-many relationship.
      *
      * @template TRelatedModel of \Illuminate\Database\Eloquent\Model
+     * @template TPivotModel of \Illuminate\Database\Eloquent\Relations\Pivot = \Illuminate\Database\Eloquent\Relations\Pivot
+     * @template TPivotTable of string|null
      *
      * @param  class-string<TRelatedModel>  $related
-     * @param  string|class-string<\Illuminate\Database\Eloquent\Model>|null  $table
+     * @param  class-string<TPivotModel>|TPivotTable  $table
      * @param  string|null  $foreignPivotKey
      * @param  string|null  $relatedPivotKey
      * @param  string|null  $parentKey
      * @param  string|null  $relatedKey
      * @param  string|null  $relation
-     * @return \Illuminate\Database\Eloquent\Relations\BelongsToMany<TRelatedModel, $this, \Illuminate\Database\Eloquent\Relations\Pivot>
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsToMany<TRelatedModel, $this, TPivotModel>
      */
     public function belongsToMany(
         $related,

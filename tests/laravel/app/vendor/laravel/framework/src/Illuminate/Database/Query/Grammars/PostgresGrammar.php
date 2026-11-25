@@ -111,7 +111,7 @@ class PostgresGrammar extends Grammar
         $column = $this->wrap($where['column']);
         $value = $this->parameter($where['value']);
 
-        if ($this->isJsonSelector($where['column'])) {
+        if ($this->isJsonSelector($column)) {
             $column = '('.$column.')';
         }
 
@@ -130,7 +130,7 @@ class PostgresGrammar extends Grammar
         $column = $this->wrap($where['column']);
         $value = $this->parameter($where['value']);
 
-        if ($this->isJsonSelector($where['column'])) {
+        if ($this->isJsonSelector($column)) {
             $column = '('.$column.')';
         }
 
@@ -202,12 +202,19 @@ class PostgresGrammar extends Grammar
         return [
             'simple',
             'arabic',
+            'armenian',
+            'basque',
+            'catalan',
             'danish',
             'dutch',
             'english',
+            'esperanto',
+            'estonian',
             'finnish',
             'french',
             'german',
+            'greek',
+            'hindi',
             'hungarian',
             'indonesian',
             'irish',
@@ -215,14 +222,38 @@ class PostgresGrammar extends Grammar
             'lithuanian',
             'nepali',
             'norwegian',
+            'polish',
             'portuguese',
             'romanian',
             'russian',
+            'serbian',
             'spanish',
             'swedish',
             'tamil',
             'turkish',
+            'yiddish',
         ];
+    }
+
+    /**
+     * Compile a vector distance expression for the given column.
+     *
+     * @param  string  $column
+     * @return string
+     */
+    public function compileVectorDistanceExpression($column)
+    {
+        return "({$this->wrap($column)} <=> ?)";
+    }
+
+    /**
+     * Determine if the grammar supports vector distance queries.
+     *
+     * @return bool
+     */
+    public function supportsVectorDistance()
+    {
+        return true;
     }
 
     /**
@@ -359,6 +390,16 @@ class PostgresGrammar extends Grammar
         }
 
         return $value;
+    }
+
+    /**
+     * Get the lock value for updating rows without blocking foreign key checks.
+     *
+     * @return string
+     */
+    public function getNoKeyUpdateLock()
+    {
+        return 'for no key update';
     }
 
     /**
@@ -780,9 +821,17 @@ class PostgresGrammar extends Grammar
             ->map(fn ($attribute) => $this->parseJsonPathArrayKeys($attribute))
             ->collapse()
             ->map(function ($attribute) use ($quote) {
-                return filter_var($attribute, FILTER_VALIDATE_INT) !== false
-                    ? $attribute
-                    : $quote.$attribute.$quote;
+                if (filter_var($attribute, FILTER_VALIDATE_INT) !== false) {
+                    return $attribute;
+                }
+
+                $attribute = str_replace("'", "''", $attribute);
+
+                if ($quote !== "'") {
+                    $attribute = str_replace($quote, $quote.$quote, $attribute);
+                }
+
+                return $quote.$attribute.$quote;
             })
             ->all();
     }

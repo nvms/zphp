@@ -3,6 +3,7 @@
 namespace Illuminate\Http\Concerns;
 
 use Illuminate\Http\UploadedFile;
+use Illuminate\Image\Image;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Fluent;
 use Illuminate\Support\Traits\Dumpable;
@@ -85,7 +86,9 @@ trait InteractsWithInput
      */
     public function all($keys = null)
     {
-        $input = array_replace_recursive($this->input(), $this->allFiles());
+        $input = $this->input();
+
+        $input = $this->mergeFilesWithInput($input, $this->allFiles());
 
         if (! $keys) {
             return $input;
@@ -98,6 +101,35 @@ trait InteractsWithInput
         }
 
         return $results;
+    }
+
+    /**
+     * Recursively merge files into input, keeping non-empty input values
+     * but allowing empty input values to be replaced by files.
+     *
+     * @param  array  $input
+     * @param  array  $files
+     * @return array
+     */
+    protected function mergeFilesWithInput($input, $files)
+    {
+        foreach ($files as $key => $value) {
+            if (isset($input[$key])) {
+                $inputValue = $input[$key];
+                // If input value is blank (empty, null, etc.),
+                // let the file win. Otherwise keep the input value.
+                if (blank($inputValue)) {
+                    $input[$key] = $value;
+                } elseif (is_array($inputValue) && is_array($value)) {
+                    // Recursively merge nested arrays
+                    $input[$key] = $this->mergeFilesWithInput($inputValue, $value);
+                }
+            } else {
+                $input[$key] = $value;
+            }
+        }
+
+        return $input;
     }
 
     /**
@@ -184,7 +216,7 @@ trait InteractsWithInput
     {
         $files = $this->files->all();
 
-        return $this->convertedFiles = $this->convertedFiles ?? $this->convertUploadedFiles($files);
+        return $this->convertedFiles ??= $this->convertUploadedFiles($files);
     }
 
     /**
@@ -218,13 +250,7 @@ trait InteractsWithInput
             $files = [$files];
         }
 
-        foreach ($files as $file) {
-            if ($this->isValidFile($file)) {
-                return true;
-            }
-        }
-
-        return false;
+        return array_any($files, fn ($file) => $this->isValidFile($file));
     }
 
     /**
@@ -248,6 +274,20 @@ trait InteractsWithInput
     public function file($key = null, $default = null)
     {
         return data_get($this->allFiles(), $key, $default);
+    }
+
+    /**
+     * Retrieve a file from the request as an image instance.
+     */
+    public function image(string $key): ?Image
+    {
+        $file = $this->file($key);
+
+        if (! $file instanceof UploadedFile) {
+            return null;
+        }
+
+        return new Image(fn () => $file->getContent(), $file);
     }
 
     /**
@@ -293,7 +333,7 @@ trait InteractsWithInput
     {
         $keys = is_array($keys) ? $keys : func_get_args();
 
-        dump(count($keys) > 0 ? $this->only($keys) : $this->all());
+        dump($keys !== [] ? $this->only($keys) : $this->all());
 
         return $this;
     }

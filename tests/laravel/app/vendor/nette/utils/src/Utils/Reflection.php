@@ -1,17 +1,14 @@
-<?php
+<?php declare(strict_types=1);
 
 /**
  * This file is part of the Nette Framework (https://nette.org)
  * Copyright (c) 2004 David Grudl (https://davidgrudl.com)
  */
 
-declare(strict_types=1);
-
 namespace Nette\Utils;
 
 use Nette;
-use function constant, current, defined, end, explode, file_get_contents, implode, ltrim, next, ord, strrchr, strtolower, substr;
-use const T_AS, T_CLASS, T_COMMENT, T_CURLY_OPEN, T_DOC_COMMENT, T_DOLLAR_OPEN_CURLY_BRACES, T_ENUM, T_INTERFACE, T_NAME_FULLY_QUALIFIED, T_NAME_QUALIFIED, T_NAMESPACE, T_NS_SEPARATOR, T_STRING, T_TRAIT, T_USE, T_WHITESPACE, TOKEN_PARSE;
+use function ord;
 
 
 /**
@@ -35,6 +32,10 @@ final class Reflection
 	}
 
 
+	/**
+	 * Returns the default value of a parameter. Resolves constants and class constants used as default values.
+	 * @throws \ReflectionException if the constant cannot be resolved
+	 */
 	public static function getParameterDefaultValue(\ReflectionParameter $param): mixed
 	{
 		if ($param->isDefaultValueConstant()) {
@@ -131,6 +132,9 @@ final class Reflection
 	}
 
 
+	/**
+	 * Returns a human-readable string representation of a reflection object.
+	 */
 	public static function toString(\Reflector $ref): string
 	{
 		if ($ref instanceof \ReflectionClass) {
@@ -192,8 +196,9 @@ final class Reflection
 
 
 	/**
+	 * Returns the use statements from the file where the class is defined.
 	 * @param  \ReflectionClass<object>  $class
-	 * @return array<string, class-string> of [alias => class]
+	 * @return array<string, class-string>  Map of alias to fully qualified class name
 	 */
 	public static function getUseStatements(\ReflectionClass $class): array
 	{
@@ -224,7 +229,7 @@ final class Reflection
 		try {
 			$tokens = \PhpToken::tokenize($code, TOKEN_PARSE);
 		} catch (\ParseError $e) {
-			trigger_error($e->getMessage(), E_USER_NOTICE);
+			trigger_error($e->getMessage());
 			$tokens = [];
 		}
 

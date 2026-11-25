@@ -85,6 +85,28 @@ trait InteractsWithQueue
     }
 
     /**
+     * Release the job back into the queue using its backoff for the current attempt.
+     *
+     * @return void
+     */
+    public function releaseUsingBackoff()
+    {
+        if (! $this->job) {
+            return;
+        }
+
+        $backoff = method_exists($this->job, 'backoff') ? $this->job->backoff() : null;
+
+        if (is_null($backoff)) {
+            return $this->release();
+        }
+
+        $backoff = explode(',', (string) $backoff);
+
+        return $this->release((int) ($backoff[$this->attempts() - 1] ?? end($backoff)));
+    }
+
+    /**
      * Indicate that queue interactions like fail, delete, and release should be faked.
      *
      * @return $this
@@ -122,8 +144,8 @@ trait InteractsWithQueue
     {
         $this->ensureQueueInteractionsHaveBeenFaked();
 
-        PHPUnit::assertTrue(
-            ! $this->job->isDeleted(),
+        PHPUnit::assertFalse(
+            $this->job->isDeleted(),
             'Job was unexpectedly deleted.'
         );
 
@@ -202,8 +224,8 @@ trait InteractsWithQueue
     {
         $this->ensureQueueInteractionsHaveBeenFaked();
 
-        PHPUnit::assertTrue(
-            ! $this->job->hasFailed(),
+        PHPUnit::assertFalse(
+            $this->job->hasFailed(),
             'Job was unexpectedly failed manually.'
         );
 
@@ -249,8 +271,8 @@ trait InteractsWithQueue
     {
         $this->ensureQueueInteractionsHaveBeenFaked();
 
-        PHPUnit::assertTrue(
-            ! $this->job->isReleased(),
+        PHPUnit::assertFalse(
+            $this->job->isReleased(),
             'Job was unexpectedly released.'
         );
 

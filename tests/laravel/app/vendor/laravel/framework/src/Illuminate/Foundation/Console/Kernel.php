@@ -14,6 +14,7 @@ use Illuminate\Contracts\Console\Kernel as KernelContract;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Foundation\CloudBootstrapper;
 use Illuminate\Foundation\Events\Terminating;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
@@ -26,6 +27,7 @@ use SplFileInfo;
 use Symfony\Component\Console\ConsoleEvents;
 use Symfony\Component\Console\Event\ConsoleCommandEvent;
 use Symfony\Component\Console\Event\ConsoleTerminateEvent;
+use Symfony\Component\Console\Output\StreamOutput;
 use Symfony\Component\EventDispatcher\EventDispatcher;
 use Symfony\Component\Finder\Finder;
 use Throwable;
@@ -97,6 +99,13 @@ class Kernel implements KernelContract
      * @var array
      */
     protected $loadedPaths = [];
+
+    /**
+     * The commands registered through the "load" and "command" methods.
+     *
+     * @var array
+     */
+    protected $kernelCommands = [];
 
     /**
      * All of the registered command duration handlers.
@@ -195,6 +204,8 @@ class Kernel implements KernelContract
 
             $this->bootstrap();
 
+            $output = $this->cloudLogOutput() ?? $output;
+
             return $this->getArtisan()->run($input, $output);
         } catch (Throwable $e) {
             $this->reportException($e);
@@ -203,6 +214,22 @@ class Kernel implements KernelContract
 
             return 1;
         }
+    }
+
+    /**
+     * Get an output that writes to the Laravel Cloud log socket, if the command should log its output there.
+     *
+     * @return \Symfony\Component\Console\Output\StreamOutput|null
+     */
+    protected function cloudLogOutput()
+    {
+        if (! laravel_cloud() || ! ($_SERVER['__LARAVEL_CLOUD_LOG_OUTPUT'] ?? getenv('__LARAVEL_CLOUD_LOG_OUTPUT'))) {
+            return null;
+        }
+
+        $socket = @stream_socket_client(CloudBootstrapper::socket(), timeout: 2);
+
+        return $socket ? new StreamOutput($socket) : null;
     }
 
     /**
@@ -336,9 +363,7 @@ class Kernel implements KernelContract
     {
         $command = new ClosureCommand($signature, $callback);
 
-        Artisan::starting(function ($artisan) use ($command) {
-            $artisan->add($command);
-        });
+        $this->kernelCommands[] = $command;
 
         return $command;
     }
@@ -382,9 +407,7 @@ class Kernel implements KernelContract
         };
 
         foreach ($this->findCommands($paths)->filter($filterCommands) as $file) {
-            Artisan::starting(function ($artisan) use ($file, $possibleCommands) {
-                $artisan->resolve($possibleCommands[$file]);
-            });
+            $this->kernelCommands[] = $possibleCommands[$file];
         }
     }
 
@@ -457,6 +480,19 @@ class Kernel implements KernelContract
     public function queue($command, array $parameters = [])
     {
         return QueuedCommand::dispatch(func_get_args());
+    }
+
+    /**
+     * Get the registered command instance with the given name, if any.
+     *
+     * @param  string  $name
+     * @return \Symfony\Component\Console\Command\Command|null
+     */
+    public function findCommand($name)
+    {
+        $artisan = $this->getArtisan();
+
+        return $artisan->has($name) ? $artisan->get($name) : null;
     }
 
     /**
@@ -558,7 +594,7 @@ class Kernel implements KernelContract
     {
         if (is_null($this->artisan)) {
             $this->artisan = (new Artisan($this->app, $this->events, $this->app->version()))
-                ->resolveCommands($this->commands)
+                ->resolveCommands([...$this->kernelCommands, ...$this->commands])
                 ->setContainerCommandLoader();
 
             if ($this->symfonyDispatcher instanceof EventDispatcher) {

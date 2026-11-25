@@ -4,6 +4,8 @@ namespace Illuminate\Console\Scheduling;
 
 use Illuminate\Support\Reflector;
 
+use function Illuminate\Support\enum_value;
+
 trait ManagesAttributes
 {
     /**
@@ -23,7 +25,7 @@ trait ManagesAttributes
     /**
      * The timezone the date should be evaluated on.
      *
-     * @var \DateTimeZone|string
+     * @var \DateTimeZone|string|null
      */
     public $timezone;
 
@@ -112,6 +114,13 @@ trait ManagesAttributes
     public $description;
 
     /**
+     * The arbitrary attributes stored with the event.
+     *
+     * @var array<array-key, mixed>
+     */
+    public $attributes = [];
+
+    /**
      * Set which user the command should run as.
      *
      * @param  string  $user
@@ -127,12 +136,14 @@ trait ManagesAttributes
     /**
      * Limit the environments the command should run in.
      *
-     * @param  mixed  $environments
+     * @param  \UnitEnum|string|array  $environments
      * @return $this
      */
     public function environments($environments)
     {
-        $this->environments = is_array($environments) ? $environments : func_get_args();
+        $this->environments = array_map(
+            enum_value(...), is_array($environments) ? $environments : func_get_args()
+        );
 
         return $this;
     }
@@ -257,6 +268,19 @@ trait ManagesAttributes
     public function description($description)
     {
         $this->description = $description;
+
+        return $this;
+    }
+
+    /**
+     * Set arbitrary attributes to store with the event.
+     *
+     * @param  array<array-key, mixed>  $attributes
+     * @return $this
+     */
+    public function withAttributes($attributes)
+    {
+        $this->attributes = array_merge_recursive($this->attributes, $attributes);
 
         return $this;
     }

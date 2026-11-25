@@ -133,7 +133,7 @@ When a new **major** version is released (e.g. `1.6` -> `2.0`), the previous one
 
 ## 👷‍♀️ Contributing
 
-To report a security vulnerability, please use the [Tidelift security contact](https://tidelift.com/security). Tidelift will coordinate the fix and disclosure with us.
+To report a security vulnerability, please see our [security policy](.github/SECURITY.md).
 
 If you encounter a bug in the spec, please report it to the [CommonMark] project.  Any resulting fix will eventually be implemented in this project as well.
 
@@ -181,6 +181,7 @@ We'd also like to extend our sincere thanks the following sponsors who support o
  - [Tidelift](https://tidelift.com/subscription/pkg/packagist-league-commonmark?utm_source=packagist-league-commonmark&utm_medium=referral&utm_campaign=readme) for offering support to both the maintainers and end-users through their [professional support](https://tidelift.com/subscription/pkg/packagist-league-commonmark?utm_source=packagist-league-commonmark&utm_medium=referral&utm_campaign=readme) program
  - [Blackfire](https://www.blackfire.io/) for providing an Open-Source Profiler subscription
  - [JetBrains](https://www.jetbrains.com/) for supporting this project with complimentary [PhpStorm](https://www.jetbrains.com/phpstorm/) licenses
+ - [Anthropic](https://www.anthropic.com/) for providing complimentary access to Claude Max through their [Open Source Program](https://claude.com/contact-sales/claude-for-oss)
 
 Are you interested in sponsoring development of this project? See <https://www.colinodell.com/sponsor> for a list of ways to contribute.
 

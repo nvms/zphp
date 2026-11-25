@@ -46,13 +46,18 @@ class SyslogUdpHandler extends AbstractSyslogHandler
      * @param  int                       $port     Port number, or 0 if $host is a unix socket
      * @param  string|int                $facility Either one of the names of the keys in $this->facilities, or a LOG_* facility constant
      * @param  bool                      $bubble   Whether the messages that are handled can bubble up the stack or not
-     * @param  string                    $ident    Program name or tag for each log message.
-     * @param  int                       $rfc      RFC to format the message for.
+     * @param  string                    $ident     Program name or tag for each log message.
+     * @param  int                       $rfc       RFC to format the message for.
+     * @param  ?int                      $maxLength Maximum size in bytes of a single UDP datagram. Defaults to the
+     *                                              largest a UDP payload can theoretically be, which risks getting
+     *                                              silently truncated or dropped by routers/firewalls that reject
+     *                                              fragmented UDP packets; pass a value that fits within the path
+     *                                              MTU (eg. 1024) to avoid that.
      * @throws MissingExtensionException when there is no socket extension
      *
      * @phpstan-param self::RFC* $rfc
      */
-    public function __construct(string $host, int $port = 514, string|int $facility = LOG_USER, int|string|Level $level = Level::Debug, bool $bubble = true, string $ident = 'php', int $rfc = self::RFC5424)
+    public function __construct(string $host, int $port = 514, string|int $facility = LOG_USER, int|string|Level $level = Level::Debug, bool $bubble = true, string $ident = 'php', int $rfc = self::RFC5424, ?int $maxLength = null)
     {
         if (!\extension_loaded('sockets')) {
             throw new MissingExtensionException('The sockets extension is required to use the SyslogUdpHandler');
@@ -63,7 +68,7 @@ class SyslogUdpHandler extends AbstractSyslogHandler
         $this->ident = $ident;
         $this->rfc = $rfc;
 
-        $this->socket = new UdpSocket($host, $port);
+        $this->socket = new UdpSocket($host, $port, $maxLength);
     }
 
     protected function write(LogRecord $record): void
@@ -120,10 +125,13 @@ class SyslogUdpHandler extends AbstractSyslogHandler
         }
 
         if ($this->rfc === self::RFC3164) {
-            // see https://github.com/phpstan/phpstan/issues/5348
-            // @phpstan-ignore-next-line
-            $dateNew = $datetime->setTimezone(new \DateTimeZone('UTC'));
-            $date = $dateNew->format($this->dateFormats[$this->rfc]);
+            // RFC 3164 timestamps have no zone and receivers read them as local time, so they
+            // follow the record's timezone (the Logger's) instead of being converted to UTC
+            $date = $datetime->format($this->dateFormats[$this->rfc]);
+            // RFC 3164 pads a day of the month below 10 with a space, not a zero (e.g. "Aug  7")
+            if ($date[4] === '0') {
+                $date[4] = ' ';
+            }
 
             return "<$priority>" .
                 $date . " " .

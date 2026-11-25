@@ -12,6 +12,7 @@
 namespace Symfony\Component\CssSelector\XPath;
 
 use Symfony\Component\CssSelector\Exception\ExpressionErrorException;
+use Symfony\Component\CssSelector\Node\CombinedSelectorNode;
 use Symfony\Component\CssSelector\Node\FunctionNode;
 use Symfony\Component\CssSelector\Node\NodeInterface;
 use Symfony\Component\CssSelector\Node\SelectorNode;
@@ -44,6 +45,7 @@ class Translator implements TranslatorInterface
 
     private array $nodeTranslators = [];
     private array $combinationTranslators = [];
+    private array $relativeCombinationTranslators = [];
     private array $functionTranslators = [];
     private array $pseudoClassTranslators = [];
     private array $attributeMatchingTranslators = [];
@@ -58,6 +60,7 @@ class Translator implements TranslatorInterface
             ->registerExtension(new Extension\FunctionExtension())
             ->registerExtension(new Extension\PseudoClassExtension())
             ->registerExtension(new Extension\AttributeMatchingExtension())
+            ->registerExtension(new Extension\RelationExtension())
         ;
     }
 
@@ -119,6 +122,7 @@ class Translator implements TranslatorInterface
         $this->functionTranslators = array_merge($this->functionTranslators, $extension->getFunctionTranslators());
         $this->pseudoClassTranslators = array_merge($this->pseudoClassTranslators, $extension->getPseudoClassTranslators());
         $this->attributeMatchingTranslators = array_merge($this->attributeMatchingTranslators, $extension->getAttributeMatchingTranslators());
+        $this->relativeCombinationTranslators = array_merge($this->relativeCombinationTranslators, $extension->getRelativeCombinationTranslators());
 
         return $this;
     }
@@ -172,6 +176,15 @@ class Translator implements TranslatorInterface
     /**
      * @throws ExpressionErrorException
      */
+    public function addRelativeCombination(string $combiner, NodeInterface $xpath, NodeInterface $combinedXpath): XPathExpr
+    {
+        // [1] stops at the first match, which matters on sibling axes
+        return $this->nodeToXPath($xpath)->addCondition($this->relativeToXPath($combiner, $combinedXpath).'[1]');
+    }
+
+    /**
+     * @throws ExpressionErrorException
+     */
     public function addFunction(XPathExpr $xpath, FunctionNode $function): XPathExpr
     {
         if (!isset($this->functionTranslators[$function->getName()])) {
@@ -203,6 +216,36 @@ class Translator implements TranslatorInterface
         }
 
         return $this->attributeMatchingTranslators[$operator]($xpath, $attribute, $value);
+    }
+
+    /**
+     * Returns the path from the element that :has() applies to, to the subject of the relative selector.
+     *
+     * @throws ExpressionErrorException
+     */
+    private function relativeToXPath(string $combiner, NodeInterface $node): XPathExpr
+    {
+        if ($node instanceof SelectorNode) {
+            $node = $node->getTree();
+        }
+
+        if ($node instanceof CombinedSelectorNode) {
+            if (!isset($this->combinationTranslators[$node->getCombinator()])) {
+                throw new ExpressionErrorException(\sprintf('Combiner "%s" not supported.', $node->getCombinator()));
+            }
+
+            return $this->combinationTranslators[$node->getCombinator()]($this->relativeToXPath($combiner, $node->getSelector()), $this->nodeToXPath($node->getSubSelector()));
+        }
+
+        if (' ' === $combiner && 'Pseudo[Element[*]:scope]' === (string) $node) {
+            return new XPathExpr('', 'self::*');
+        }
+
+        if (!isset($this->relativeCombinationTranslators[$combiner])) {
+            throw new ExpressionErrorException(\sprintf('Combiner "%s" not supported.', $combiner));
+        }
+
+        return $this->relativeCombinationTranslators[$combiner](new XPathExpr('', ''), $this->nodeToXPath($node));
     }
 
     /**

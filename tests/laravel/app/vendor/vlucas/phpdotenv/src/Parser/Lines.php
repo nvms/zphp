@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Dotenv\Parser;
 
 use Dotenv\Util\Regex;
-use Dotenv\Util\Str;
 
 final class Lines
 {
@@ -37,45 +36,33 @@ final class Lines
         $multilineBuffer = [];
 
         foreach ($lines as $line) {
-            [$multiline, $line, $multilineBuffer] = self::multilineProcess($multiline, $line, $multilineBuffer);
+            $startsOnCurrentLine = $multiline ? false : self::looksLikeMultilineStart($line);
+
+            if ($startsOnCurrentLine) {
+                $multiline = true;
+            }
+
+            if ($multiline) {
+                $multilineBuffer[] = $line;
+
+                if (self::looksLikeMultilineStop($line, $startsOnCurrentLine)) {
+                    $multiline = false;
+                    $line = \implode("\n", $multilineBuffer);
+                    $multilineBuffer = [];
+                }
+            }
 
             if (!$multiline && !self::isCommentOrWhitespace($line)) {
                 $output[] = $line;
             }
         }
 
-        return $output;
-    }
-
-    /**
-     * Used to make all multiline variable process.
-     *
-     * @param bool     $multiline
-     * @param string   $line
-     * @param string[] $buffer
-     *
-     * @return array{bool,string, string[]}
-     */
-    private static function multilineProcess(bool $multiline, string $line, array $buffer)
-    {
-        $startsOnCurrentLine = $multiline ? false : self::looksLikeMultilineStart($line);
-
-        // check if $line can be multiline variable
-        if ($startsOnCurrentLine) {
-            $multiline = true;
-        }
-
+        // Emit an unterminated multiline value so the parser reports the missing quote.
         if ($multiline) {
-            \array_push($buffer, $line);
-
-            if (self::looksLikeMultilineStop($line, $startsOnCurrentLine)) {
-                $multiline = false;
-                $line = \implode("\n", $buffer);
-                $buffer = [];
-            }
+            $output[] = \implode("\n", $multilineBuffer);
         }
 
-        return [$multiline, $line, $buffer];
+        return $output;
     }
 
     /**
@@ -87,9 +74,19 @@ final class Lines
      */
     private static function looksLikeMultilineStart(string $line)
     {
-        return Str::pos($line, '="')->map(static function () use ($line) {
-            return self::looksLikeMultilineStop($line, true) === false;
-        })->getOrElse(false);
+        $pos = \strpos($line, '="');
+
+        if ($pos === false) {
+            return false;
+        }
+
+        $hash = \strpos($line, '#');
+
+        if ($hash !== false && $hash < $pos) {
+            return false;
+        }
+
+        return self::looksLikeMultilineStop($line, true) === false;
     }
 
     /**
@@ -102,11 +99,7 @@ final class Lines
      */
     private static function looksLikeMultilineStop(string $line, bool $started)
     {
-        if ($line === '"') {
-            return true;
-        }
-
-        return Regex::occurrences('/(?=([^\\\\]"))/', \str_replace('\\\\', '', $line))->map(static function (int $count) use ($started) {
+        return Regex::occurrences('/(?<!\\\\)"/', \str_replace('\\\\', '', $line))->map(static function (int $count) use ($started) {
             return $started ? $count > 1 : $count >= 1;
         })->success()->getOrElse(false);
     }
@@ -120,7 +113,7 @@ final class Lines
      */
     private static function isCommentOrWhitespace(string $line)
     {
-        $line = \trim($line);
+        $line = \trim($line, " \n\r\t\0\x0B");
 
         return $line === '' || (isset($line[0]) && $line[0] === '#');
     }

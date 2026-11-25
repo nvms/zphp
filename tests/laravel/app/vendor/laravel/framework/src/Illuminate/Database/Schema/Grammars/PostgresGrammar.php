@@ -4,8 +4,8 @@ namespace Illuminate\Database\Schema\Grammars;
 
 use Illuminate\Database\Query\Expression;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Fluent;
+use Illuminate\Support\Stringable;
 use LogicException;
 
 class PostgresGrammar extends Grammar
@@ -95,6 +95,7 @@ class PostgresGrammar extends Grammar
         return 'select c.relname as name, n.nspname as schema, pg_total_relation_size(c.oid) as size, '
             ."obj_description(c.oid, 'pg_class') as comment from pg_class c, pg_namespace n "
             ."where c.relkind in ('r', 'p') and n.oid = c.relnamespace and "
+            ."not exists (select 1 from pg_depend d where d.objid = c.oid and d.deptype = 'e') and "
             .$this->compileSchemaWhereClause($schema, 'n.nspname')
             .' order by n.nspname, c.relname';
     }
@@ -108,6 +109,7 @@ class PostgresGrammar extends Grammar
     public function compileViews($schema)
     {
         return 'select viewname as name, schemaname as schema, definition from pg_views where '
+            ."not exists (select 1 from pg_depend d where d.objid = format('%I.%I', schemaname, viewname)::regclass and d.deptype = 'e') and "
             .$this->compileSchemaWhereClause($schema, 'schemaname')
             .' order by schemaname, viewname';
     }
@@ -156,12 +158,16 @@ class PostgresGrammar extends Grammar
      */
     public function compileColumns($schema, $table)
     {
+        $serverVersion = $this->connection->getServerVersion();
+
         return sprintf(
             'select a.attname as name, t.typname as type_name, format_type(a.atttypid, a.atttypmod) as type, '
-            .'(select tc.collcollate from pg_catalog.pg_collation tc where tc.oid = a.attcollation) as collation, '
+            .(version_compare($serverVersion, '9.1', '<')
+                ? 'null as collation, '
+                : '(select tc.collcollate from pg_catalog.pg_collation tc where tc.oid = a.attcollation) as collation, ')
             .'not a.attnotnull as nullable, '
             .'(select pg_get_expr(adbin, adrelid) from pg_attrdef where c.oid = pg_attrdef.adrelid and pg_attrdef.adnum = a.attnum) as default, '
-            .(version_compare($this->connection->getServerVersion(), '12.0', '<') ? "'' as generated, " : 'a.attgenerated as generated, ')
+            .(version_compare($serverVersion, '12.0', '<') ? "'' as generated, " : 'a.attgenerated as generated, ')
             .'col_description(c.oid, a.attnum) as comment '
             .'from pg_attribute a, pg_class c, pg_type t, pg_namespace n '
             .'where c.relname = %s and n.nspname = %s and a.attnum > 0 and a.attrelid = c.oid and a.atttypid = t.oid and n.oid = c.relnamespace '
@@ -283,7 +289,7 @@ class PostgresGrammar extends Grammar
     {
         $column = $command->column;
 
-        $changes = ['type '.$this->getType($column).$this->modifyCollate($blueprint, $column)];
+        $changes = ['type '.$this->getType($column).$this->modifyCollate($blueprint, $column).($column->using ? ' using '.$column->using : '')];
 
         foreach ($this->modifiers as $modifier) {
             if ($modifier === 'Collate') {
@@ -622,7 +628,7 @@ class PostgresGrammar extends Grammar
      */
     public function compileDropIndex(Blueprint $blueprint, Fluent $command)
     {
-        return "drop index {$this->wrap($command->index)}";
+        return "drop index {$this->wrapIndex($blueprint, $command->index)}";
     }
 
     /**
@@ -645,6 +651,18 @@ class PostgresGrammar extends Grammar
      * @return string
      */
     public function compileDropSpatialIndex(Blueprint $blueprint, Fluent $command)
+    {
+        return $this->compileDropIndex($blueprint, $command);
+    }
+
+    /**
+     * Compile a drop vector index command.
+     *
+     * @param  \Illuminate\Database\Schema\Blueprint  $blueprint
+     * @param  \Illuminate\Support\Fluent  $command
+     * @return string
+     */
+    public function compileDropVectorIndex(Blueprint $blueprint, Fluent $command)
     {
         return $this->compileDropIndex($blueprint, $command);
     }
@@ -687,9 +705,25 @@ class PostgresGrammar extends Grammar
     public function compileRenameIndex(Blueprint $blueprint, Fluent $command)
     {
         return sprintf('alter index %s rename to %s',
-            $this->wrap($command->from),
+            $this->wrapIndex($blueprint, $command->from),
             $this->wrap($command->to)
         );
+    }
+
+    /**
+     * Wrap an index name, qualifying it with the schema of the blueprint's table.
+     *
+     * @param  \Illuminate\Database\Schema\Blueprint  $blueprint
+     * @param  string  $index
+     * @return string
+     */
+    protected function wrapIndex(Blueprint $blueprint, $index)
+    {
+        [$schema] = $this->connection->getSchemaBuilder()->parseSchemaAndTable($blueprint->getTable());
+
+        return $schema && ! str_contains($index, '.')
+            ? $this->wrapValue($schema).'.'.$this->wrap($index)
+            : $this->wrap($index);
     }
 
     /**
@@ -754,7 +788,7 @@ class PostgresGrammar extends Grammar
     public function escapeNames($names)
     {
         return array_map(
-            fn ($name) => (new Collection(explode('.', $name)))->map($this->wrapValue(...))->implode('.'),
+            fn ($name) => (new Stringable($name))->explode('.')->map($this->wrapValue(...))->implode('.'),
             $names
         );
     }

@@ -5,12 +5,14 @@ namespace Illuminate\Foundation\Testing\Concerns;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Application as Artisan;
 use Illuminate\Cookie\Middleware\EncryptCookies;
+use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Migrations\Migrator;
 use Illuminate\Foundation\Bootstrap\HandleExceptions;
 use Illuminate\Foundation\Bootstrap\RegisterProviders;
 use Illuminate\Foundation\Console\AboutCommand;
+use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull;
 use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
 use Illuminate\Foundation\Http\Middleware\PreventRequestsDuringMaintenance;
@@ -36,13 +38,16 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\EncodedHtmlString;
 use Illuminate\Support\Facades\Facade;
 use Illuminate\Support\Facades\ParallelTesting;
+use Illuminate\Support\Lottery;
 use Illuminate\Support\Once;
 use Illuminate\Support\Sleep;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Validator;
 use Illuminate\View\Component;
+use Laravel\Prompts\Prompt;
 use Mockery;
 use Mockery\Exception\InvalidCountException;
+use Mockery\LegacyMockInterface;
 use PHPUnit\Metadata\Annotation\Parser\Registry as PHPUnitRegistry;
 use ReflectionClass;
 use Throwable;
@@ -128,6 +133,8 @@ trait InteractsWithTestCaseLifecycle
 
             ParallelTesting::callTearDownTestCaseCallbacks($this);
 
+            $this->disconnectDatabaseConnections();
+
             $this->app->flush();
 
             $this->app = null;
@@ -176,6 +183,18 @@ trait InteractsWithTestCaseLifecycle
             $this->originalDeprecationHandler = null;
         }
 
+        $this->flushState();
+
+        if ($this->callbackException) {
+            throw $this->callbackException;
+        }
+    }
+
+    /**
+     * Reset static state between test executions.
+     */
+    protected function flushState(): void
+    {
         AboutCommand::flushState();
         Artisan::forgetBootstrappers();
         Component::flushCache();
@@ -183,16 +202,19 @@ trait InteractsWithTestCaseLifecycle
         Component::forgetFactory();
         ConvertEmptyStringsToNull::flushState();
         Factory::flushState();
+        FormRequest::flushState();
         EncodedHtmlString::flushState();
         EncryptCookies::flushState();
         HandleCors::flushState();
         HandleExceptions::flushState($this);
         JsonApiResource::flushState();
         JsonResource::flushState();
+        Lottery::determineResultsNormally();
         Markdown::flushState();
         Migrator::withoutMigrations([]);
         Once::flush();
         PreventRequestsDuringMaintenance::flushState();
+        Prompt::flushState();
         Queue::createPayloadUsing(null);
         RegisterProviders::flushState();
         Response::flushState();
@@ -204,9 +226,25 @@ trait InteractsWithTestCaseLifecycle
         PreventRequestForgery::flushState();
         Validator::flushState();
         WorkCommand::flushState();
+    }
 
-        if ($this->callbackException) {
-            throw $this->callbackException;
+    /**
+     * Disconnect every resolved database connection of the application.
+     */
+    protected function disconnectDatabaseConnections(): void
+    {
+        if (! $this->app->resolved('db')) {
+            return;
+        }
+
+        $database = $this->app->make('db');
+
+        if (! $database instanceof DatabaseManager || $database instanceof LegacyMockInterface) {
+            return;
+        }
+
+        foreach ($database->getConnections() as $connection) {
+            $connection->disconnect();
         }
     }
 
@@ -217,7 +255,7 @@ trait InteractsWithTestCaseLifecycle
      */
     protected function setUpTraits()
     {
-        $uses = $this->traitsUsedByTest ?? array_flip(class_uses_recursive(static::class));
+        $uses = $this->traitsUsedByTest ?? class_uses_recursive(static::class);
 
         if (isset($uses[RefreshDatabase::class])) {
             $this->refreshDatabase();

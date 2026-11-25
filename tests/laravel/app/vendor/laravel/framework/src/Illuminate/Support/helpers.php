@@ -5,6 +5,7 @@ use Illuminate\Contracts\Support\DeferringDisplayableValue;
 use Illuminate\Contracts\Support\Htmlable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Arr;
+use Illuminate\Support\EncodedHtmlString;
 use Illuminate\Support\Env;
 use Illuminate\Support\Fluent;
 use Illuminate\Support\HigherOrderTapProxy;
@@ -135,7 +136,7 @@ if (! function_exists('e')) {
             $value = $value->value;
         }
 
-        return htmlspecialchars($value ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8', $doubleEncode);
+        return (new EncodedHtmlString($value ?? '', $doubleEncode))->toHtml();
     }
 }
 
@@ -280,7 +281,7 @@ if (! function_exists('optional')) {
 
 if (! function_exists('preg_replace_array')) {
     /**
-     * Replace a given pattern with each value in the array in sequentially.
+     * Replace a given pattern with each value in the array sequentially.
      *
      * @param  string  $pattern
      * @param  array  $replacements
@@ -382,7 +383,7 @@ if (! function_exists('tap')) {
      *
      * @param  TValue  $value
      * @param  (callable(TValue): mixed)|null  $callback
-     * @return ($callback is null ? \Illuminate\Support\HigherOrderTapProxy : TValue)
+     * @return ($callback is null ? \Illuminate\Support\HigherOrderTapProxy<TValue> : TValue)
      */
     function tap($value, $callback = null)
     {

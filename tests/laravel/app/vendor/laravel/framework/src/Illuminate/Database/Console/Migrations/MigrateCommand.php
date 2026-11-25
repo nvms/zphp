@@ -32,6 +32,7 @@ class MigrateCommand extends BaseCommand implements Isolatable
                 {--path=* : The path(s) to the migrations files to be executed}
                 {--realpath : Indicate any provided migration file paths are pre-resolved absolute paths}
                 {--schema-path= : The path to a schema dump file}
+                {--schema-only : Only load the schema dump without running any migrations}
                 {--pretend : Dump the SQL queries that would be run}
                 {--seed : Indicates if the seed task should be re-run}
                 {--seeder= : The class name of the root seeder}
@@ -83,7 +84,7 @@ class MigrateCommand extends BaseCommand implements Isolatable
     public function handle()
     {
         if (! $this->confirmToProceed()) {
-            return 1;
+            return self::FAILURE;
         }
 
         try {
@@ -92,13 +93,13 @@ class MigrateCommand extends BaseCommand implements Isolatable
             if ($this->option('graceful')) {
                 $this->components->warn($e->getMessage());
 
-                return 0;
+                return self::SUCCESS;
             }
 
             throw $e;
         }
 
-        return 0;
+        return self::SUCCESS;
     }
 
     /**
@@ -114,11 +115,13 @@ class MigrateCommand extends BaseCommand implements Isolatable
             // Next, we will check to see if a path option has been defined. If it has
             // we will use the path relative to the root of this installation folder
             // so that migrations may be run for any path within the applications.
-            $this->migrator->setOutput($this->output)
-                ->run($this->getMigrationPaths(), [
-                    'pretend' => $this->option('pretend'),
-                    'step' => $this->option('step'),
-                ]);
+            if (! $this->option('schema-only')) {
+                $this->migrator->setOutput($this->output)
+                    ->run($this->getMigrationPaths(), [
+                        'pretend' => $this->option('pretend'),
+                        'step' => $this->option('step'),
+                    ]);
+            }
 
             // Finally, if the "seed" option has been given, we will re-run the database
             // seed task to re-populate the database, which is convenient when adding
@@ -145,7 +148,7 @@ class MigrateCommand extends BaseCommand implements Isolatable
             $this->components->task('Creating migration table', function () {
                 return $this->callSilent('migrate:install', array_filter([
                     '--database' => $this->option('database'),
-                ])) == 0;
+                ])) === 0;
             });
 
             $this->newLine();
@@ -192,7 +195,7 @@ class MigrateCommand extends BaseCommand implements Isolatable
 
         if (($e->getCode() === 1049 && in_array($connection->getDriverName(), ['mysql', 'mariadb'])) ||
             (($e->errorInfo[0] ?? null) == '08006' &&
-              $connection->getDriverName() == 'pgsql' &&
+              $connection->getDriverName() === 'pgsql' &&
               Str::contains($e->getMessage(), '"'.$connection->getDatabaseName().'"'))) {
             return $this->createMissingMySqlOrPgsqlDatabase($connection);
         }
@@ -239,7 +242,10 @@ class MigrateCommand extends BaseCommand implements Isolatable
      */
     protected function createMissingMySqlOrPgsqlDatabase($connection)
     {
-        if ($this->laravel['config']->get("database.connections.{$connection->getName()}.database") !== $connection->getDatabaseName()) {
+        $configKey = 'database.connections.'.Str::before($connection->getName(), '::');
+
+        if ($this->laravel['config']->get("{$configKey}.database") !==
+            $connection->getDatabaseName()) {
             return false;
         }
 
@@ -258,7 +264,7 @@ class MigrateCommand extends BaseCommand implements Isolatable
         }
         try {
             $this->laravel['config']->set(
-                "database.connections.{$connection->getName()}.database",
+                "{$configKey}.database",
                 match ($connection->getDriverName()) {
                     'mysql', 'mariadb' => null,
                     'pgsql' => 'postgres',
@@ -278,7 +284,7 @@ class MigrateCommand extends BaseCommand implements Isolatable
                 $this->laravel['db']->purge();
             });
         } finally {
-            $this->laravel['config']->set("database.connections.{$connection->getName()}.database", $connection->getDatabaseName());
+            $this->laravel['config']->set("{$configKey}.database", $connection->getDatabaseName());
         }
     }
 

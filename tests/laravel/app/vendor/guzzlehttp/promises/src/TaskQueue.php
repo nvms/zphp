@@ -17,11 +17,16 @@ namespace GuzzleHttp\Promise;
  */
 class TaskQueue implements TaskQueueInterface
 {
-    private $enableShutdown = true;
-    private $queue = [];
+    use NonSerializableTrait;
+
+    private bool $enableShutdown = true;
+    /** @var \SplQueue<callable(): void> */
+    private \SplQueue $queue;
 
     public function __construct(bool $withShutdown = true)
     {
+        $this->queue = new \SplQueue();
+
         if ($withShutdown) {
             register_shutdown_function(function (): void {
                 if ($this->enableShutdown) {
@@ -35,20 +40,28 @@ class TaskQueue implements TaskQueueInterface
         }
     }
 
-    public function isEmpty(): bool
+    public function __clone()
     {
-        return !$this->queue;
+        $this->queue = clone $this->queue;
     }
 
+    public function isEmpty(): bool
+    {
+        return $this->queue->isEmpty();
+    }
+
+    /**
+     * @param callable(): void $task
+     */
     public function add(callable $task): void
     {
-        $this->queue[] = $task;
+        $this->queue->enqueue($task);
     }
 
     public function run(): void
     {
-        while ($task = array_shift($this->queue)) {
-            /** @var callable $task */
+        while (!$this->queue->isEmpty()) {
+            $task = $this->queue->dequeue();
             $task();
         }
     }

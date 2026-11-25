@@ -7,6 +7,8 @@ use RuntimeException;
 
 class Spinner extends Prompt
 {
+    use Concerns\RendersAnimations;
+
     /**
      * How long to wait between rendering each frame.
      */
@@ -47,11 +49,13 @@ class Spinner extends Prompt
     {
         $this->capturePreviousNewLines();
 
-        if (! function_exists('pcntl_fork')) {
+        if ($this->shouldRenderStatically()) {
             return $this->renderStatically($callback);
         }
 
         $originalAsync = pcntl_async_signals(true);
+        /** @var callable|int $originalSignalHandler */
+        $originalSignalHandler = pcntl_signal_get_handler(SIGINT);
 
         pcntl_signal(SIGINT, fn () => exit());
 
@@ -72,12 +76,12 @@ class Spinner extends Prompt
             } else {
                 $result = $callback();
 
-                $this->resetTerminal($originalAsync);
+                $this->resetTerminal($originalAsync, $originalSignalHandler);
 
                 return $result;
             }
         } catch (\Throwable $e) {
-            $this->resetTerminal($originalAsync);
+            $this->resetTerminal($originalAsync, $originalSignalHandler);
 
             throw $e;
         }
@@ -86,10 +90,10 @@ class Spinner extends Prompt
     /**
      * Reset the terminal.
      */
-    protected function resetTerminal(bool $originalAsync): void
+    protected function resetTerminal(bool $originalAsync, callable|int $originalSignalHandler = SIG_DFL): void
     {
         pcntl_async_signals($originalAsync);
-        pcntl_signal(SIGINT, SIG_DFL);
+        pcntl_signal(SIGINT, $originalSignalHandler);
 
         $this->eraseRenderedLines();
     }
@@ -153,6 +157,10 @@ class Spinner extends Prompt
     {
         if (! empty($this->pid)) {
             posix_kill($this->pid, SIGHUP);
+            pcntl_waitpid($this->pid, $status);
+
+            // The render loop may have been killed mid-frame, so end any open synchronized update...
+            static::writeDirectly("\e[?2026l");
         }
 
         parent::__destruct();

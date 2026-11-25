@@ -7,14 +7,46 @@ use Illuminate\JsonSchema\Types\Type;
 
 /**
  * @method static Types\ObjectType object(Closure|array<string, Types\Type> $properties = [])
+ * @method static Types\AnyOfType anyOf(Closure|array<int, Types\Type> $schemas)
  * @method static Types\IntegerType integer()
  * @method static Types\NumberType number()
  * @method static Types\StringType string()
  * @method static Types\BooleanType boolean()
  * @method static Types\ArrayType array()
+ * @method static Types\UnionType union(array<int, string> $types)
  */
 class JsonSchema
 {
+    /**
+     * The maximum number of schema fragments that may be expanded when deserializing or building rules.
+     */
+    public const MAX_NODES = 20000;
+
+    /**
+     * Build a type from a raw array of the Laravel-supported JSON Schema subset.
+     *
+     * @param  array<string, mixed>  $schema
+     *
+     * @throws \InvalidArgumentException
+     */
+    public static function fromArray(array $schema): Type
+    {
+        return Deserializer::deserialize($schema);
+    }
+
+    /**
+     * Get the Laravel validation rules for the properties of the given object schema.
+     *
+     * @param  \Illuminate\JsonSchema\Types\Type|array<string, mixed>  $schema
+     * @return array<string, array<int, mixed>>
+     *
+     * @throws \InvalidArgumentException
+     */
+    public static function rules(Type|array $schema): array
+    {
+        return ValidationRules::for($schema);
+    }
+
     /**
      * Dynamically pass static methods to the schema instance.
      */

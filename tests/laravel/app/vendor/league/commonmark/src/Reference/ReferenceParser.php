@@ -76,6 +76,11 @@ final class ReferenceParser
      */
     public function getReferences(): iterable
     {
+        if ($this->referenceValid && $this->state === self::TITLE) {
+            // The title was never closed, so the definition has no title
+            $this->title = '';
+        }
+
         $this->finishReference();
 
         return $this->references;
@@ -217,6 +222,10 @@ final class ReferenceParser
         } elseif ($advanced === 0) {
             // spec: The title must be separated from the link destination by whitespace
             return false;
+        } elseif (! \in_array($cursor->getCurrentCharacter(), ['"', "'", '('], true)) {
+            // Other text after the destination on the same line, so this is not a link reference definition
+            // (and not the start of another one either)
+            return false;
         }
 
         $this->state = self::START_TITLE;
@@ -268,7 +277,9 @@ final class ReferenceParser
         $title = LinkParserHelper::parsePartialLinkTitle($cursor, $this->titleDelimiter);
 
         if ($title === null) {
-            // Invalid title, stop
+            // Invalid title, stop. The title collected so far must not be used.
+            $this->title = '';
+
             return false;
         }
 
@@ -293,6 +304,9 @@ final class ReferenceParser
         $cursor->advanceToNextNonSpaceOrTab();
         if (! $cursor->isAtEnd()) {
             // spec: No further non-whitespace characters may occur on the line.
+            // The title collected so far must not be used.
+            $this->title = '';
+
             return false;
         }
 

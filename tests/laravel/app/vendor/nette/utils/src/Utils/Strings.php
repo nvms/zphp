@@ -1,18 +1,16 @@
-<?php
+<?php declare(strict_types=1);
 
 /**
  * This file is part of the Nette Framework (https://nette.org)
  * Copyright (c) 2004 David Grudl (https://davidgrudl.com)
  */
 
-declare(strict_types=1);
-
 namespace Nette\Utils;
 
 use JetBrains\PhpStorm\Language;
 use Nette;
-use function array_keys, array_map, array_shift, array_values, bin2hex, class_exists, defined, extension_loaded, function_exists, htmlspecialchars, htmlspecialchars_decode, iconv, iconv_strlen, iconv_substr, implode, in_array, is_array, is_callable, is_int, is_object, is_string, key, max, mb_convert_case, mb_strlen, mb_strtolower, mb_strtoupper, mb_substr, pack, preg_last_error, preg_last_error_msg, preg_quote, preg_replace, str_contains, str_ends_with, str_repeat, str_replace, str_starts_with, strlen, strpos, strrev, strrpos, strtolower, strtoupper, strtr, substr, trim, unpack, utf8_decode;
-use const ENT_IGNORE, ENT_NOQUOTES, ICONV_IMPL, MB_CASE_TITLE, PHP_EOL, PREG_OFFSET_CAPTURE, PREG_PATTERN_ORDER, PREG_SET_ORDER, PREG_SPLIT_DELIM_CAPTURE, PREG_SPLIT_NO_EMPTY, PREG_SPLIT_OFFSET_CAPTURE, PREG_UNMATCHED_AS_NULL;
+use function defined, extension_loaded, function_exists, in_array, is_array, is_int, is_object, is_string, strlen;
+use const ENT_IGNORE, ENT_NOQUOTES;
 
 
 /**
@@ -137,7 +135,7 @@ class Strings
 	public static function normalize(string $s): string
 	{
 		// convert to compressed normal form (NFC)
-		if (class_exists('Normalizer', autoload: false) && ($n = \Normalizer::normalize($s, \Normalizer::FORM_C)) !== false) {
+		if (class_exists(\Normalizer::class, false) && ($n = \Normalizer::normalize($s, \Normalizer::FORM_C)) !== false) {
 			$s = $n;
 		}
 
@@ -198,9 +196,18 @@ class Strings
 		$s = self::pcre('preg_replace', ['#[^\x09\x0A\x0D\x20-\x7E\xA0-\x{2FF}\x{370}-\x{10FFFF}]#u', '', $s]);
 
 		// transliteration (by Transliterator and iconv) is not optimal, replace some characters directly
-		$s = strtr($s, ["\u{201E}" => '"', "\u{201C}" => '"', "\u{201D}" => '"', "\u{201A}" => "'", "\u{2018}" => "'", "\u{2019}" => "'", "\u{B0}" => '^', "\u{42F}" => 'Ya', "\u{44F}" => 'ya', "\u{42E}" => 'Yu', "\u{44E}" => 'yu', "\u{c4}" => 'Ae', "\u{d6}" => 'Oe', "\u{dc}" => 'Ue', "\u{1e9e}" => 'Ss', "\u{e4}" => 'ae', "\u{f6}" => 'oe', "\u{fc}" => 'ue', "\u{df}" => 'ss']); // „ “ ” ‚ ‘ ’ ° Я я Ю ю Ä Ö Ü ẞ ä ö ü ß
+		$s = strtr($s, [
+			"\u{201E}" => '"', "\u{201C}" => '"', "\u{201D}" => '"', "\u{201A}" => "'", "\u{2018}" => "'", "\u{2019}" => "'",
+			"\u{B0}" => '^', "\u{42F}" => 'Ya', "\u{44F}" => 'ya', "\u{42E}" => 'Yu', "\u{44E}" => 'yu', "\u{c4}" => 'Ae', "\u{d6}" => 'Oe',
+			"\u{dc}" => 'Ue', "\u{1e9e}" => 'Ss', "\u{e4}" => 'ae', "\u{f6}" => 'oe', "\u{fc}" => 'ue', "\u{df}" => 'ss',
+		]); // „ “ ” ‚ ‘ ’ ° Я я Ю ю Ä Ö Ü ẞ ä ö ü ß
 		if ($iconv !== 'libiconv') {
-			$s = strtr($s, ["\u{AE}" => '(R)', "\u{A9}" => '(c)', "\u{2026}" => '...', "\u{AB}" => '<<', "\u{BB}" => '>>', "\u{A3}" => 'lb', "\u{A5}" => 'yen', "\u{B2}" => '^2', "\u{B3}" => '^3', "\u{B5}" => 'u', "\u{B9}" => '^1', "\u{BA}" => 'o', "\u{BF}" => '?', "\u{2CA}" => "'", "\u{2CD}" => '_', "\u{2DD}" => '"', "\u{1FEF}" => '', "\u{20AC}" => 'EUR', "\u{2122}" => 'TM', "\u{212E}" => 'e', "\u{2190}" => '<-', "\u{2191}" => '^', "\u{2192}" => '->', "\u{2193}" => 'V', "\u{2194}" => '<->']); // ® © … « » £ ¥ ² ³ µ ¹ º ¿ ˊ ˍ ˝ ` € ™ ℮ ← ↑ → ↓ ↔
+			$s = strtr($s, [
+				"\u{AE}" => '(R)', "\u{A9}" => '(c)', "\u{2026}" => '...', "\u{AB}" => '<<', "\u{BB}" => '>>', "\u{A3}" => 'lb',
+				"\u{A5}" => 'yen', "\u{B2}" => '^2', "\u{B3}" => '^3', "\u{B5}" => 'u', "\u{B9}" => '^1', "\u{BA}" => 'o', "\u{BF}" => '?',
+				"\u{2CA}" => "'", "\u{2CD}" => '_', "\u{2DD}" => '"', "\u{1FEF}" => '', "\u{20AC}" => 'EUR', "\u{2122}" => 'TM',
+				"\u{212E}" => 'e', "\u{2190}" => '<-', "\u{2191}" => '^', "\u{2192}" => '->', "\u{2193}" => 'V', "\u{2194}" => '<->',
+			]); // ® © … « » £ ¥ ² ³ µ ¹ º ¿ ˊ ˍ ˝ ` € ™ ℮ ← ↑ → ↓ ↔
 		}
 
 		$s = \Transliterator::create('Any-Latin; Latin-ASCII')?->transliterate($s)
@@ -215,6 +222,7 @@ class Strings
 			}
 
 			$s = str_replace(['?', "\x01"], ['', '?'], $s); // remove garbage and restore ? characters
+
 		} elseif ($iconv === 'libiconv') {
 			$s = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s);
 			if ($s === false) {
@@ -334,9 +342,9 @@ class Strings
 	 */
 	public static function compare(string $left, string $right, ?int $length = null): bool
 	{
-		if (class_exists('Normalizer', autoload: false)) {
-			$left = \Normalizer::normalize($left, \Normalizer::FORM_D); // form NFD is faster
-			$right = \Normalizer::normalize($right, \Normalizer::FORM_D); // form NFD is faster
+		if (class_exists(\Normalizer::class, false)) {
+			$left = \Normalizer::normalize($left, \Normalizer::FORM_D) ?: $left; // form NFD is faster, false on invalid UTF-8
+			$right = \Normalizer::normalize($right, \Normalizer::FORM_D) ?: $right; // form NFD is faster, false on invalid UTF-8
 		}
 
 		if ($length < 0) {
@@ -387,7 +395,7 @@ class Strings
 		return match (true) {
 			extension_loaded('mbstring') => (int) mb_strlen($s, 'UTF-8'),
 			extension_loaded('iconv') => (int) iconv_strlen($s, 'UTF-8'),
-			default => strlen(@utf8_decode($s)), // deprecated
+			default => strlen((string) preg_replace('#[\x80-\xBF]#', '', $s)), // strips UTF-8 continuation bytes
 		};
 	}
 
@@ -398,7 +406,7 @@ class Strings
 	public static function trim(string $s, string $charlist = self::TrimCharacters): string
 	{
 		$charlist = preg_quote($charlist, '#');
-		return self::replace($s, '#^[' . $charlist . ']+|[' . $charlist . ']+$#Du', '');
+		return self::replace($s, '#^[' . $charlist . ']+|[' . $charlist . ']+$#Du');
 	}
 
 
@@ -516,7 +524,7 @@ class Strings
 
 
 	/**
-	 * Divides the string into arrays according to the regular expression. Expressions in parentheses will be captured and returned as well.
+	 * Splits the string by a regular expression. Expressions in parentheses will be captured and returned as well.
 	 * @return list<string>
 	 */
 	public static function split(
@@ -542,8 +550,8 @@ class Strings
 
 
 	/**
-	 * Searches the string for the part matching the regular expression and returns
-	 * an array with the found expression and individual subexpressions, or `null`.
+	 * Searches the string for the first match of the regular expression and returns
+	 * an array with the found expression and individual subexpressions, or null.
 	 * @return ?array<string>
 	 */
 	public static function match(
@@ -579,8 +587,8 @@ class Strings
 
 
 	/**
-	 * Searches the string for all occurrences matching the regular expression and
-	 * returns an array of arrays containing the found expression and each subexpression.
+	 * Searches the string for all occurrences matching the regular expression and returns
+	 * an array of arrays containing the found expression and each subexpression.
 	 * @return ($lazy is true ? \Generator<int, array<string>> : list<array<string>>)
 	 */
 	public static function matchAll(
@@ -627,7 +635,9 @@ class Strings
 
 		$flags = is_int($captureOffset) // back compatibility
 			? $captureOffset
-			: ($captureOffset ? PREG_OFFSET_CAPTURE : 0) | ($unmatchedAsNull ? PREG_UNMATCHED_AS_NULL : 0) | ($patternOrder ? PREG_PATTERN_ORDER : 0);
+			: ($captureOffset ? PREG_OFFSET_CAPTURE : 0)
+				| ($unmatchedAsNull ? PREG_UNMATCHED_AS_NULL : 0)
+				| ($patternOrder ? PREG_PATTERN_ORDER : 0);
 
 		$m = [];
 		self::pcre('preg_match_all', [
@@ -642,7 +652,7 @@ class Strings
 
 
 	/**
-	 * Replaces all occurrences matching regular expression $pattern which can be string or array in the form `pattern => replacement`.
+	 * Replaces all matches of the regular expression $pattern, which can be a string or array in the form `pattern => replacement`.
 	 * @param  string|array<string, string>  $pattern
 	 */
 	public static function replace(
@@ -721,7 +731,7 @@ class Strings
 		});
 
 		if (($code = preg_last_error()) // run-time error, but preg_last_error & return code are liars
-			&& ($res === null || !in_array($func, ['preg_filter', 'preg_replace_callback', 'preg_replace'], strict: true))
+			&& ($res === null || !in_array($func, ['preg_filter', 'preg_replace_callback', 'preg_replace'], true))
 		) {
 			throw new RegexpException(preg_last_error_msg()
 				. ' (pattern: ' . implode(' or ', (array) $args[0]) . ')', $code);

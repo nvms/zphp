@@ -68,15 +68,14 @@ class TrustProxies
     {
         $trustedIps = $this->proxies() ?: config('trustedproxy.proxies');
 
-        if (is_null($trustedIps) &&
-            (laravel_cloud() ||
-             str_ends_with($request->host(), '.on-forge.com') ||
-             str_ends_with($request->host(), '.on-vapor.com'))) {
+        $isLaravelForge = $request->server->has('FORGE_SERVER_ID') && str_ends_with($request->host(), '.on-forge.com');
+        $isLaravelVapor = isset($_ENV['VAPOR_SSM_PATH']) && str_ends_with($request->host(), '.on-vapor.com');
+
+        if (is_null($trustedIps) && (laravel_cloud() || $isLaravelForge || $isLaravelVapor)) {
             $trustedIps = '*';
         }
 
-        if (str_ends_with($request->host(), '.on-forge.com') ||
-            str_ends_with($request->host(), '.on-vapor.com')) {
+        if ($isLaravelForge || $isLaravelVapor) {
             $request->headers->remove('X-Forwarded-Host');
         }
 
@@ -112,14 +111,14 @@ class TrustProxies
     }
 
     /**
-     * Set the trusted proxy to be the IP address calling this servers.
+     * Set the trusted proxies to catchall addresses for IPv4 and IPv6.
      *
      * @param  \Illuminate\Http\Request  $request
      * @return void
      */
     protected function setTrustedProxyIpAddressesToTheCallingIp(Request $request)
     {
-        $request->setTrustedProxies([$request->server->get('REMOTE_ADDR')], $this->getTrustedHeaderNames());
+        $request->setTrustedProxies(['0.0.0.0/0', '::/0'], $this->getTrustedHeaderNames());
     }
 
     /**

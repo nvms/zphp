@@ -85,14 +85,14 @@ class Markdown
             'new \Illuminate\Support\EncodedHtmlString(%s)',
             function () use ($view, $data) {
                 if (static::$withSecuredEncoding === true) {
-                    EncodedHtmlString::encodeUsing(function ($value) {
+                    EncodedHtmlString::encodeUsing(function ($value, $doubleEncode) {
                         $replacements = [
+                            '\\' => '\\\\',
                             '[' => '\[',
-                            '<' => '&lt;',
-                            '>' => '&gt;',
+                            ']' => '\]',
                         ];
 
-                        return str_replace(array_keys($replacements), array_values($replacements), $value);
+                        return strtr(EncodedHtmlString::convert($value, doubleEncode: $doubleEncode), $replacements);
                     });
                 }
 
@@ -116,8 +116,12 @@ class Markdown
                 : 'mail::themes.'.$this->theme;
         }
 
+        $contents = static::$withSecuredEncoding === true
+            ? strtr($contents, ['\\\\' => '\\', '\[' => '[', '\]' => ']'])
+            : str_replace('\[', '[', $contents);
+
         return new HtmlString(($inliner ?: new CssToInlineStyles)->convert(
-            str_replace('\[', '[', $contents), $this->view->make($theme, $data)->render()
+            $contents, $this->view->make($theme, $data)->render()
         ));
     }
 
@@ -157,11 +161,12 @@ class Markdown
         if (static::$withSecuredEncoding === true || $encoded === true) {
             EncodedHtmlString::encodeUsing(function ($value) {
                 $replacements = [
+                    '\\' => '\\\\',
                     '[' => '\[',
                     '<' => '\<',
                 ];
 
-                $html = str_replace(array_keys($replacements), array_values($replacements), $value);
+                $html = strtr($value, $replacements);
 
                 return static::converter([
                     'html_input' => 'escape',

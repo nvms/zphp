@@ -3,10 +3,13 @@
 namespace Illuminate\Redis\Connections;
 
 use Closure;
+use ErrorException;
 use Illuminate\Contracts\Redis\Connection as ConnectionContract;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
+use RedisClusterException;
 use RedisException;
+use Throwable;
 
 /**
  * @mixin \Redis
@@ -64,9 +67,15 @@ class PhpRedisConnection extends Connection implements ConnectionContract
      */
     public function mget(array $keys)
     {
+        $result = $this->command('mget', [$keys]);
+
+        if ($result === false) {
+            return array_fill(0, count($keys), null);
+        }
+
         return array_map(function ($value) {
             return $value !== false ? $value : null;
-        }, $this->command('mget', [$keys]));
+        }, $result);
     }
 
     /**
@@ -113,7 +122,13 @@ class PhpRedisConnection extends Connection implements ConnectionContract
             $dictionary = $dictionary[0];
         }
 
-        return array_values($this->command('hmget', [$key, $dictionary]));
+        $result = $this->command('hmget', [$key, $dictionary]);
+
+        if ($result === false) {
+            return array_fill(0, count((array) $dictionary), null);
+        }
+
+        return array_values($result);
     }
 
     /**
@@ -398,11 +413,96 @@ class PhpRedisConnection extends Connection implements ConnectionContract
      */
     public function pipeline(?callable $callback = null)
     {
-        $pipeline = $this->client()->pipeline();
+        $pipeline = $this->retryOnceOnLostConnection(fn () => $this->client()->pipeline());
 
-        return is_null($callback)
-            ? $pipeline
-            : tap($pipeline, $callback)->exec();
+        if (is_null($callback)) {
+            return $pipeline;
+        }
+
+        try {
+            return $this->executePipeline($pipeline, $callback);
+        } catch (Throwable $e) {
+            $this->rebuildClientOnLostConnection($e);
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Get multiple values using a pipeline that can safely be retried after a disconnect.
+     *
+     * @param  array  $keys
+     * @return array|false
+     *
+     * @internal
+     */
+    public function getManyViaPipeline(array $keys)
+    {
+        return $this->retryOnceOnLostConnection(function () use ($keys) {
+            return $this->executePipeline($this->client()->pipeline(), function ($pipeline) use ($keys) {
+                foreach ($keys as $key) {
+                    $pipeline->get($key);
+                }
+            });
+        });
+    }
+
+    /**
+     * Execute commands that can safely run twice in a pipeline, retrying once after a disconnect.
+     *
+     * With $atomic, the commands run in a transaction that is sent in the same round trip.
+     *
+     * @param  callable  $callback
+     * @param  bool  $atomic
+     * @return array|false
+     *
+     * @internal
+     */
+    public function idempotentPipeline(callable $callback, bool $atomic = false)
+    {
+        return $this->retryOnceOnLostConnection(function () use ($callback, $atomic) {
+            try {
+                $results = $this->executePipeline($this->client()->pipeline(), function ($pipeline) use ($callback, $atomic) {
+                    if ($atomic) {
+                        $pipeline->multi();
+                    }
+
+                    $callback($pipeline);
+
+                    if ($atomic) {
+                        $pipeline->exec();
+                    }
+                });
+            } catch (Throwable $e) {
+                // When a command in a pipelined transaction fails, PhpRedis stops reading and leaves the rest of the replies on the connection...
+                if ($atomic && ! $this->causedByLostConnection($e)) {
+                    $this->rebuildClient();
+                }
+
+                throw $e;
+            }
+
+            // Only the EXEC reply holds the results of the commands in a transaction...
+            return $atomic && is_array($results) ? end($results) : $results;
+        });
+    }
+
+    /**
+     * Execute a pipeline and discard it if queuing or execution fails.
+     *
+     * @param  \Redis  $pipeline
+     * @param  callable  $callback
+     * @return array|false
+     */
+    protected function executePipeline($pipeline, callable $callback)
+    {
+        try {
+            return tap($pipeline, $callback)->exec();
+        } catch (Throwable $e) {
+            rescue(fn () => $this->client()->discard(), null, false);
+
+            throw $e;
+        }
     }
 
     /**
@@ -413,11 +513,21 @@ class PhpRedisConnection extends Connection implements ConnectionContract
      */
     public function transaction(?callable $callback = null)
     {
-        $transaction = $this->client()->multi();
+        $transaction = $this->retryOnceOnLostConnection(fn () => $this->client()->multi());
 
-        return is_null($callback)
-            ? $transaction
-            : tap($transaction, $callback)->exec();
+        if (is_null($callback)) {
+            return $transaction;
+        }
+
+        try {
+            return tap($transaction, $callback)->exec();
+        } catch (Throwable $e) {
+            rescue(fn () => $this->client()->discard(), null, false);
+
+            $this->rebuildClientOnLostConnection($e);
+
+            throw $e;
+        }
     }
 
     /**
@@ -523,19 +633,122 @@ class PhpRedisConnection extends Connection implements ConnectionContract
      * @param  array  $parameters
      * @return mixed
      *
+     * @throws \RedisClusterException
      * @throws \RedisException
      */
     public function command($method, array $parameters = [])
     {
-        try {
-            return parent::command($method, $parameters);
-        } catch (RedisException $e) {
-            if (Str::contains($e->getMessage(), ['went away', 'socket', 'Error while reading', 'read error on connection', 'READONLY', 'Connection lost'])) {
-                $this->client = $this->connector ? call_user_func($this->connector) : $this->client;
-            }
+        $retries = max(
+            $this->isRetryable($method, $parameters) ? 1 : 0,
+            (int) ($this->config['command_retries'] ?? 0),
+        );
 
-            throw $e;
+        while (true) {
+            try {
+                return parent::command($method, $parameters);
+            } catch (RedisClusterException|RedisException|ErrorException $e) {
+                if (! $this->causedByLostConnection($e)) {
+                    throw $e;
+                }
+
+                $this->rebuildClient();
+
+                if ($retries-- === 0) {
+                    throw $e;
+                }
+            }
         }
+    }
+
+    /**
+     * Run the given callback, retrying it once on a rebuilt client if the connection was lost.
+     *
+     * For operations that have not yet sent a command that could have taken effect, such as opening a pipeline or a transaction.
+     *
+     * @param  \Closure  $callback
+     * @return mixed
+     */
+    protected function retryOnceOnLostConnection(Closure $callback)
+    {
+        $retries = 1;
+
+        while (true) {
+            try {
+                return $callback();
+            } catch (RedisClusterException|RedisException|ErrorException $e) {
+                if (! $this->causedByLostConnection($e)) {
+                    throw $e;
+                }
+
+                $this->rebuildClient();
+
+                if ($retries-- === 0) {
+                    throw $e;
+                }
+            }
+        }
+    }
+
+    /**
+     * Rebuild the client if the given exception was caused by a lost connection.
+     *
+     * @param  \Throwable  $e
+     * @return void
+     */
+    protected function rebuildClientOnLostConnection(Throwable $e)
+    {
+        if ($this->causedByLostConnection($e)) {
+            $this->rebuildClient();
+        }
+    }
+
+    /**
+     * Determine if the given exception was caused by a lost connection to the Redis server.
+     *
+     * @param  \Throwable  $e
+     * @return bool
+     */
+    protected function causedByLostConnection(Throwable $e)
+    {
+        if (! $e instanceof RedisClusterException && ! $e instanceof RedisException && ! $e instanceof ErrorException) {
+            return false;
+        }
+
+        return Str::contains($e->getMessage(), [
+            'went away',
+            'socket',
+            'Error while reading',
+            'read error on connection',
+            'READONLY',
+            'Connection lost',
+            'Connection closed',
+            'Error processing response from Redis node',
+            'Connection reset by peer',
+            "Can't communicate with any node in the cluster",
+            'Broken pipe',
+        ]);
+    }
+
+    /**
+     * Replace the underlying client with a freshly connected one.
+     *
+     * @return void
+     */
+    protected function rebuildClient()
+    {
+        if (! $this->connector) {
+            return;
+        }
+
+        if (! $this->isCluster()) {
+            try {
+                $this->client->close();
+            } catch (Throwable) {
+                //
+            }
+        }
+
+        $this->client = call_user_func($this->connector);
     }
 
     /**

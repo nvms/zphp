@@ -300,10 +300,12 @@ abstract class Prompt
         $previousFrameHeight = count(explode(PHP_EOL, $this->prevFrame));
         $renderableLines = array_slice(explode(PHP_EOL, $frame), abs(min(0, $terminalHeight - $previousFrameHeight)));
 
+        static::writeDirectly("\e[?2026h");
         $this->moveCursorToColumn(1);
         $this->moveCursorUp(min($terminalHeight, $previousFrameHeight) - 1);
         $this->eraseDown();
         $this->output()->write(implode(PHP_EOL, $renderableLines));
+        static::writeDirectly("\e[?2026l");
 
         $this->prevFrame = $frame;
     }
@@ -444,5 +446,17 @@ abstract class Prompt
         $this->restoreCursor();
 
         static::terminal()->restoreTty();
+    }
+
+    /**
+     * Flush the global state of Prompts.
+     */
+    public static function flushState(): void
+    {
+        static::$cancelUsing = null;
+        static::$validateUsing = null;
+        static::$revertUsing = null;
+        static::$shouldFallback = false;
+        static::$fallbacks = [];
     }
 }

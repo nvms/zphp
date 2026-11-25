@@ -78,10 +78,22 @@ class Logger
     }
 
     /**
+     * Update the sub-label of the process log. Pass an empty string to clear.
+     */
+    public function subLabel(string $message): void
+    {
+        $this->write($message, 'sublabel');
+    }
+
+    /**
      * Write a message to the socket.
      */
     protected function write(string $message, ?string $type = null): void
     {
+        if ($this->socket === null) {
+            return;
+        }
+
         if ($type !== null) {
             fwrite($this->socket, $this->prefix($type, $message).PHP_EOL);
         } else {

@@ -3,7 +3,10 @@
 namespace Laravel\Prompts;
 
 use Closure;
+use DateTimeImmutable;
+use DateTimeInterface;
 use Illuminate\Support\Collection;
+use Laravel\Prompts\Elements\ElementContract;
 
 if (! function_exists('\Laravel\Prompts\text')) {
     /**
@@ -260,6 +263,18 @@ if (! function_exists('\Laravel\Prompts\note')) {
     }
 }
 
+if (! function_exists('\Laravel\Prompts\callout')) {
+    /**
+     * Display a callout.
+     *
+     * @param  string|list<string|ElementContract>  $content
+     */
+    function callout(string $label, string|array $content, ?string $type = null, string $info = ''): void
+    {
+        (new Callout($label, $content, $type, $info))->display();
+    }
+}
+
 if (! function_exists('\Laravel\Prompts\error')) {
     /**
      * Display an error.
@@ -424,9 +439,69 @@ if (! function_exists('\Laravel\Prompts\task')) {
      * @param  Closure(Support\Logger): TReturn  $callback
      * @return TReturn
      */
-    function task(string $label, Closure $callback, ?int $limit = null): mixed
+    function task(string $label, Closure $callback, ?int $limit = null, bool $keepSummary = false, ?string $subLabel = null): mixed
     {
-        return (new Task($label, $limit ?? 10))->run($callback);
+        return (new Task($label, $limit ?? 10, $keepSummary, $subLabel))->run($callback);
+    }
+}
+
+if (! function_exists('\Laravel\Prompts\datepicker')) {
+    /**
+     * Prompt the user for a date.
+     *
+     * @return ($transform is null ? DateTimeImmutable|null : mixed)
+     */
+    function datepicker(
+        string $label,
+        DateTimeInterface|string|null $default = null,
+        DateTimeInterface|string|null $min = null,
+        DateTimeInterface|string|null $max = null,
+        bool|string $required = false,
+        mixed $validate = null,
+        ?string $hint = null,
+        ?Closure $transform = null,
+    ): mixed {
+        return (new DatePickerPrompt(...get_defined_vars()))->prompt();
+    }
+}
+
+if (! function_exists('\Laravel\Prompts\datetimepicker')) {
+    /**
+     * Prompt the user for a date and time.
+     *
+     * @return ($transform is null ? DateTimeImmutable|null : mixed)
+     */
+    function datetimepicker(
+        string $label,
+        DateTimeInterface|string|null $default = null,
+        DateTimeInterface|string|null $min = null,
+        DateTimeInterface|string|null $max = null,
+        bool|string $required = false,
+        mixed $validate = null,
+        ?string $hint = null,
+        ?Closure $transform = null,
+        bool $withSeconds = false,
+        bool $use12Hours = false,
+    ): mixed {
+        return (new DateTimePickerPrompt(...get_defined_vars()))->prompt();
+    }
+}
+
+if (! function_exists('\Laravel\Prompts\timepicker')) {
+    /** @return ($transform is null ? DateTimeImmutable|null : mixed) */
+    function timepicker(
+        string $label,
+        DateTimeInterface|string|null $default = null,
+        DateTimeInterface|string|null $min = null,
+        DateTimeInterface|string|null $max = null,
+        bool|string $required = false,
+        mixed $validate = null,
+        ?string $hint = null,
+        ?Closure $transform = null,
+        bool $withSeconds = false,
+        bool $use12Hours = false,
+    ): mixed {
+        return (new TimePickerPrompt(...get_defined_vars()))->prompt();
     }
 }
 

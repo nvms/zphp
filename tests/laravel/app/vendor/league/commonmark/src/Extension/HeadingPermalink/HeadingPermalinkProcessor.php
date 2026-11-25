@@ -74,6 +74,12 @@ final class HeadingPermalinkProcessor implements EnvironmentAwareInterface
         ]);
 
         if ($applyToHeading) {
+            // The id may have been set by other code, so it isn't guaranteed to be a usable string
+            $existingId = $heading->data->has('attributes/id') ? $heading->data->get('attributes/id') : null;
+            if (\is_string($existingId) && $existingId !== '') {
+                $slug = $existingId;
+            }
+
             $heading->data->set('attributes/id', $idPrefix . $slug);
         }
 

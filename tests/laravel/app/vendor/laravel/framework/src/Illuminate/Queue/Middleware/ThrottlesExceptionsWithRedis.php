@@ -3,7 +3,6 @@
 namespace Illuminate\Queue\Middleware;
 
 use Illuminate\Container\Container;
-use Illuminate\Contracts\Redis\Connection;
 use Illuminate\Contracts\Redis\Factory as Redis;
 use Illuminate\Redis\Limiters\DurationLimiter;
 use Illuminate\Support\InteractsWithTime;
@@ -80,7 +79,7 @@ class ThrottlesExceptionsWithRedis extends ThrottlesExceptions
 
             $this->limiter->acquire();
 
-            return $job->release($this->retryAfterMinutes * 60);
+            return $job->release($this->getTimeUntilNextRetryAfterException($throwable));
         }
     }
 

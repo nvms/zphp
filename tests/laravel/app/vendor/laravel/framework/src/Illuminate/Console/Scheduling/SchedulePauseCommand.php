@@ -25,12 +25,18 @@ class SchedulePauseCommand extends Command
      */
     public function handle(Cache $cache, Dispatcher $dispatcher)
     {
+        if (! Schedule::$pausable) {
+            $this->components->error('Schedule pausing is currently disabled.');
+
+            return self::FAILURE;
+        }
+
         $cache->forever('illuminate:schedule:paused', true);
 
         $dispatcher->dispatch(new SchedulePaused);
 
         $this->components->info('Scheduled task processing has been paused.');
 
-        return 0;
+        return self::SUCCESS;
     }
 }

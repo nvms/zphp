@@ -16,10 +16,13 @@ use Illuminate\Database\ConnectionResolverInterface as Resolver;
 use Illuminate\Database\Eloquent\Attributes\Boot;
 use Illuminate\Database\Eloquent\Attributes\Connection;
 use Illuminate\Database\Eloquent\Attributes\Initialize;
+use Illuminate\Database\Eloquent\Attributes\Refreshes;
+use Illuminate\Database\Eloquent\Attributes\RouteKey;
 use Illuminate\Database\Eloquent\Attributes\Scope as LocalScope;
 use Illuminate\Database\Eloquent\Attributes\Table;
 use Illuminate\Database\Eloquent\Attributes\UseEloquentBuilder;
 use Illuminate\Database\Eloquent\Attributes\WithoutIncrementing;
+use Illuminate\Database\Eloquent\Attributes\WithoutTimestamps;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\Concerns\AsPivot;
@@ -103,6 +106,13 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      * @var array
      */
     protected $withCount = [];
+
+    /**
+     * The attributes that should be refreshed after the model is written.
+     *
+     * @var list<string>
+     */
+    protected array $refreshes = [];
 
     /**
      * Indicates whether lazy loading will be prevented on this model.
@@ -212,7 +222,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     /**
      * The callback that is responsible for handling lazy loading violations.
      *
-     * @var (callable(self, string))|null
+     * @var (callable(self, string): mixed)|null
      */
     protected static $lazyLoadingViolationCallback;
 
@@ -226,7 +236,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     /**
      * The callback that is responsible for handling discarded attribute violations.
      *
-     * @var (callable(self, array))|null
+     * @var (callable(self, array): mixed)|null
      */
     protected static $discardedAttributeViolationCallback;
 
@@ -240,7 +250,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     /**
      * The callback that is responsible for handling missing attribute violations.
      *
-     * @var (callable(self, string))|null
+     * @var (callable(self, string): mixed)|null
      */
     protected static $missingAttributeViolationCallback;
 
@@ -317,6 +327,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
         $this->bootIfNotBooted();
         $this->initializeTraits();
         $this->initializeModelAttributes();
+        $this->mergeDefaultAttributes();
         $this->syncOriginal();
         $this->fill($attributes);
     }
@@ -435,11 +446,22 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     {
         $table = static::resolveClassAttribute(Table::class);
 
-        $this->table ??= $table->name ?? null;
-        $this->connection ??= static::resolveClassAttribute(Connection::class, 'name');
+        $overrides = static::$classAttributes[static::class.'@overrides'] ??= static::resolveClassAttributeOverrides();
+
+        if ($overrides['table']) {
+            $this->table = $table->name ?? null;
+        } else {
+            $this->table ??= $table->name ?? null;
+        }
+
+        if ($overrides['connection']) {
+            $this->connection = static::resolveClassAttribute(Connection::class, 'name');
+        } else {
+            $this->connection ??= static::resolveClassAttribute(Connection::class, 'name');
+        }
 
         if ($this->primaryKey === 'id' && $table && $table->key !== null) {
-            $this->primaryKey = $table->key;
+            $this->primaryKey = $table->key === false ? null : $table->key;
         }
 
         if ($this->keyType === 'int' && $table && $table->keyType !== null) {
@@ -450,7 +472,33 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             $this->incrementing = false;
         } elseif ($table && $table->incrementing !== null) {
             $this->incrementing = $table->incrementing;
+        } elseif ($table && $table->key === false && is_null($this->primaryKey)) {
+            $this->incrementing = false;
         }
+
+        if ($this->refreshes === []) {
+            $this->refreshes = static::resolveClassAttribute(Refreshes::class, 'columns') ?? [];
+        }
+    }
+
+    /**
+     * Determine if the class attributes should override the inherited properties.
+     *
+     * @return array
+     */
+    protected static function resolveClassAttributeOverrides()
+    {
+        $reflection = new ReflectionClass(static::class);
+
+        $declaresTable = $reflection->hasProperty('table')
+            && $reflection->getProperty('table')->getDeclaringClass()->getName() === static::class;
+
+        $declaresConnection = $reflection->getProperty('connection')->getDeclaringClass()->getName() === static::class;
+
+        return [
+            'table' => ! $declaresTable && $reflection->getAttributes(Table::class) !== [],
+            'connection' => ! $declaresConnection && $reflection->getAttributes(Connection::class) !== [],
+        ];
     }
 
     /**
@@ -533,19 +581,14 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
         }
 
         $timestamps = static::resolveClassAttribute(Table::class, 'timestamps', $class)
+            ?? (static::resolveClassAttribute(WithoutTimestamps::class, null, $class) !== null ? false : null)
             ?? get_class_vars($class)['timestamps'];
 
         if (! $timestamps) {
             return true;
         }
 
-        foreach (static::$ignoreOnTouch as $ignoredClass) {
-            if ($class === $ignoredClass || is_subclass_of($class, $ignoredClass)) {
-                return true;
-            }
-        }
-
-        return false;
+        return array_any(static::$ignoreOnTouch, fn ($ignoredClass) => $class === $ignoredClass || is_subclass_of($class, $ignoredClass));
     }
 
     /**
@@ -586,7 +629,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     /**
      * Register a callback that is responsible for handling lazy loading violations.
      *
-     * @param  (callable(self, string))|null  $callback
+     * @param  (callable(self, string, \Illuminate\Database\LazyLoadingViolationException): mixed)|null  $callback
      * @return void
      */
     public static function handleLazyLoadingViolationUsing(?callable $callback)
@@ -608,7 +651,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     /**
      * Register a callback that is responsible for handling discarded attribute violations.
      *
-     * @param  (callable(self, array))|null  $callback
+     * @param  (callable(self, array, \Illuminate\Database\Eloquent\MassAssignmentException): mixed)|null  $callback
      * @return void
      */
     public static function handleDiscardedAttributeViolationUsing(?callable $callback)
@@ -630,7 +673,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     /**
      * Register a callback that is responsible for handling missing attribute violations.
      *
-     * @param  (callable(self, string))|null  $callback
+     * @param  (callable(self, string, \Illuminate\Database\Eloquent\MissingAttributeException): mixed)|null  $callback
      * @return void
      */
     public static function handleMissingAttributeViolationUsing(?callable $callback)
@@ -641,8 +684,10 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     /**
      * Execute a callback without broadcasting any model events for all model types.
      *
-     * @param  callable  $callback
-     * @return mixed
+     * @template TReturn
+     *
+     * @param  callable(): TReturn  $callback
+     * @return TReturn
      */
     public static function withoutBroadcasting(callable $callback)
     {
@@ -678,13 +723,15 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             if ($this->isFillable($key)) {
                 $this->setAttribute($key, $value);
             } elseif ($totallyGuarded || static::preventsSilentlyDiscardingAttributes()) {
+                $exception = new MassAssignmentException(sprintf(
+                    'Add [%s] to fillable property to allow mass assignment on [%s].',
+                    $key, get_class($this)
+                ));
+
                 if (isset(static::$discardedAttributeViolationCallback)) {
-                    call_user_func(static::$discardedAttributeViolationCallback, $this, [$key]);
+                    call_user_func(static::$discardedAttributeViolationCallback, $this, [$key], $exception);
                 } else {
-                    throw new MassAssignmentException(sprintf(
-                        'Add [%s] to fillable property to allow mass assignment on [%s].',
-                        $key, get_class($this)
-                    ));
+                    throw $exception;
                 }
             }
         }
@@ -693,14 +740,16 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             static::preventsSilentlyDiscardingAttributes()) {
             $keys = array_diff(array_keys($attributes), array_keys($fillable));
 
+            $exception = new MassAssignmentException(sprintf(
+                'Add fillable property [%s] to allow mass assignment on [%s].',
+                implode(', ', $keys),
+                get_class($this)
+            ));
+
             if (isset(static::$discardedAttributeViolationCallback)) {
-                call_user_func(static::$discardedAttributeViolationCallback, $this, $keys);
+                call_user_func(static::$discardedAttributeViolationCallback, $this, $keys, $exception);
             } else {
-                throw new MassAssignmentException(sprintf(
-                    'Add fillable property [%s] to allow mass assignment on [%s].',
-                    implode(', ', $keys),
-                    get_class($this)
-                ));
+                throw $exception;
             }
         }
 
@@ -875,9 +924,9 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             return $this;
         }
 
-        $className = get_class($this->{$relation});
+        $model = $this->{$relation};
 
-        $this->{$relation}->load($relations[$className] ?? []);
+        $model->load($relations[get_class($model)] ?? $relations[$model->getMorphClass()] ?? []);
 
         return $this;
     }
@@ -999,9 +1048,9 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             return $this;
         }
 
-        $className = get_class($this->{$relation});
+        $model = $this->{$relation};
 
-        $this->{$relation}->loadAggregate($relations[$className] ?? [], $column, $function);
+        $model->loadAggregate($relations[get_class($model)] ?? $relations[$model->getMorphClass()] ?? [], $column, $function);
 
         return $this;
     }
@@ -1076,7 +1125,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      * @param  string  $column
      * @param  float|int  $amount
      * @param  array  $extra
-     * @return int
+     * @return int|false
      */
     protected function increment($column, $amount = 1, array $extra = [])
     {
@@ -1089,7 +1138,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      * @param  string  $column
      * @param  float|int  $amount
      * @param  array  $extra
-     * @return int
+     * @return int|false
      */
     protected function decrement($column, $amount = 1, array $extra = [])
     {
@@ -1103,7 +1152,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      * @param  float|int  $amount
      * @param  array  $extra
      * @param  string  $method
-     * @return int
+     * @return int|false
      */
     protected function incrementOrDecrement($column, $amount, $extra, $method)
     {
@@ -1117,6 +1166,8 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
 
         $this->forceFill($extra);
 
+        $extra = array_merge($extra, array_intersect_key($this->getAttributes(), $extra));
+
         if ($this->fireModelEvent('updating') === false) {
             return false;
         }
@@ -1126,11 +1177,13 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
         }
 
         return tap($this->setKeysForSaveQuery($this->newQueryWithoutScopes())->{$method}($column, $amount, $extra), function () use ($column) {
+            $this->refreshSavedAttributes();
+
             $this->syncChanges();
 
             $this->fireModelEvent('updated', false);
 
-            $this->syncOriginalAttribute($column);
+            $this->syncOriginalAttributes(array_merge([$column], $this->refreshes));
         });
     }
 
@@ -1212,6 +1265,108 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
         return static::withoutEvents(
             fn () => $this->incrementOrDecrement($column, $amount, $extra, 'decrement')
         );
+    }
+
+    /**
+     * Increment each given column's value by the given amounts.
+     *
+     * @param  array<string, float|int>  $columns
+     * @param  array<string, mixed>  $extra
+     * @return int|false
+     */
+    protected function incrementEach(array $columns, array $extra = [])
+    {
+        return $this->incrementOrDecrementEach($columns, $extra, 'incrementEach');
+    }
+
+    /**
+     * Decrement each given column's value by the given amounts.
+     *
+     * @param  array<string, float|int>  $columns
+     * @param  array<string, mixed>  $extra
+     * @return int|false
+     */
+    protected function decrementEach(array $columns, array $extra = [])
+    {
+        return $this->incrementOrDecrementEach($columns, $extra, 'decrementEach');
+    }
+
+    /**
+     * Increment each given column's value by the given amounts without raising any events.
+     *
+     * @param  array<string, float|int>  $columns
+     * @param  array<string, mixed>  $extra
+     * @return int
+     */
+    protected function incrementEachQuietly(array $columns, array $extra = [])
+    {
+        return static::withoutEvents(
+            fn () => $this->incrementOrDecrementEach($columns, $extra, 'incrementEach')
+        );
+    }
+
+    /**
+     * Decrement each given column's value by the given amounts without raising any events.
+     *
+     * @param  array<string, float|int>  $columns
+     * @param  array<string, mixed>  $extra
+     * @return int
+     */
+    protected function decrementEachQuietly(array $columns, array $extra = [])
+    {
+        return static::withoutEvents(
+            fn () => $this->incrementOrDecrementEach($columns, $extra, 'decrementEach')
+        );
+    }
+
+    /**
+     * Run the incrementEach or decrementEach method on the model.
+     *
+     * @param  array<string, float|int>  $columns
+     * @param  array<string, mixed>  $extra
+     * @param  string  $method
+     * @return int|false
+     */
+    protected function incrementOrDecrementEach(array $columns, array $extra, string $method)
+    {
+        if (! $this->exists) {
+            return $this->newQueryWithoutRelationships()->{$method}($columns, $extra);
+        }
+
+        $isIncrement = $method === 'incrementEach';
+        $singleMethod = $isIncrement ? 'increment' : 'decrement';
+
+        foreach ($columns as $column => $amount) {
+            $this->{$column} = $this->isClassDeviable($column)
+                ? $this->deviateClassCastableAttribute($singleMethod, $column, $amount)
+                : $this->{$column} + ($isIncrement ? $amount : $amount * -1);
+        }
+
+        $this->forceFill($extra);
+
+        $extra = array_merge($extra, array_intersect_key($this->getAttributes(), $extra));
+
+        if ($this->fireModelEvent('updating') === false) {
+            return false;
+        }
+
+        $dbColumns = $columns;
+
+        foreach ($dbColumns as $column => $amount) {
+            if ($this->isClassDeviable($column)) {
+                $dbColumns[$column] = (clone $this)->setAttribute($column, $amount)->getAttributeFromArray($column);
+            }
+        }
+
+        return tap($this->setKeysForSaveQuery($this->newQueryWithoutScopes())->{$method}($dbColumns, $extra), function () use ($columns) {
+            $this->refreshSavedAttributes();
+
+            $this->syncChanges();
+
+            $this->fireModelEvent('updated', false);
+
+            $this->syncOriginalAttributes(array_merge(array_keys($columns), $this->refreshes));
+        });
     }
 
     /**
@@ -1410,6 +1565,8 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
         if (count($dirty) > 0) {
             $this->setKeysForSaveQuery($query)->update($dirty);
 
+            $this->refreshSavedAttributes();
+
             $this->syncChanges();
 
             $this->fireModelEvent('updated', false);
@@ -1514,6 +1671,8 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
 
         $this->wasRecentlyCreated = true;
 
+        $this->refreshSavedAttributes();
+
         $this->fireModelEvent('created', false);
 
         return true;
@@ -1563,6 +1722,8 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
 
         $this->wasRecentlyCreated = true;
 
+        $this->refreshSavedAttributes();
+
         $this->fireModelEvent('created', false);
 
         return true;
@@ -1583,6 +1744,25 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     }
 
     /**
+     * Refresh the configured attributes after the model is saved.
+     *
+     * @return void
+     */
+    protected function refreshSavedAttributes()
+    {
+        if ($this->refreshes === []) {
+            return;
+        }
+
+        $attributes = $this->setKeysForSelectQuery($this->newQueryWithoutScopes())
+            ->useWritePdo()
+            ->firstOrFail($this->refreshes)
+            ->getAttributes();
+
+        $this->setRawAttributes(array_replace($this->getAttributes(), $attributes));
+    }
+
+    /**
      * Destroy the models for the given IDs.
      *
      * @param  \Illuminate\Support\Collection|array|int|string  $ids
@@ -1600,7 +1780,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
 
         $ids = is_array($ids) ? $ids : func_get_args();
 
-        if (count($ids) === 0) {
+        if ($ids === []) {
             return 0;
         }
 
@@ -1705,7 +1885,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      * This method protects developers from running forceDestroy when the trait is missing.
      *
      * @param  \Illuminate\Support\Collection|array|int|string  $ids
-     * @return bool|null
+     * @return int
      */
     public static function forceDestroy($ids)
     {
@@ -1839,12 +2019,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     protected function resolveCustomBuilderClass()
     {
-        $attributes = (new ReflectionClass($this))
-            ->getAttributes(UseEloquentBuilder::class);
-
-        return ! empty($attributes)
-            ? $attributes[0]->newInstance()->builderClass
-            : false;
+        return static::resolveClassAttribute(UseEloquentBuilder::class, 'builderClass') ?? false;
     }
 
     /**
@@ -1909,9 +2084,13 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     protected static function isScopeMethodWithAttribute(string $method)
     {
-        return method_exists(static::class, $method) &&
-            (new ReflectionMethod(static::class, $method))
-                ->getAttributes(LocalScope::class) !== [];
+        if (method_exists(static::class, $method)) {
+            $reflectionClass = new ReflectionMethod(static::class, $method);
+
+            return ! $reflectionClass->isPrivate() && $reflectionClass->getAttributes(LocalScope::class) !== [];
+        }
+
+        return false;
     }
 
     /**
@@ -1998,8 +2177,35 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             return $this;
         }
 
+        return $this->refreshUsingQuery($this->newQueryWithoutScopes());
+    }
+
+    /**
+     * Reload the current model instance with fresh attributes from the database while locking it for updating.
+     *
+     * @return $this
+     */
+    public function refreshForUpdate()
+    {
+        if (! $this->exists) {
+            return $this;
+        }
+
+        return $this->refreshUsingQuery(
+            $this->newQueryWithoutScopes()->lockForUpdate()
+        );
+    }
+
+    /**
+     * Reload the current model instance using the given query.
+     *
+     * @param  \Illuminate\Database\Eloquent\Builder<static>  $query
+     * @return $this
+     */
+    protected function refreshUsingQuery(Builder $query)
+    {
         $this->setRawAttributes(
-            $this->setKeysForSelectQuery($this->newQueryWithoutScopes())
+            $this->setKeysForSelectQuery($query)
                 ->useWritePdo()
                 ->firstOrFail()
                 ->attributes
@@ -2007,7 +2213,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
 
         $this->load((new BaseCollection($this->relations))->reject(
             fn ($relation) => $relation instanceof Pivot
-                || (is_object($relation) && in_array(AsPivot::class, class_uses_recursive($relation), true))
+                || (is_object($relation) && isset(class_uses_recursive($relation)[AsPivot::class]))
         )->keys()->all());
 
         $this->syncOriginal();
@@ -2028,6 +2234,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             $this->getCreatedAtColumn(),
             $this->getUpdatedAtColumn(),
             ...$this->uniqueIds(),
+            ...$this->refreshes,
             'laravel_through_key',
         ]));
 
@@ -2338,7 +2545,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     public function getRouteKeyName()
     {
-        return $this->getKeyName();
+        return static::resolveClassAttribute(RouteKey::class, 'key') ?? $this->getKeyName();
     }
 
     /**
@@ -2477,7 +2684,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     public static function isSoftDeletable(): bool
     {
-        return static::$isSoftDeletable[static::class] ??= in_array(SoftDeletes::class, class_uses_recursive(static::class));
+        return static::$isSoftDeletable[static::class] ??= isset(class_uses_recursive(static::class)[SoftDeletes::class]);
     }
 
     /**
@@ -2485,7 +2692,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     protected function isPrunable(): bool
     {
-        return self::$isPrunable[static::class] ??= in_array(Prunable::class, class_uses_recursive(static::class)) || static::isMassPrunable();
+        return self::$isPrunable[static::class] ??= isset(class_uses_recursive(static::class)[Prunable::class]) || static::isMassPrunable();
     }
 
     /**
@@ -2493,7 +2700,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     protected function isMassPrunable(): bool
     {
-        return self::$isMassPrunable[static::class] ??= in_array(MassPrunable::class, class_uses_recursive(static::class));
+        return self::$isMassPrunable[static::class] ??= isset(class_uses_recursive(static::class)[MassPrunable::class]);
     }
 
     /**
@@ -2568,9 +2775,9 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     protected static function resolveClassAttribute(string $attributeClass, ?string $property = null, ?string $class = null)
     {
-        $class = $class ?? static::class;
+        $class ??= static::class;
 
-        $cacheKey = $class.'@'.$attributeClass;
+        $cacheKey = $class.'@'.$attributeClass.'@'.$property;
 
         if (array_key_exists($cacheKey, static::$classAttributes)) {
             return static::$classAttributes[$cacheKey];
@@ -2586,6 +2793,16 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
                     $instance = $attributes[0]->newInstance();
 
                     return static::$classAttributes[$cacheKey] = $property ? $instance->{$property} : $instance;
+                }
+
+                foreach ($reflection->getTraits() as $trait) {
+                    $attributes = $trait->getAttributes($attributeClass);
+
+                    if (count($attributes) > 0) {
+                        $instance = $attributes[0]->newInstance();
+
+                        return static::$classAttributes[$cacheKey] = $property ? $instance->{$property} : $instance;
+                    }
                 }
             } while ($reflection = $reflection->getParentClass());
         } catch (Exception) {
@@ -2707,7 +2924,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     public function __call($method, $parameters)
     {
-        if (in_array($method, ['increment', 'decrement', 'incrementQuietly', 'decrementQuietly'])) {
+        if (in_array($method, ['increment', 'decrement', 'incrementQuietly', 'decrementQuietly', 'incrementEach', 'decrementEach', 'incrementEachQuietly', 'decrementEachQuietly'])) {
             return $this->$method(...$parameters);
         }
 

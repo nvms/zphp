@@ -6,6 +6,7 @@ use Closure;
 use Illuminate\Contracts\Redis\Connection as ConnectionContract;
 use Illuminate\Support\Collection;
 use Predis\Command\Argument\ArrayableArgument;
+use Predis\Connection\ConnectionException;
 
 /**
  * @mixin \Predis\Client
@@ -20,13 +21,73 @@ class PredisConnection extends Connection implements ConnectionContract
     protected $client;
 
     /**
+     * The connection configuration array.
+     *
+     * @var array
+     */
+    protected $config;
+
+    /**
      * Create a new Predis connection.
      *
      * @param  \Predis\Client  $client
+     * @param  array  $config
      */
-    public function __construct($client)
+    public function __construct($client, array $config = [])
     {
         $this->client = $client;
+        $this->config = $config;
+    }
+
+    /**
+     * Scan all keys based on options.
+     *
+     * @param  mixed  $cursor
+     * @param  array  $options
+     * @return array|false
+     */
+    public function scan($cursor = 0, $options = [])
+    {
+        return $this->command('scan', [$cursor ?? 0, $options]);
+    }
+
+    /**
+     * Scan the given sorted set for all values based on options.
+     *
+     * @param  string  $key
+     * @param  mixed  $cursor
+     * @param  array  $options
+     * @return array|false
+     */
+    public function zscan($key, $cursor = 0, $options = [])
+    {
+        return $this->command('zscan', [$key, $cursor ?? 0, $options]);
+    }
+
+    /**
+     * Scan the given hash for all values based on options.
+     *
+     * @param  string  $key
+     * @param  mixed  $cursor
+     * @param  array  $options
+     * @return array|false
+     */
+    public function hscan($key, $cursor = 0, $options = [])
+    {
+        return $this->command('hscan', [$key, $cursor ?? 0, $options]);
+    }
+
+    /**
+     * Scan the given set for all values based on options.
+     *
+     * @param  string  $key
+     * @param  mixed  $cursor
+     * @param  array  $options
+     * @return array|false
+     */
+    public function sscan($key, $cursor = 0, $options = [])
+    {
+        return $this->command('sscan', [$key, $cursor ?? 0, $options]);
     }
 
     /**
@@ -50,6 +111,71 @@ class PredisConnection extends Connection implements ConnectionContract
         }
 
         unset($loop);
+    }
+
+    /**
+     * Execute commands that can safely run twice in a pipeline, retrying once after a disconnect.
+     *
+     * With $atomic, the commands run in a transaction that is sent in the same round trip.
+     *
+     * @param  callable  $callback
+     * @param  bool  $atomic
+     * @return array
+     *
+     * @internal
+     */
+    public function idempotentPipeline(callable $callback, bool $atomic = false)
+    {
+        $pipeline = function ($pipeline) use ($callback, $atomic) {
+            if ($atomic) {
+                $pipeline->multi();
+            }
+
+            $callback($pipeline);
+
+            if ($atomic) {
+                $pipeline->exec();
+            }
+        };
+
+        try {
+            $results = $this->command('pipeline', [$pipeline]);
+        } catch (ConnectionException) {
+            // Predis already dropped the broken connection, so the next attempt reconnects...
+            $results = $this->command('pipeline', [$pipeline]);
+        }
+
+        // Only the EXEC reply holds the results of the commands in a transaction...
+        return $atomic ? end($results) : $results;
+    }
+
+    /**
+     * Run a command against the Redis database.
+     *
+     * @param  string  $method
+     * @param  array  $parameters
+     * @return mixed
+     *
+     * @throws \Predis\Connection\ConnectionException
+     */
+    public function command($method, array $parameters = [])
+    {
+        // Pipelines and transactions may have partially or fully executed their callback, so they are never retried...
+        $retries = in_array(strtolower($method), ['pipeline', 'transaction'], true) ? 0 : max(
+            $this->isRetryable($method, $parameters) ? 1 : 0,
+            (int) ($this->config['command_retries'] ?? 0),
+        );
+
+        while (true) {
+            try {
+                return parent::command($method, $parameters);
+            } catch (ConnectionException $e) {
+                // Predis already dropped the broken connection, so the next attempt reconnects.
+                if ($retries-- === 0) {
+                    throw $e;
+                }
+            }
+        }
     }
 
     /**

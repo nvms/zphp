@@ -1,40 +1,33 @@
 <?php
 
+declare(strict_types=1);
+
 namespace GuzzleHttp;
 
 use GuzzleHttp\Exception\InvalidArgumentException;
 use GuzzleHttp\Handler\CurlHandler;
 use GuzzleHttp\Handler\CurlMultiHandler;
+use GuzzleHttp\Handler\CurlShareHandleState;
+use GuzzleHttp\Handler\CurlVersion;
+use GuzzleHttp\Handler\DebugResource;
+use GuzzleHttp\Handler\HeaderProcessor;
+use GuzzleHttp\Handler\Protocols;
 use GuzzleHttp\Handler\Proxy;
 use GuzzleHttp\Handler\StreamHandler;
-use Psr\Http\Message\UriInterface;
+use GuzzleHttp\Handler\StreamTlsSessionCache;
+use GuzzleHttp\Promise\PromiseInterface;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
 
 final class Utils
 {
     /**
-     * Debug function used to describe the provided value type and class.
-     *
-     * @param mixed $input
-     *
-     * @return string Returns a string containing the type of the variable and
-     *                if a class is provided, the class name.
+     * @var (callable(array<string, mixed>, callable(): callable): callable)|null
      */
-    public static function describeType($input): string
-    {
-        switch (\gettype($input)) {
-            case 'object':
-                return 'object('.\get_class($input).')';
-            case 'array':
-                return 'array('.\count($input).')';
-            default:
-                \ob_start();
-                \var_dump($input);
-                // normalize float vs double
-                /** @var string $varDumpContent */
-                $varDumpContent = \ob_get_clean();
+    private static $defaultHandlerFactory;
 
-                return \str_replace('double(', 'float(', \rtrim($varDumpContent));
-        }
+    private function __construct()
+    {
     }
 
     /**
@@ -42,17 +35,20 @@ final class Utils
      *
      * @param iterable $lines Header lines array of strings in the following
      *                        format: "Name: Value"
+     *
+     * @deprecated Utils::headersFromLines() will be removed in
+     *             guzzlehttp/guzzle:9.0.
      */
     public static function headersFromLines(iterable $lines): array
     {
-        $headers = [];
+        \trigger_deprecation(
+            'guzzlehttp/guzzle',
+            '8.5',
+            '%s() is deprecated and will be removed in 9.0.',
+            __METHOD__
+        );
 
-        foreach ($lines as $line) {
-            $parts = \explode(':', $line, 2);
-            $headers[\trim($parts[0])][] = isset($parts[1]) ? \trim($parts[1]) : null;
-        }
-
-        return $headers;
+        return HeaderProcessor::headersFromLines($lines);
     }
 
     /**
@@ -61,17 +57,39 @@ final class Utils
      * @param mixed $value Optional value
      *
      * @return resource
+     *
+     * @deprecated Utils::debugResource() will be removed in
+     *             guzzlehttp/guzzle:9.0.
      */
     public static function debugResource($value = null)
     {
-        if (\is_resource($value)) {
-            return $value;
-        }
-        if (\defined('STDOUT')) {
-            return \STDOUT;
-        }
+        \trigger_deprecation(
+            'guzzlehttp/guzzle',
+            '8.5',
+            '%s() is deprecated and will be removed in 9.0.',
+            __METHOD__
+        );
 
-        return Psr7\Utils::tryFopen('php://output', 'w');
+        return DebugResource::from($value);
+    }
+
+    /**
+     * Sets a factory that creates the default handler in place of the built-in
+     * selection.
+     *
+     * The factory receives the handler options and a callable that returns the
+     * handler Guzzle would have chosen. It is consulted each time a default
+     * handler is chosen, after the handler options have been checked for type
+     * and value. Passing null restores the built-in selection.
+     *
+     * The factory is process-wide, so set it from application bootstrap code,
+     * not from a library.
+     *
+     * @param (callable(array<string, mixed>, callable(): callable): callable)|null $factory
+     */
+    public static function setDefaultHandlerFactory(?callable $factory): void
+    {
+        self::$defaultHandlerFactory = $factory;
     }
 
     /**
@@ -79,306 +97,270 @@ final class Utils
      *
      * The returned handler is not wrapped by any default middlewares.
      *
-     * @return callable(\Psr\Http\Message\RequestInterface, array): Promise\PromiseInterface Returns the best handler for the given system.
+     * A factory set with setDefaultHandlerFactory() creates the handler in
+     * place of the built-in selection.
+     *
+     * @param array{transport_sharing?: mixed, max_host_connections?: mixed, max_idle_handles?: mixed, max_total_connections?: mixed, multiplex?: mixed} $handlerOptions Handler constructor options.
+     *
+     * @return callable(RequestInterface, array<array-key, mixed>): PromiseInterface<ResponseInterface, mixed> Returns the best handler for the given system.
      *
      * @throws \RuntimeException if no viable Handler is available.
      */
-    public static function chooseHandler(): callable
+    public static function chooseHandler(array $handlerOptions = []): callable
     {
-        $handler = null;
+        $sharingMode = CurlShareHandleState::normalizeMode($handlerOptions['transport_sharing'] ?? null, 'transport_sharing');
+        $sharingRequired = self::isTransportSharingRequired($sharingMode);
+        $connectionCapsRequired = self::hasConnectionCapOptions($handlerOptions);
 
-        if (\defined('CURLOPT_CUSTOMREQUEST') && \function_exists('curl_version') && version_compare(curl_version()['version'], '7.21.2') >= 0) {
-            if (\function_exists('curl_multi_exec') && \function_exists('curl_exec')) {
-                $handler = Proxy::wrapSync(new CurlMultiHandler(), new CurlHandler());
-            } elseif (\function_exists('curl_exec')) {
-                $handler = new CurlHandler();
-            } elseif (\function_exists('curl_multi_exec')) {
-                $handler = new CurlMultiHandler();
+        $maxIdleHandles = $handlerOptions['max_idle_handles'] ?? null;
+        if ($maxIdleHandles !== null && (!\is_int($maxIdleHandles) || $maxIdleHandles < 0)) {
+            throw new InvalidArgumentException('max_idle_handles must be a non-negative integer.');
+        }
+
+        if (self::$defaultHandlerFactory === null) {
+            return self::chooseBuiltInHandler($sharingMode, $sharingRequired, $connectionCapsRequired, $handlerOptions);
+        }
+
+        return (self::$defaultHandlerFactory)($handlerOptions, static function () use ($sharingMode, $sharingRequired, $connectionCapsRequired, $handlerOptions): callable {
+            return self::chooseBuiltInHandler($sharingMode, $sharingRequired, $connectionCapsRequired, $handlerOptions);
+        });
+    }
+
+    /**
+     * @param array{max_host_connections?: mixed, max_idle_handles?: mixed, max_total_connections?: mixed, multiplex?: mixed} $handlerOptions
+     *
+     * @return callable(RequestInterface, array<array-key, mixed>): PromiseInterface<ResponseInterface, mixed>
+     */
+    private static function chooseBuiltInHandler(string $sharingMode, bool $sharingRequired, bool $connectionCapsRequired, array $handlerOptions): callable
+    {
+        $sharedPoolCapsSupported = CurlVersion::supportsSharedPoolConnectionCaps();
+
+        if ($connectionCapsRequired && !$sharedPoolCapsSupported && $sharingMode === TransportSharing::PERSISTENT_REQUIRE) {
+            throw new InvalidArgumentException(\sprintf('The "max_host_connections" and "max_total_connections" options cannot be combined with required persistent transport sharing because applying connection caps to shared connection pools requires libcurl %s or higher.', CurlVersion::SHARED_POOL_CONNECTION_CAP_VERSION));
+        }
+
+        if ($connectionCapsRequired && !$sharedPoolCapsSupported && $sharingMode === TransportSharing::PERSISTENT_PREFER) {
+            // libcurl below 8.22.0 does not apply cURL multi connection caps to
+            // transfers using a shared connection pool (curl #22265), so the
+            // best honorable offer for preferred persistent sharing is a
+            // handler-lifetime share.
+            $sharingMode = TransportSharing::HANDLER_PREFER;
+        }
+
+        $handler = self::createCurlHandler($sharingMode, $handlerOptions);
+
+        // Handler-scoped required sharing can also be satisfied by the stream
+        // handler's TLS session resumption (PHP 8.6+); persistent required
+        // sharing is cURL-only.
+        $streamCanShareSessions = (bool) \ini_get('allow_url_fopen') && StreamTlsSessionCache::isSupported();
+
+        if ($sharingRequired && $handler === null) {
+            if ($sharingMode === TransportSharing::PERSISTENT_REQUIRE) {
+                throw new \RuntimeException('Required persistent transport sharing requires the PHP cURL extension, curl_exec() or curl_multi_exec(), and a supported libcurl version with SSL support.');
+            }
+
+            if (!$streamCanShareSessions) {
+                throw new \RuntimeException('Required transport sharing requires the PHP cURL extension (curl_exec()/curl_multi_exec()) with a supported libcurl version and SSL support, or PHP 8.6+ with the OpenSSL TLS session API and the allow_url_fopen ini setting.');
             }
         }
 
         if (\ini_get('allow_url_fopen')) {
-            $handler = $handler
-                ? Proxy::wrapStreaming($handler, new StreamHandler())
-                : new StreamHandler();
-        } elseif (!$handler) {
-            throw new \RuntimeException('GuzzleHttp requires cURL, the allow_url_fopen ini setting, or a custom HTTP handler.');
+            return self::addStreamHandler($handler, $sharingMode, self::connectionCapOptions($handlerOptions));
         }
 
-        return $handler;
+        if ($handler !== null) {
+            return $handler;
+        }
+
+        if ($connectionCapsRequired) {
+            throw new \RuntimeException('Connection cap options require a cap-capable cURL multi handler or the allow_url_fopen ini setting for stream fallback.');
+        }
+
+        throw new \RuntimeException('GuzzleHttp requires a supported cURL version with SSL support, the allow_url_fopen ini setting, or a custom HTTP handler.');
+    }
+
+    private static function isTransportSharingRequired(string $sharingMode): bool
+    {
+        return \in_array($sharingMode, [TransportSharing::HANDLER_REQUIRE, TransportSharing::PERSISTENT_REQUIRE], true);
     }
 
     /**
-     * Get the default User-Agent string to use with Guzzle.
+     * @param array{max_host_connections?: mixed, max_total_connections?: mixed} $handlerOptions
      */
-    public static function defaultUserAgent(): string
+    private static function hasConnectionCapOptions(array $handlerOptions): bool
     {
-        return sprintf('GuzzleHttp/%d', ClientInterface::MAJOR_VERSION);
+        return self::connectionCapOptions($handlerOptions) !== [];
     }
 
     /**
-     * Returns the default cacert bundle for the current system.
+     * @param array{max_host_connections?: mixed, max_idle_handles?: mixed, max_total_connections?: mixed, multiplex?: mixed} $handlerOptions
      *
-     * First, the openssl.cafile and curl.cainfo php.ini settings are checked.
-     * If those settings are not configured, then the common locations for
-     * bundles found on Red Hat, CentOS, Fedora, Ubuntu, Debian, FreeBSD, OS X
-     * and Windows are checked. If any of these file locations are found on
-     * disk, they will be utilized.
-     *
-     * Note: the result of this function is cached for subsequent calls.
-     *
-     * @throws \RuntimeException if no bundle can be found.
-     *
-     * @deprecated Utils::defaultCaBundle will be removed in guzzlehttp/guzzle:8.0. This method is not needed in PHP 5.6+.
+     * @return (callable(RequestInterface, array<array-key, mixed>): PromiseInterface<ResponseInterface, mixed>)|null
      */
-    public static function defaultCaBundle(): string
+    private static function createCurlHandler(string $sharingMode, array $handlerOptions): ?callable
     {
-        static $cached = null;
-        static $cafiles = [
-            // Red Hat, CentOS, Fedora (provided by the ca-certificates package)
-            '/etc/pki/tls/certs/ca-bundle.crt',
-            // Ubuntu, Debian (provided by the ca-certificates package)
-            '/etc/ssl/certs/ca-certificates.crt',
-            // FreeBSD (provided by the ca_root_nss package)
-            '/usr/local/share/certs/ca-root-nss.crt',
-            // SLES 12 (provided by the ca-certificates package)
-            '/var/lib/ca-certificates/ca-bundle.pem',
-            // OS X provided by homebrew (using the default path)
-            '/usr/local/etc/openssl/cert.pem',
-            // Google app engine
-            '/etc/ca-certificates.crt',
-            // Windows?
-            'C:\\windows\\system32\\curl-ca-bundle.crt',
-            'C:\\windows\\curl-ca-bundle.crt',
-        ];
-
-        if ($cached) {
-            return $cached;
+        if (!CurlVersion::supportsCurlHandler()) {
+            return null;
         }
 
-        if ($ca = \ini_get('openssl.cafile')) {
-            return $cached = $ca;
+        if ($sharingMode === TransportSharing::HANDLER_REQUIRE && !CurlShareHandleState::supportsHandlerRequireShare()) {
+            // Required handler sharing can also be satisfied by the stream
+            // handler's TLS session resumption, so a cURL install that cannot
+            // share is skipped instead of failing handler selection.
+            return null;
         }
 
-        if ($ca = \ini_get('curl.cainfo')) {
-            return $cached = $ca;
+        $connectionCapOptions = self::connectionCapOptions($handlerOptions);
+        if ($connectionCapOptions !== [] && !\function_exists('curl_multi_exec')) {
+            return null;
         }
 
-        foreach ($cafiles as $filename) {
-            if (\file_exists($filename)) {
-                return $cached = $filename;
-            }
+        $curlHandlerOptions = self::createCurlHandlerOptions($sharingMode);
+        if (isset($handlerOptions['max_idle_handles'])) {
+            $curlHandlerOptions['max_idle_handles'] = $handlerOptions['max_idle_handles'];
+        }
+        $curlMultiHandlerOptions = $curlHandlerOptions + $connectionCapOptions;
+        if (($handlerOptions['multiplex'] ?? null) === Multiplexing::NONE) {
+            // Forwarded to the CurlMultiHandler only: CurlHandler and
+            // StreamHandler validate known options, and both satisfy NONE
+            // per-request without a handler option.
+            $curlMultiHandlerOptions['multiplex'] = Multiplexing::NONE;
         }
 
-        throw new \RuntimeException(
-            <<< EOT
-No system CA bundle could be found in any of the the common system locations.
-PHP versions earlier than 5.6 are not properly configured to use the system's
-CA bundle by default. In order to verify peer certificates, you will need to
-supply the path on disk to a certificate bundle to the 'verify' request
-option: https://docs.guzzlephp.org/en/latest/request-options.html#verify. If
-you do not need a specific certificate bundle, then Mozilla provides a commonly
-used CA bundle which can be downloaded here (provided by the maintainer of
-cURL): https://curl.haxx.se/ca/cacert.pem. Once you have a CA bundle available
-on disk, you can set the 'openssl.cafile' PHP ini setting to point to the path
-to the file, allowing you to omit the 'verify' request option. See
-https://curl.haxx.se/docs/sslcerts.html for more information.
-EOT
-        );
-    }
+        if (\function_exists('curl_multi_exec') && \function_exists('curl_exec')) {
+            $multiHandler = new CurlMultiHandler($curlMultiHandlerOptions);
 
-    /**
-     * Creates an associative array of lowercase header names to the actual
-     * header casing.
-     */
-    public static function normalizeHeaderKeys(array $headers): array
-    {
-        $result = [];
-        foreach (\array_keys($headers) as $key) {
-            $result[\strtolower($key)] = $key;
-        }
-
-        return $result;
-    }
-
-    /**
-     * Returns true if the provided host matches any of the no proxy areas.
-     *
-     * This method will strip a port from the host if it is present. Each pattern
-     * can be matched with an exact match (e.g., "foo.com" == "foo.com") or a
-     * partial match: (e.g., "foo.com" == "baz.foo.com" and ".foo.com" ==
-     * "baz.foo.com", but ".foo.com" != "foo.com").
-     *
-     * Areas are matched in the following cases:
-     * 1. "*" (without quotes) always matches any hosts.
-     * 2. An exact match.
-     * 3. The area starts with "." and the area is the last part of the host. e.g.
-     *    '.mit.edu' will match any host that ends with '.mit.edu'.
-     *
-     * @param string   $host         Host to check against the patterns.
-     * @param string[] $noProxyArray An array of host patterns.
-     *
-     * @throws InvalidArgumentException
-     */
-    public static function isHostInNoProxy(string $host, array $noProxyArray): bool
-    {
-        if (\strlen($host) === 0) {
-            throw new InvalidArgumentException('Empty host provided');
-        }
-
-        // Strip port if present.
-        [$host] = \explode(':', $host, 2);
-
-        foreach ($noProxyArray as $area) {
-            // Always match on wildcards.
-            if ($area === '*') {
-                return true;
+            if ($connectionCapOptions !== []) {
+                // Connection caps only govern transfers on the multi handle, so
+                // the synchronous CurlHandler fast path would escape them.
+                return $multiHandler;
             }
 
-            if (empty($area)) {
-                // Don't match on empty values.
-                continue;
-            }
-
-            if ($area === $host) {
-                // Exact matches.
-                return true;
-            }
-            // Special match if the area when prefixed with ".". Remove any
-            // existing leading "." and add a new leading ".".
-            $area = '.'.\ltrim($area, '.');
-            if (\substr($host, -\strlen($area)) === $area) {
-                return true;
-            }
+            return Proxy::wrapSync($multiHandler, new CurlHandler($curlHandlerOptions));
         }
 
-        return false;
-    }
-
-    /**
-     * Wrapper for json_decode that throws when an error occurs.
-     *
-     * @param string $json    JSON data to parse
-     * @param bool   $assoc   When true, returned objects will be converted
-     *                        into associative arrays.
-     * @param int    $depth   User specified recursion depth.
-     * @param int    $options Bitmask of JSON decode options.
-     *
-     * @return object|array|string|int|float|bool|null
-     *
-     * @throws InvalidArgumentException if the JSON cannot be decoded.
-     *
-     * @see https://www.php.net/manual/en/function.json-decode.php
-     */
-    public static function jsonDecode(string $json, bool $assoc = false, int $depth = 512, int $options = 0)
-    {
-        $data = \json_decode($json, $assoc, $depth, $options);
-        if (\JSON_ERROR_NONE !== \json_last_error()) {
-            throw new InvalidArgumentException('json_decode error: '.\json_last_error_msg());
+        if ($connectionCapOptions === [] && \function_exists('curl_exec')) {
+            return new CurlHandler($curlHandlerOptions);
         }
 
-        return $data;
-    }
-
-    /**
-     * Wrapper for JSON encoding that throws when an error occurs.
-     *
-     * @param mixed $value   The value being encoded
-     * @param int   $options JSON encode option bitmask
-     * @param int   $depth   Set the maximum depth. Must be greater than zero.
-     *
-     * @throws InvalidArgumentException if the JSON cannot be encoded.
-     *
-     * @see https://www.php.net/manual/en/function.json-encode.php
-     */
-    public static function jsonEncode($value, int $options = 0, int $depth = 512): string
-    {
-        $json = \json_encode($value, $options, $depth);
-        if (\JSON_ERROR_NONE !== \json_last_error()) {
-            throw new InvalidArgumentException('json_encode error: '.\json_last_error_msg());
-        }
-
-        /** @var string */
-        return $json;
-    }
-
-    /**
-     * Wrapper for the hrtime() or microtime() functions
-     * (depending on the PHP version, one of the two is used)
-     *
-     * @return float UNIX timestamp
-     *
-     * @internal
-     */
-    public static function currentTime(): float
-    {
-        return (float) \function_exists('hrtime') ? \hrtime(true) / 1e9 : \microtime(true);
-    }
-
-    /**
-     * @throws InvalidArgumentException
-     *
-     * @internal
-     */
-    public static function idnUriConvert(UriInterface $uri, int $options = 0): UriInterface
-    {
-        if ($uri->getHost()) {
-            $asciiHost = self::idnToAsci($uri->getHost(), $options, $info);
-            if ($asciiHost === false) {
-                $errorBitSet = $info['errors'] ?? 0;
-
-                $errorConstants = array_filter(array_keys(get_defined_constants()), static function (string $name): bool {
-                    return substr($name, 0, 11) === 'IDNA_ERROR_';
-                });
-
-                $errors = [];
-                foreach ($errorConstants as $errorConstant) {
-                    if ($errorBitSet & constant($errorConstant)) {
-                        $errors[] = $errorConstant;
-                    }
-                }
-
-                $errorMessage = 'IDN conversion failed';
-                if ($errors) {
-                    $errorMessage .= ' (errors: '.implode(', ', $errors).')';
-                }
-
-                throw new InvalidArgumentException($errorMessage);
-            }
-            if ($uri->getHost() !== $asciiHost) {
-                // Replace URI only if the ASCII version is different
-                $uri = $uri->withHost($asciiHost);
-            }
-        }
-
-        return $uri;
-    }
-
-    /**
-     * @internal
-     */
-    public static function getenv(string $name): ?string
-    {
-        if (isset($_SERVER[$name])) {
-            return (string) $_SERVER[$name];
-        }
-
-        if (\PHP_SAPI === 'cli' && ($value = \getenv($name)) !== false && $value !== null) {
-            return (string) $value;
+        if (\function_exists('curl_multi_exec')) {
+            return new CurlMultiHandler($curlMultiHandlerOptions);
         }
 
         return null;
     }
 
     /**
-     * @return string|false
+     * @return array<string, mixed>
      */
-    private static function idnToAsci(string $domain, int $options, ?array &$info = [])
+    private static function createCurlHandlerOptions(string $sharingMode): array
     {
-        if (\function_exists('idn_to_ascii') && \defined('INTL_IDNA_VARIANT_UTS46')) {
-            return \idn_to_ascii($domain, $options, \INTL_IDNA_VARIANT_UTS46, $info);
+        if ($sharingMode === TransportSharing::NONE) {
+            return [];
         }
 
-        throw new \Error('ext-idn or symfony/polyfill-intl-idn not loaded or too old');
+        $shareState = CurlShareHandleState::fromOption($sharingMode);
+
+        return $shareState === null ? [] : ['transport_sharing' => $shareState];
+    }
+
+    /**
+     * @param array{max_host_connections?: mixed, max_total_connections?: mixed} $handlerOptions
+     *
+     * @return array{max_host_connections?: int, max_total_connections?: int}
+     */
+    private static function connectionCapOptions(array $handlerOptions): array
+    {
+        $options = [];
+        foreach (['max_host_connections', 'max_total_connections'] as $capOption) {
+            $value = $handlerOptions[$capOption] ?? null;
+            if ($value === null) {
+                continue;
+            }
+
+            if (!\is_int($value) || $value < 1) {
+                throw new InvalidArgumentException(\sprintf('%s must be a positive integer.', $capOption));
+            }
+
+            $options[$capOption] = $value;
+        }
+
+        return $options;
+    }
+
+    /**
+     * @param (callable(RequestInterface, array<array-key, mixed>): PromiseInterface<ResponseInterface, mixed>)|null $handler
+     * @param array{max_host_connections?: int, max_total_connections?: int}                                         $connectionCapOptions
+     *
+     * @return callable(RequestInterface, array<array-key, mixed>): PromiseInterface<ResponseInterface, mixed>
+     */
+    private static function addStreamHandler(?callable $handler, string $sharingMode, array $connectionCapOptions): callable
+    {
+        $streamHandler = new StreamHandler(['transport_sharing' => $sharingMode] + $connectionCapOptions);
+
+        return $handler
+            ? Proxy::wrapStreaming($handler, $streamHandler)
+            : $streamHandler;
+    }
+
+    /**
+     * Get the default User-Agent string to use with Guzzle.
+     *
+     * @deprecated Utils::defaultUserAgent() will be removed in
+     *             guzzlehttp/guzzle:9.0. Use ClientInterface::MAJOR_VERSION
+     *             to build the string instead.
+     */
+    public static function defaultUserAgent(): string
+    {
+        \trigger_deprecation(
+            'guzzlehttp/guzzle',
+            '8.5',
+            '%s() is deprecated and will be removed in 9.0. Use %s::MAJOR_VERSION to build the string instead.',
+            __METHOD__,
+            ClientInterface::class
+        );
+
+        return sprintf('GuzzleHttp/%d', ClientInterface::MAJOR_VERSION);
+    }
+
+    /**
+     * Creates an associative array of lowercase header names to the actual
+     * header casing.
+     *
+     * @deprecated Utils::normalizeHeaderKeys() will be removed in
+     *             guzzlehttp/guzzle:9.0.
+     */
+    public static function normalizeHeaderKeys(array $headers): array
+    {
+        \trigger_deprecation(
+            'guzzlehttp/guzzle',
+            '8.5',
+            '%s() is deprecated and will be removed in 9.0.',
+            __METHOD__
+        );
+
+        return HeaderProcessor::normalizeHeaderKeys($headers);
+    }
+
+    /**
+     * @param mixed $protocols
+     *
+     * @return string[]
+     *
+     * @throws InvalidArgumentException
+     *
+     * @deprecated Utils::normalizeProtocols() will be removed in
+     *             guzzlehttp/guzzle:9.0.
+     */
+    public static function normalizeProtocols($protocols): array
+    {
+        \trigger_deprecation(
+            'guzzlehttp/guzzle',
+            '8.5',
+            '%s() is deprecated and will be removed in 9.0.',
+            __METHOD__
+        );
+
+        return Protocols::normalize($protocols);
     }
 }

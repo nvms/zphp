@@ -3,9 +3,11 @@
 namespace Illuminate\Console\Concerns;
 
 use Illuminate\Console\PromptValidationException;
+use Laravel\Prompts\AutoCompletePrompt;
 use Laravel\Prompts\ConfirmPrompt;
 use Laravel\Prompts\MultiSearchPrompt;
 use Laravel\Prompts\MultiSelectPrompt;
+use Laravel\Prompts\NumberPrompt;
 use Laravel\Prompts\PasswordPrompt;
 use Laravel\Prompts\PausePrompt;
 use Laravel\Prompts\Prompt;
@@ -47,6 +49,16 @@ trait ConfiguresPrompts
             $prompt->validate
         ));
 
+        NumberPrompt::fallbackUsing(fn (NumberPrompt $prompt) => $this->promptUntilValid(
+            function () use ($prompt) {
+                $answer = $this->components->ask($prompt->label, $prompt->default ?: null) ?? '';
+
+                return is_numeric($answer) ? (int) $answer : $answer;
+            },
+            $prompt->required,
+            $prompt->validate
+        ));
+
         PasswordPrompt::fallbackUsing(fn (PasswordPrompt $prompt) => $this->promptUntilValid(
             fn () => $this->components->secret($prompt->label) ?? '',
             $prompt->required,
@@ -82,6 +94,12 @@ trait ConfiguresPrompts
         ));
 
         SuggestPrompt::fallbackUsing(fn (SuggestPrompt $prompt) => $this->promptUntilValid(
+            fn () => $this->components->askWithCompletion($prompt->label, $prompt->options, $prompt->default ?: null) ?? '',
+            $prompt->required,
+            $prompt->validate
+        ));
+
+        AutoCompletePrompt::fallbackUsing(fn (AutoCompletePrompt $prompt) => $this->promptUntilValid(
             fn () => $this->components->askWithCompletion($prompt->label, $prompt->options, $prompt->default ?: null) ?? '',
             $prompt->required,
             $prompt->validate
@@ -141,7 +159,7 @@ trait ConfiguresPrompts
 
             $error = is_callable($validate) ? $validate($result) : $this->validatePrompt($result, $validate);
 
-            if (is_string($error) && strlen($error) > 0) {
+            if (is_string($error) && $error !== '') {
                 $this->components->error($error);
 
                 if ($this->laravel->runningUnitTests()) {

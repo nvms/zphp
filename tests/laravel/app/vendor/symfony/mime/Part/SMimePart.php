@@ -99,6 +99,13 @@ class SMimePart extends AbstractPart
 
     public function __unserialize(array $data): void
     {
+        if (($data['body'] ?? $data["\0".self::class."\0body"] ?? $data["\0*\0body"] ?? null) instanceof \Stringable
+            || !\is_string($data['type'] ?? $data["\0".self::class."\0type"] ?? $data["\0*\0type"] ?? null)
+            || !\is_string($data['subtype'] ?? $data["\0".self::class."\0subtype"] ?? $data["\0*\0subtype"] ?? null)
+        ) {
+            throw new \BadMethodCallException('Cannot unserialize '.__CLASS__);
+        }
+
         parent::__unserialize(['headers' => $data['_headers'] ?? $data["\0*\0_headers"]]);
         $this->body = $data['body'] ?? $data["\0".self::class."\0body"];
         $this->type = $data['type'] ?? $data["\0".self::class."\0type"];

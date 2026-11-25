@@ -97,21 +97,21 @@ abstract class AbstractPaginator implements CanBeEscapedWhenCastToString, Htmlab
     /**
      * The current path resolver callback.
      *
-     * @var \Closure
+     * @var \Closure|null
      */
     protected static $currentPathResolver;
 
     /**
      * The current page resolver callback.
      *
-     * @var \Closure
+     * @var \Closure|null
      */
     protected static $currentPageResolver;
 
     /**
      * The query string resolver callback.
      *
-     * @var \Closure
+     * @var \Closure|null
      */
     protected static $queryStringResolver;
 
@@ -204,7 +204,7 @@ abstract class AbstractPaginator implements CanBeEscapedWhenCastToString, Htmlab
      * Get / set the URL fragment to be appended to URLs.
      *
      * @param  string|null  $fragment
-     * @return $this|string|null
+     * @return ($fragment is null ? string|null : $this)
      */
     public function fragment($fragment = null)
     {
@@ -544,7 +544,7 @@ abstract class AbstractPaginator implements CanBeEscapedWhenCastToString, Htmlab
      * Resolve the query string or return the default value.
      *
      * @param  string|array|null  $default
-     * @return string
+     * @return string|array|null
      */
     public static function resolveQueryString($default = null)
     {
