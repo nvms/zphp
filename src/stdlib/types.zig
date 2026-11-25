@@ -786,6 +786,16 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         current = if (ctx.vm.classes.get(cn)) |cls| cls.parent else break;
         depth += 1;
     }
+    // the object's get_method handler: the spl iterators find a method they
+    // lack on the iterator they wrap (a __call trampoline doesn't count)
+    if (args[0] == .object) if (ctx.vm.methodGate(args[0].object.class_name)) |gate| if (try gate(ctx.vm, args[0].object)) |msg| {
+        defer ctx.vm.allocator.free(msg);
+        try ctx.vm.setPendingException("Error", msg);
+        return error.RuntimeError;
+    };
+    if (args[0] == .object) if (spl_iterator_classes.forwardFor(ctx.vm, args[0].object, method_name)) |target| {
+        if (ctx.vm.hasMethod(target.class_name, method_name)) return NativeResult.scalar(.{ .bool = true });
+    };
     return NativeResult.scalar(.{ .bool = false });
 }
 

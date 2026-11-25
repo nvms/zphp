@@ -2336,6 +2336,13 @@ fn ownIterator(vm: *VM, obj: *PhpObject) bool {
     return true;
 }
 
+// spl_recursive_it_get_method: no method of an object whose iterators the
+// constructor never set up can be called, its own or a subclass's
+fn riiMethodGate(vm: *VM, obj: *PhpObject) RuntimeError!?[]u8 {
+    if (recRaw(obj)) |r| if (r.levels() != null) return null;
+    return try std.fmt.allocPrint(vm.allocator, "The {s} instance wasn't initialized properly", .{obj.class_name});
+}
+
 // php's iterator refuses an object whose constructor never ran
 pub fn foreachRefusal(vm: *VM, obj: *PhpObject) ?[]const u8 {
     if (!ownIterator(vm, obj)) return null;
@@ -2588,6 +2595,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ .name = "setMaxDepth", .arity = 1, .f = riiSetMaxDepth },
         .{ .name = "getMaxDepth", .f = riiGetMaxDepth },
     });
+    rii.method_gate = riiMethodGate;
     try rii.constants.put(a, "LEAVES_ONLY", .{ .int = RIT_LEAVES_ONLY });
     try rii.constant_order.append(a, "LEAVES_ONLY");
     try rii.constants.put(a, "SELF_FIRST", .{ .int = RIT_SELF_FIRST });

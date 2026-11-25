@@ -652,6 +652,12 @@ pub const ClassDef = struct {
     // state a built-in class keeps in its properties. a class with a handle
     // and no hook is uncloneable, like php's handle classes
     native_clone: ?*const fn (*VM, *PhpObject, *PhpObject) bool = null,
+    // php's get_method handler of the classes that refuse every method call
+    // on an object their constructor never set up (RecursiveIteratorIterator,
+    // SplFileObject, GlobIterator): the Error's message (the vm's allocation),
+    // or null. subclasses find it through methodGate, which caches it here
+    method_gate: ?*const fn (*VM, *PhpObject) RuntimeError!?[]u8 = null,
+    method_gate_resolved: bool = false,
     // arithmetic and comparison on instances of a native class (BcMath\Number).
     // null result means the operand pair is not supported and the ordinary
     // TypeError path runs
@@ -13652,6 +13658,13 @@ pub const VM = struct {
                         }
                     }
 
+                    const gated = self.methodGate(obj.class_name);
+                    if (gated) |gate| if (try gate(self, obj)) |msg| {
+                        defer self.allocator.free(msg);
+                        self.dropN(ac + 1);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    };
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
                     // the calling class's own private method runs on its
                     // instances, whatever a subclass redeclares
@@ -13731,7 +13744,7 @@ pub const VM = struct {
                             const mc_ip2 = self.currentFrame().ip - 3 - bytecode.op_bytes;
                             const mc_chunk_key2 = @intFromPtr(self.currentChunk());
                             const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
-                            if (mvr.visibility == .public and scope_private == null) {
+                            if (mvr.visibility == .public and scope_private == null and gated == null) {
                                 ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native, .full_name = full_name };
                             }
                         }
@@ -13800,7 +13813,7 @@ pub const VM = struct {
                             const mc_ip2 = self.currentFrame().ip - 3 - bytecode.op_bytes;
                             const mc_chunk_key2 = @intFromPtr(self.currentChunk());
                             const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
-                            if (mvr.visibility == .public and scope_private == null) {
+                            if (mvr.visibility == .public and scope_private == null and gated == null) {
                                 ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .func = func, .full_name = full_name };
                             }
                         }
@@ -14164,6 +14177,12 @@ pub const VM = struct {
                     // now stack is [object, arg1, ..., argN] - same layout as method_call
                     // the calling class's own private method runs on its
                     // instances, whatever a subclass redeclares
+                    if (self.methodGate(obj.class_name)) |gate| if (try gate(self, obj)) |msg| {
+                        defer self.allocator.free(msg);
+                        self.dropN(ac + 1);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    };
                     const dyn_mvr = self.findMethodVisibility(obj.class_name, method_name);
                     const dyn_scope_private = if (dyn_mvr.changed) self.scopePrivateMethod(obj.class_name, method_name, dyn_mvr.defining_class) else null;
                     // zend_std_get_method: a method the scope can't see goes
@@ -19504,6 +19523,16 @@ pub const VM = struct {
             name = def.parent;
         }
         return null;
+    }
+
+    // the get_method check of class_name or the internal class it extends
+    pub fn methodGate(self: *VM, class_name: []const u8) ?*const fn (*VM, *PhpObject) RuntimeError!?[]u8 {
+        const def = self.classes.getPtr(class_name) orelse return null;
+        if (!def.method_gate_resolved) {
+            def.method_gate = self.classHook(class_name, "method_gate");
+            def.method_gate_resolved = true;
+        }
+        return def.method_gate;
     }
 
     pub fn raiseFatal(self: *VM, message: []const u8) RuntimeError {

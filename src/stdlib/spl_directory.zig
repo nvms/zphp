@@ -178,13 +178,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "getSubPathname", rdiGetSubPathname },
     });
 
-    var gi = ClassDef{ .name = "GlobIterator", .parent = "FilesystemIterator", .uncloneable = true };
+    var gi = ClassDef{ .name = "GlobIterator", .parent = "FilesystemIterator", .uncloneable = true, .method_gate = methodGate };
     try gi.interfaces.append(a, "Countable");
     try registerClass(vm, a, gi, "GlobIterator", &.{
         .{ "__construct", giConstruct }, .{ "count", giCount },
     });
 
-    var sfo = ClassDef{ .name = "SplFileObject", .parent = "SplFileInfo", .uncloneable = true };
+    var sfo = ClassDef{ .name = "SplFileObject", .parent = "SplFileInfo", .uncloneable = true, .method_gate = methodGate };
     try sfo.interfaces.append(a, "RecursiveIterator");
     try sfo.interfaces.append(a, "SeekableIterator");
     inline for (.{ .{ "DROP_NEW_LINE", DROP_NEW_LINE }, .{ "READ_AHEAD", READ_AHEAD }, .{ "SKIP_EMPTY", SKIP_EMPTY }, .{ "READ_CSV", READ_CSV } }) |c| {
@@ -263,6 +263,14 @@ fn infoClass(obj: *PhpObject) []const u8 {
 
 fn dName(obj: *PhpObject) []const u8 {
     return str(obj, F.d_name) orelse "";
+}
+
+// spl_filesystem_object_get_method_check (GlobIterator, SplFileObject): a
+// method call on an object with neither a stream nor a path, one whose
+// constructor never ran, is refused, the object's own methods included
+fn methodGate(vm: *VM, obj: *PhpObject) RuntimeError!?[]u8 {
+    if (dirOpen(obj) or streamOf(obj) != null or str(obj, F.orig_path) != null) return null;
+    return try vm.allocator.dupe(u8, "The parent constructor was not called: the object is in an invalid state");
 }
 
 fn dirOpen(obj: *PhpObject) bool {
