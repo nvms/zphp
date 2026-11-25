@@ -133,11 +133,12 @@ pub fn open(ctx: *NativeContext, class: []const u8, path: []const u8, mode: []co
         try logErrorAt(ctx, options, .{ .code = .NotImplemented, .wrapper = se.user_space, .context = context }, "\"{s}::stream_open\" is not implemented", .{className(ctx, obj)});
         return null;
     }
+    // released however the call ends, a thrown exception included
+    defer for (args) |a| ctx.vm.releaseValue(a);
     const ret = if (ctx.vm.hasMethod(obj.class_name, "stream_open"))
         try ctx.vm.callMethodRef(obj, "stream_open", &args)
     else
         (try callIfExists(ctx, obj, "stream_open", args[0..3])).?;
-    defer for (args) |a| ctx.vm.releaseValue(a);
     if (!ret.isTruthy()) {
         try logErrorAt(ctx, options, .{ .code = .UserspaceCallFailed, .wrapper = se.user_space, .context = context }, "\"{s}::stream_open\" call failed", .{className(ctx, obj)});
         return null;

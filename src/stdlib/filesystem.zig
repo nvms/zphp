@@ -2955,6 +2955,9 @@ fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         return NativeResult.borrowed((try openUserStream(ctx, class_name, path, mode, user_streams.REPORT_ERRORS, if (args.len > 3) args[3] else null)) orelse Value{ .bool = false });
     }
+    // a scheme nothing registered: php's warning, and a plain path
+    var fold_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (try unknownWrapperPath(ctx, path, &fold_buf)) |plain| path = plain;
     if (extractScheme(path)) |s| {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) {
             // an unregistered wrapper's url is opened as a plain path, and
@@ -2981,6 +2984,9 @@ fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         try obj.set(ctx.allocator, "__fd", .{ .int = 1 });
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("w") });
+        // php's output stream has no seek: it never moves the descriptor
+        // under the output
+        if (path[6] == 'o') (try streams.of(ctx, obj)).no_seek = true;
         return NativeResult.borrowed(.{ .resource = obj });
     }
     if (std.mem.eql(u8, path, "php://stderr")) {
