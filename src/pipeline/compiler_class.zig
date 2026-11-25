@@ -1038,7 +1038,22 @@ fn readTypeName(self: *Compiler, tok: *u32, end_tok: u32) Error!TypeName {
     if (!qualified and scope_known and std.mem.eql(u8, lower, "parent") and self.current_parent.len > 0) return .{ .written = written, .class = self.current_parent };
     if (!qualified and (std.mem.eql(u8, lower, "self") or std.mem.eql(u8, lower, "parent"))) return .{ .written = written, .class = written };
     const class = if (written[0] == '\\') written[1..] else self.resolveClassName(written);
+    // zend_assert_valid_class_name(class_name, "a type name"), once per
+    // written type
+    if (deprecatedClassNameWord(class)) |word| {
+        if (!(try self.type_warned.getOrPut(self.allocator, start | 0x8000_0000)).found_existing)
+            try self.warn(start, 8192, "Using \"{s}\" as a type name is deprecated since {s}", .{ word, if (std.mem.eql(u8, word, "_")) "8.4" else "8.6" });
+    }
     return .{ .written = written, .class = class };
+}
+
+// the words zend_assert_valid_class_name deprecates as a class name's last
+// segment ("_" since 8.4, "let" and "is" since 8.6)
+pub fn deprecatedClassNameWord(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "_") or std.mem.endsWith(u8, name, "\\_")) return "_";
+    if (std.ascii.eqlIgnoreCase(name, "let") or std.mem.endsWith(u8, name, "\\let")) return "let";
+    if (std.ascii.eqlIgnoreCase(name, "is") or std.mem.endsWith(u8, name, "\\is")) return "is";
+    return null;
 }
 
 // zend_is_confusable_type: a name that reads like a built-in type but is a

@@ -2430,6 +2430,16 @@ pub const Compiler = struct {
             const new_name = if (node.data.rhs != 0) c.ast.tokenSlice(node.data.rhs) else c.ast.tokenSlice(parts[parts.len - 1]);
             if (node.data.rhs == 0 and parts.len == 1 and self.namespace.len == 0)
                 try c.warn(node.main_token, 2, "The use statement with non-compound name '{s}' has no effect", .{new_name});
+            // zend_compile_use: aliases php reserves for future syntax
+            if (std.mem.eql(u8, new_name, "_") or std.ascii.eqlIgnoreCase(new_name, "let") or std.ascii.eqlIgnoreCase(new_name, "is")) {
+                switch (kind) {
+                    0 => if (!@import("compiler_class.zig").isReservedClassName(new_name))
+                        try c.warn(node.main_token, 8192, "Using \"{s}\" as a class name is deprecated", .{new_name}),
+                    1 => if (!std.mem.eql(u8, new_name, "_"))
+                        try c.warn(node.main_token, 8192, "Using \"{s}\" as a function name is deprecated since 8.6", .{new_name}),
+                    else => try c.warn(node.main_token, 8192, "Using \"{s}\" as a constant name is deprecated since 8.6", .{new_name}),
+                }
+            }
             const lookup = try self.key(new_name, kind);
             const check = try self.qualified(new_name, kind);
             if (self.seen.get(check)) |bits| if (bits & kind_bits[kind] != 0 and !std.ascii.eqlIgnoreCase(old_name, check))

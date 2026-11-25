@@ -2959,7 +2959,18 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
             defer ctx.allocator.free(msg);
             return ctx.vm.raiseFatal(msg);
         }
-        if (std.mem.eql(u8, bare, "_")) try ctx.vm.raiseError(8192, "Using \"_\" as a class alias is deprecated since 8.4");
+        // checked on the lowercased name, as zend_register_class_alias_ex does
+        if (unqualified.len <= 3) {
+            var lower_buf: [3]u8 = undefined;
+            const lower = std.ascii.lowerString(&lower_buf, unqualified);
+            if (std.mem.eql(u8, lower, "_")) {
+                try ctx.vm.raiseError(8192, "Using \"_\" as a class alias is deprecated since 8.4");
+            } else if (std.mem.eql(u8, lower, "let")) {
+                try ctx.vm.raiseError(8192, "Using \"let\" as a class alias is deprecated since 8.6");
+            } else if (std.mem.eql(u8, lower, "is")) {
+                try ctx.vm.raiseError(8192, "Using \"is\" as a class alias is deprecated since 8.6");
+            }
+        }
     }
     const vm = ctx.vm;
     if (autoload and !vm.classes.contains(original) and !vm.interfaces.contains(original) and !vm.traits.contains(original)) {
