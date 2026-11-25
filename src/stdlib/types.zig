@@ -753,6 +753,9 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         for (fiber_methods) |m| if (std.ascii.eqlIgnoreCase(m, method_name)) return NativeResult.scalar(.{ .bool = true });
         return NativeResult.scalar(.{ .bool = false });
     }
+    // a class named by string is looked up first, autoloading it, as
+    // zend_lookup_class does; its ancestors are loaded with it
+    if (args[0] == .string and !ctx.vm.classes.contains(current.?)) try ctx.vm.tryAutoload(current.?);
     var buf: [256]u8 = undefined;
     var depth: usize = 0;
     while (current) |cn| {
@@ -776,14 +779,7 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
             if (ctx.vm.functions.contains(full)) return NativeResult.scalar(.{ .bool = true });
             if (!std.mem.eql(u8, canonical_method, method_name)) return NativeResult.scalar(.{ .bool = true });
         }
-        if (ctx.vm.classes.get(cn)) |cls| {
-            current = cls.parent;
-        } else {
-            try ctx.vm.tryAutoload(cn);
-            if (ctx.vm.classes.get(cn)) |cls| {
-                current = cls.parent;
-            } else break;
-        }
+        current = if (ctx.vm.classes.get(cn)) |cls| cls.parent else break;
         depth += 1;
     }
     return NativeResult.scalar(.{ .bool = false });
