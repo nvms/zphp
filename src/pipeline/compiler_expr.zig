@@ -1096,12 +1096,21 @@ fn ensureListWritable(self: *Compiler, idx: u32, op_token: u32) Error!void {
 pub fn checkTemporaryBase(self: *Compiler, target_idx: u32, op_token: u32) Error!void {
     var idx = target_idx;
     var chained = false;
+    var via_prop = false;
     while (true) {
         const n = self.ast.nodes[idx];
+        // php 8.6 (ZEND_CONST_OBJECT_FETCH): a constant under a property
+        // fetch, through any dimensions, is fetched as the object it holds
+        if (via_prop and isConstantFetch(self, idx)) return;
         switch (n.tag) {
-            .array_access, .array_push_target, .property_access, .nullsafe_property_access => {
+            .array_access, .array_push_target => {
                 idx = n.data.lhs;
                 chained = true;
+            },
+            .property_access, .nullsafe_property_access => {
+                idx = n.data.lhs;
+                chained = true;
+                via_prop = true;
             },
             .grouped_expr => idx = n.data.lhs,
             // zend_separate_if_call_and_write: a builtin compiled to an
@@ -1151,12 +1160,32 @@ pub fn isVariableOrCall(self: *Compiler, idx: u32) bool {
 // zend_can_write_to_variable: what a list() element may write to
 pub fn canWriteToVariable(self: *Compiler, idx: u32) bool {
     var base = idx;
+    var via_prop = false;
     while (true) {
         const n = self.ast.nodes[base];
         if (n.tag != .array_access and n.tag != .array_push_target and n.tag != .property_access) break;
+        via_prop = via_prop or n.tag == .property_access;
         base = n.data.lhs;
     }
+    // php 8.6: a property of the object a constant holds
+    if (via_prop and isConstantFetch(self, base)) return true;
     return isVariableOrCall(self, base) and !isShortCircuited(self, base);
+}
+
+// ZEND_AST_CONST or ZEND_AST_CLASS_CONST: a global constant (true, false and
+// null among them) or a class constant, not ::class or a magic constant
+fn isConstantFetch(self: *Compiler, idx: u32) bool {
+    var n = self.ast.nodes[idx];
+    while (n.tag == .grouped_expr) n = self.ast.nodes[n.data.lhs];
+    return switch (n.tag) {
+        .identifier, .qualified_name, .true_literal, .false_literal, .null_literal, .dynamic_class_const => true,
+        .static_prop_access => blk: {
+            if (n.main_token == 0) break :blk false;
+            const member = self.ast.tokenSlice(n.main_token);
+            break :blk member.len > 0 and member[0] != '$' and !std.ascii.eqlIgnoreCase(member, "class");
+        },
+        else => false,
+    };
 }
 
 fn listHasRef(self: *Compiler, idx: u32) bool {
@@ -2606,7 +2635,57 @@ fn compilePropFetchBase(self: *Compiler, node_idx: u32, rw: bool) Error!void {
         }
         return;
     }
+    // php 8.6: `C[k]->p = v` fetches the element for writing from a copy of
+    // the constant (FETCH_DIM_W on the QM_ASSIGN'd temporary)
+    if ((node.tag == .array_access or (node.tag == .array_push_target and !rw)) and constDimChainRoot(self, node_idx)) {
+        try compileConstDimChain(self, node.data.lhs);
+        if (node.tag == .array_push_target) {
+            try self.emitOp(.array_append_w);
+        } else {
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.array_get_w);
+            try self.emitByte(@intFromBool(rw));
+        }
+        return;
+    }
     return self.compileNode(node_idx);
+}
+
+// whether a dimension chain ends in a constant
+fn constDimChainRoot(self: *Compiler, node_idx: u32) bool {
+    var idx = node_idx;
+    while (true) {
+        const node = self.ast.nodes[idx];
+        switch (node.tag) {
+            .array_access, .array_push_target => idx = node.data.lhs,
+            else => return isConstantFetch(self, idx),
+        }
+    }
+}
+
+// the containers above the last dimension of a constant's chain: the
+// constant's value goes into a hidden variable, the temporary php writes
+// into, and the chain is vivified from there
+fn compileConstDimChain(self: *Compiler, node_idx: u32) Error!void {
+    const node = self.ast.nodes[node_idx];
+    switch (node.tag) {
+        .array_access => {
+            try compileConstDimChain(self, node.data.lhs);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.array_get_vivify);
+        },
+        .array_push_target => {
+            try compileConstDimChain(self, node.data.lhs);
+            try self.emitOp(.array_append_vivify);
+        },
+        else => {
+            const tmp = "__const_dim_container";
+            try self.compileNode(node_idx);
+            try self.emitSetVar(tmp);
+            try self.emitOp(.pop);
+            try emitEnsureArray(self, tmp);
+        },
+    }
 }
 
 // whether a dimension chain ends in a variable or a property, the roots
@@ -2923,7 +3002,8 @@ fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error
 
     try self.compileNode(node.data.lhs);
     if (self.const_expr) return constExprPropFetch(self, node);
-    if (guard) |g| if (!g.by_value and isTemporaryContainer(self, node.data.lhs)) try emitArgGuard(self, g, .arg_temp_container);
+    // php 8.6 fetches an object held in a constant for writing
+    if (guard) |g| if (!g.by_value and isTemporaryContainer(self, node.data.lhs) and !isConstantFetch(self, node.data.lhs)) try emitArgGuard(self, g, .arg_temp_container);
     if (self.isDynamicProp(node)) {
         if (node.main_token == 0) {
             // $obj->{expr}: compile the expression as property name
