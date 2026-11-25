@@ -1123,12 +1123,7 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 fn native_shuffle(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
     const arr = args[0].array;
-    if (!ctx.vm.rng_seeded) {
-        var entropy: [4]u8 = undefined;
-        platform.random.bytes(&entropy);
-        ctx.vm.mt19937.seed(std.mem.readInt(u32, &entropy, .little));
-        ctx.vm.rng_seeded = true;
-    }
+    _ = @import("math.zig").defaultEngine(ctx);
     var i: usize = arr.entries.items.len;
     while (i > 1) {
         i -= 1;
@@ -1151,32 +1146,44 @@ fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         try ctx.vm.setPendingException("ValueError", "array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)");
         return error.RuntimeError;
     }
-    // php returns a scalar key whenever num is 1, whether $num was omitted or
-    // passed explicitly, an array of keys only for num > 1
+    // php_array_pick_keys over the default engine. php samples hash slots,
+    // retrying on the holes deleted elements leave; zphp's arrays keep no
+    // holes, so this matches php for an array without them
+    const engine = @import("math.zig").defaultEngine(ctx);
+    const avail: i64 = @intCast(arr.entries.items.len);
     if (num == 1) {
-        const idx = platform.random.intRangeAtMost(usize, 0, arr.entries.items.len - 1);
+        const idx: usize = @intCast(engine.nextRange(0, avail - 1));
         return switch (arr.entries.items[idx].key) {
             .int => |i| NativeResult.scalar(.{ .int = i }),
             .string => |s| NativeResult.shareString(s),
         };
     }
-    // Fisher-Yates partial shuffle for `num` distinct picks
-    var pool = try ctx.allocator.alloc(usize, arr.entries.items.len);
-    defer ctx.allocator.free(pool);
-    for (0..pool.len) |i| pool[i] = i;
-    var i: usize = 0;
-    const n: usize = @intCast(num);
-    while (i < n) : (i += 1) {
-        const j = platform.random.intRangeAtMost(usize, i, pool.len - 1);
-        const tmp = pool[i];
-        pool[i] = pool[j];
-        pool[j] = tmp;
+    // more than half wanted: pick the ones left out instead
+    var want = num;
+    const negative = num > (avail >> 1);
+    if (negative) want = avail - num;
+    const picked = try ctx.allocator.alloc(bool, arr.entries.items.len);
+    defer ctx.allocator.free(picked);
+    @memset(picked, false);
+    var failures: usize = 0;
+    while (want > 0) {
+        const r: usize = @intCast(engine.nextRange(0, avail - 1));
+        if (picked[r]) {
+            failures += 1;
+            if (failures > random_range_attempts) {
+                try ctx.vm.setPendingException("Random\\BrokenRandomEngineError", "Failed to generate an acceptable random number in 50 attempts");
+                return error.RuntimeError;
+            }
+        } else {
+            picked[r] = true;
+            want -= 1;
+            failures = 0;
+        }
     }
-    // PHP returns the picks in ascending order of their original index
-    std.mem.sort(usize, pool[0..n], {}, std.sort.asc(usize));
     const out = try ctx.createArray();
-    for (pool[0..n]) |idx| {
-        const v: Value = switch (arr.entries.items[idx].key) {
+    for (arr.entries.items, picked) |entry, chosen| {
+        if (chosen == negative) continue;
+        const v: Value = switch (entry.key) {
             .int => |k| .{ .int = k },
             .string => |s| .{ .string = s },
         };
@@ -1184,6 +1191,9 @@ fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     }
     return NativeResult.borrowed(.{ .array = out });
 }
+
+// PHP_RANDOM_RANGE_ATTEMPTS
+const random_range_attempts = 50;
 
 // a variable name a frame's vars map will borrow: interned, so repeated calls
 // reuse one copy

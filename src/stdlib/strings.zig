@@ -256,12 +256,7 @@ fn str_shuffle(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const buf = try ctx.allocator.alloc(u8, s.len);
     @memcpy(buf, s);
     // php_binary_string_shuffle over the default engine, mt_rand's
-    if (!ctx.vm.rng_seeded) {
-        var entropy: [4]u8 = undefined;
-        platform.random.bytes(&entropy);
-        ctx.vm.mt19937.seed(std.mem.readInt(u32, &entropy, .little));
-        ctx.vm.rng_seeded = true;
-    }
+    _ = @import("math.zig").defaultEngine(ctx);
     var n_left: usize = buf.len - 1;
     while (n_left > 0) : (n_left -= 1) {
         const j: usize = @intCast(ctx.vm.mt19937.nextRange(0, @intCast(n_left)));

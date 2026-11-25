@@ -311,18 +311,24 @@ fn native_mt_srand(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     return NativeResult.scalar(.null);
 }
 
+// php's default random engine, the mt19937 mt_srand seeds; seeded from the
+// os on first use, as php_random_default_engine does
+pub fn defaultEngine(ctx: *NativeContext) *@import("mt19937.zig").Mt19937 {
+    if (!ctx.vm.rng_seeded) {
+        var entropy: [4]u8 = undefined;
+        platform.random.bytes(&entropy);
+        ctx.vm.mt19937.seed(std.mem.readInt(u32, &entropy, .little));
+        ctx.vm.rng_seeded = true;
+    }
+    return &ctx.vm.mt19937;
+}
+
 fn native_getrandmax(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(.{ .int = 2147483647 });
 }
 
 fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (!ctx.vm.rng_seeded) {
-        var entropy: [4]u8 = undefined;
-        platform.random.bytes(&entropy);
-        const sd: u32 = std.mem.readInt(u32, &entropy, .little);
-        ctx.vm.mt19937.seed(sd);
-        ctx.vm.rng_seeded = true;
-    }
+    _ = defaultEngine(ctx);
     const lo: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     const hi: i64 = if (args.len >= 2) Value.toInt(args[1]) else 2147483647;
     // mt_rand() with no args returns a 31-bit value
