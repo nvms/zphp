@@ -1311,6 +1311,8 @@ pub const VM = struct {
     trait_constants: std.StringHashMapUnmanaged([]const TraitStaticProp) = .{},
     statics: std.StringHashMapUnmanaged(Value) = .{},
     statics_cells: std.StringHashMapUnmanaged(*Value) = .{},
+    // the static variables whose `static` declaration has run (keys interned)
+    statics_bound: std.StringHashMapUnmanaged(void) = .{},
     // shared heap cell per global variable name. allocated on first `global $x`
     // declaration so every function frame referencing the same global gets a
     // pointer to the same value. lets writes propagate live to recursive calls
@@ -1952,7 +1954,7 @@ pub const VM = struct {
     // counted holders inside a reference set: the cell, each registered
     // mirror, and each bound frame binding that actually holds the value (a
     // slot bound by `$r = &$x` reads through the cell and holds nothing)
-    fn referenceAliasCount(self: *VM, cell: *Value) u32 {
+    pub fn referenceAliasCount(self: *VM, cell: *Value) u32 {
         var aliases: u32 = 1;
         if (cell.* == .array) for (superglobal_names) |name| {
             if (self.globals_cells.get(name) == cell) {
@@ -4103,6 +4105,7 @@ pub const VM = struct {
         self.trait_constants.deinit(self.allocator);
         self.statics.deinit(self.allocator);
         self.statics_cells.deinit(self.allocator);
+        self.statics_bound.deinit(self.allocator);
         self.globals_cells.deinit(self.allocator);
         self.static_vars.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
@@ -4319,6 +4322,7 @@ pub const VM = struct {
         self.exit_code = 0;
         self.statics.clearRetainingCapacity();
         self.statics_cells.clearRetainingCapacity();
+        self.statics_bound.clearRetainingCapacity();
         self.globals_cells.clearRetainingCapacity();
         self.globals_array = null;
         self.armed_auto_globals = .{};
@@ -11457,15 +11461,9 @@ pub const VM = struct {
                     // recursive calls and across-call state stay in sync (matches PHP's
                     // static variable semantics).
                     const st_frame = self.currentFrame();
-                    var run_buf: [32]u8 = undefined;
                     const in_include = st_frame.include_parent != null and st_frame.func == null;
-                    const func_name = if (in_include)
-                        std.fmt.bufPrint(&run_buf, "\x00include{d}", .{st_frame.include_serial}) catch unreachable
-                    else
-                        self.currentFuncName() orelse "__main__";
-                    if (self.capture_index.getPtr(func_name)) |range| range.has_statics = true;
                     var key_buf: [256]u8 = undefined;
-                    const key = class_names.memberKey(&key_buf, func_name, var_name);
+                    const key = self.staticStorageKey(&key_buf, var_name);
                     var cell = self.statics_cells.get(key);
                     if (cell == null) {
                         const c = try self.newRefCell();
@@ -11485,6 +11483,19 @@ pub const VM = struct {
                 },
 
                 .set_static => {},
+
+                .jump_if_static_bound => {
+                    const var_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const offset = self.readU16();
+                    var key_buf: [256]u8 = undefined;
+                    if (self.statics_bound.contains(self.staticStorageKey(&key_buf, var_name))) self.currentFrame().ip += offset;
+                },
+
+                .static_bind => {
+                    const var_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    var key_buf: [256]u8 = undefined;
+                    try self.statics_bound.put(self.allocator, try self.internName(self.staticStorageKey(&key_buf, var_name)), {});
+                },
 
                 .require => {
                     const kind: IncludeKind = @enumFromInt(self.readByte());
@@ -23615,6 +23626,21 @@ pub const VM = struct {
         }
     }
 
+    // where the running function's static variable lives: "<function or
+    // closure instance>::$name", an include run's own "\x00includeN" for
+    // code outside functions, "__main__" for the main script. built in buf
+    fn staticStorageKey(self: *VM, buf: []u8, var_name: []const u8) []const u8 {
+        const st_frame = self.currentFrame();
+        var run_buf: [32]u8 = undefined;
+        const in_include = st_frame.include_parent != null and st_frame.func == null;
+        const func_name = if (in_include)
+            std.fmt.bufPrint(&run_buf, "\x00include{d}", .{st_frame.include_serial}) catch unreachable
+        else
+            self.currentFuncName() orelse "__main__";
+        if (self.capture_index.getPtr(func_name)) |range| range.has_statics = true;
+        return class_names.memberKey(buf, func_name, var_name);
+    }
+
     fn purgeClosureStatics(self: *VM, name: []const u8) void {
         var dead_keys: std.ArrayListUnmanaged([]const u8) = .empty;
         defer dead_keys.deinit(self.allocator);
@@ -23630,6 +23656,7 @@ pub const VM = struct {
                 self.unbindCell(cell_entry.value);
             }
             _ = self.statics.remove(key);
+            _ = self.statics_bound.remove(key);
         }
     }
 
@@ -23850,6 +23877,7 @@ pub const VM = struct {
             const cell = try self.newRefCell();
             self.setCell(cell, try self.copyValue(value));
             try self.bindRefSlot(&self.statics_cells, to_key, cell);
+            if (self.statics_bound.contains(from_key)) try self.statics_bound.put(self.allocator, to_key, {});
             if (self.capture_index.getPtr(to)) |range| range.has_statics = true;
         }
     }

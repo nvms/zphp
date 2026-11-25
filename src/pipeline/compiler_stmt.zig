@@ -928,21 +928,28 @@ pub fn compileStaticVar(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.get_static);
     try self.emitU16(var_idx);
 
-    // if null (first call), initialize with default
+    // the first run binds the initial value; a bound static keeps whatever
+    // it holds, null included (ZEND_BIND_INIT_STATIC_OR_JMP)
     if (node.data.lhs != 0) {
-        const skip = try self.emitJump(.jump_if_not_null);
+        try self.emitOp(.jump_if_static_bound);
+        try self.emitU16(var_idx);
+        try self.emitU16(0xffff);
+        const skip = self.chunk.offset() - 2;
         try self.emitOp(.pop);
         try self.compileNode(node.data.lhs);
         // ZEND_BIND_STATIC: an initializer that initialized the variable
         // itself (a recursive call) leaves that value, and its own is dropped
-        try self.emitOp(.get_static);
+        try self.emitOp(.jump_if_static_bound);
         try self.emitU16(var_idx);
-        const initialized = try self.emitJump(.jump_if_not_null);
-        try self.emitOp(.pop);
+        try self.emitU16(0xffff);
+        const initialized = self.chunk.offset() - 2;
+        try self.emitOp(.static_bind);
+        try self.emitU16(var_idx);
         const done = try self.emitJump(.jump);
         self.patchJump(initialized);
-        try self.emitOp(.swap);
         try self.emitOp(.pop);
+        try self.emitOp(.get_static);
+        try self.emitU16(var_idx);
         self.patchJump(done);
         self.patchJump(skip);
     }

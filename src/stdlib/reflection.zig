@@ -4295,8 +4295,22 @@ fn appendStaticVariables(ctx: *NativeContext, result: *PhpArray, fn_name: []cons
     for (func.static_vars) |sv| {
         var buf: [256]u8 = undefined;
         const storage = class_names.memberKey(&buf, fn_name, sv.name);
-        const value = if (ctx.vm.statics_cells.get(storage)) |cell| cell.* else if (ctx.vm.statics.get(storage)) |v| v else try ctx.vm.resolveDefault(sv.initial);
         const key = if (sv.name.len > 0 and sv.name[0] == '$') sv.name[1..] else sv.name;
+        // a static the function has bound is a reference in php's table; the
+        // copy (zval_add_ref) keeps it one while something else holds it, a
+        // running call of the function, so a write through it reaches the
+        // static
+        if (ctx.vm.statics_cells.get(storage)) |cell| {
+            if (ctx.vm.referenceAliasCount(cell) < 2) {
+                try result.setCopiedKey(ctx.allocator, key, cell.*);
+                continue;
+            }
+            const k: PhpArray.Key = .{ .string = Value.String.borrowed(key) };
+            ctx.vm.array_ref_active = true;
+            try ctx.vm.arrayAddEntry(result, k, .{ .key = k, .value = cell.* }, cell);
+            continue;
+        }
+        const value = if (ctx.vm.statics.get(storage)) |v| v else try ctx.vm.resolveDefault(sv.initial);
         try result.setCopiedKey(ctx.allocator, key, value);
     }
 }

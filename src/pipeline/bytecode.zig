@@ -652,10 +652,17 @@ pub const OpCode = enum(u16) {
     // the name is php's `{closure:pfa:...}`; the descriptor says which
     // arguments were placeholders (compilePartialCall)
     partial_closure,
+    // u16 variable name, u16 forward offset: jumps when the function's
+    // static variable has been bound (ZEND_BIND_INIT_STATIC_OR_JMP), whatever
+    // its value
+    jump_if_static_bound,
+    // u16 variable name: marks the static variable bound (ZEND_BIND_STATIC)
+    static_bind,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
-            .partial_closure => 6,
+            .partial_closure, .jump_if_static_bound => 6,
+            .static_bind => 4,
             .arg_variable => 7,
             .arg_unpack => 6,
             .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread => 3,
