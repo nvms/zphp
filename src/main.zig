@@ -628,7 +628,7 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
     } else if (@import("stdlib/filesystem.zig").includeThroughStream(vm, path)) {
         // php://filter and user wrappers: the source is what the stream reads
         source = @import("stdlib/filesystem.zig").readIncludeSource(vm, path) orelse return null;
-        abs_path = allocator.dupe(u8, path) catch {
+        abs_path = @import("stdlib/filesystem.zig").includeOpenedPath(allocator, path) orelse allocator.dupe(u8, path) catch {
             allocator.free(source);
             return null;
         };

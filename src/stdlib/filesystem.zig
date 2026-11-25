@@ -654,6 +654,26 @@ pub fn includeThroughStream(vm: *VM, path: []const u8) bool {
     return userWrapperFor(vm, path) != null;
 }
 
+// the name code included through php://filter runs under: the wrapper
+// hands back its resource's opened path, so a local file names it
+// (__FILE__, errors); null for a resource with no path (data:, php://temp,
+// a user wrapper), where php keeps the url
+pub fn includeOpenedPath(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    var inner = path;
+    while (std.ascii.startsWithIgnoreCase(inner, "php://filter/")) {
+        const marker = std.mem.indexOf(u8, inner["php://filter".len..], "/resource=") orelse return null;
+        inner = inner["php://filter".len + marker + "/resource=".len ..];
+    }
+    if (inner.ptr == path.ptr or inner.len == 0) return null;
+    if (std.ascii.startsWithIgnoreCase(inner, "file://")) {
+        inner = inner["file://".len..];
+    } else if (std.mem.indexOfScalar(u8, inner, ':')) |colon| {
+        // a scheme (data:, php://, a wrapper) rather than a drive letter
+        if (colon > 1) return null;
+    }
+    return platform.realpathAlloc(allocator, inner) catch null;
+}
+
 // the source an include reads through a stream (php_stream_open_for_zend_ex
 // and zend_stream_fixup): the read buffer off, the size from the stream's
 // stat, read until that size or the end, and the stream closed before the
@@ -671,7 +691,10 @@ pub fn readIncludeSource(vm: *VM, path: []const u8) ?[]u8 {
     } else {
         streams.setReadBuffer(&ctx, fh, true) catch return null;
     }
-    const size: usize = blk: {
+    // php_zend_stream_fsizer: a stream with read filters has no size to go
+    // by (a filter may change the length), so it is read to its end
+    const filtered = if (streams.get(fh)) |st| st.readfilters.head != null else false;
+    const size: usize = if (filtered) 0 else blk: {
         switch (streams.backend(fh)) {
             .user => |w| {
                 const arr = (user_streams.stat(&ctx, w) catch return null) orelse break :blk 0;
