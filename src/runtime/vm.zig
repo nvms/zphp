@@ -2745,6 +2745,8 @@ pub const VM = struct {
             "LDAP\\Connection",               "LDAP\\Result",       "LDAP\\ResultEntry",  "PgSql\\Connection",
             "PgSql\\Result",                  "PgSql\\Lob",                "Random\\Engine\\Mt19937",
             "Random\\Engine\\PcgOneseq128XslRr64", "Random\\Engine\\Xoshiro256StarStar", "Random\\Engine\\Secure",
+            "SensitiveParameter",               "Override",             "Deprecated",           "NoDiscard",
+            "DelayedTargetValidation",          "InflateContext",       "DeflateContext",
         }) |name| {
             if (vm.classes.getPtr(name)) |cls| cls.no_dynamic_properties = true;
         }
