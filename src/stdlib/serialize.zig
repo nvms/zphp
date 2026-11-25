@@ -1208,15 +1208,18 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
             class_name = declared;
             break :resolve;
         }
-        const callback = ctx.vm.ini_settings.get("unserialize_callback_func") orelse "";
-        if (callback.len == 0) {
+        const setting = ctx.vm.ini_settings.get("unserialize_callback_func") orelse "";
+        if (setting.len == 0) {
             incomplete = true;
             break :resolve;
         }
+        // the callback may change the setting, which frees its text
+        const callback = try ctx.allocator.dupe(u8, setting);
+        defer ctx.allocator.free(callback);
         const arg = try stringValue(ctx, name);
         defer arg.string.release();
         serialize_lock += 1;
-        const called = ctx.invokeCallable(.{ .string = Value.String.borrowed(callback) }, &.{arg});
+        const called = ctx.invokeUncheckedCallable(.{ .string = Value.String.borrowed(callback) }, &.{arg});
         serialize_lock -= 1;
         if (called) |r| ctx.vm.releaseValue(r) else |err| if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
         if (ctx.vm.pending_exception != null) return false;

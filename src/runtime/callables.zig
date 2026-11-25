@@ -770,7 +770,8 @@ pub fn writeReason(failure: Failure, buf: *std.ArrayListUnmanaged(u8), allocator
         .no_scope => |word| try buf.print(allocator, "cannot access \"{s}\" when no class scope is active", .{word}),
         .no_parent => try buf.appendSlice(allocator, "cannot access \"parent\" when current class scope has no parent"),
         .class_not_found => |name| try buf.print(allocator, "class \"{s}\" not found", .{name}),
-        .function_not_found => |name| try buf.print(allocator, "function \"{s}\" not found or invalid function name", .{name}),
+        // php prints the name as a C string: it ends at a NUL byte
+        .function_not_found => |name| try buf.print(allocator, "function \"{s}\" not found or invalid function name", .{name[0 .. std.mem.indexOfScalar(u8, name, 0) orelse name.len]}),
         .method_not_found => |m| try buf.print(allocator, "class {s} does not have a method \"{s}\"", .{ m.class, m.method }),
         .not_subclass => |m| try buf.print(allocator, "class {s} is not a subclass of {s}", .{ m.class, m.of }),
         .non_static => |m| try buf.print(allocator, "non-static method {s}::{s}() cannot be called statically", .{ m.class, m.method }),

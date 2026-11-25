@@ -298,6 +298,29 @@ pub const NativeContext = struct {
         return result;
     }
 
+    // call_user_function on a callable nothing has checked yet (an ini
+    // setting): zend_call_function resolves it in the calling scope with its
+    // deprecations, and anything it can't call, a method the scope can't see
+    // included, is "Invalid callback X, reason"
+    pub fn invokeUncheckedCallable(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
+        switch (try callables.resolveCallback(self.vm, callable, .{})) {
+            .callee => {},
+            .failure => |failure| {
+                if (self.vm.pending_exception != null) return error.RuntimeError;
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                defer buf.deinit(self.allocator);
+                try buf.appendSlice(self.allocator, "Invalid callback ");
+                try callables.writeName(callable, &buf, self.allocator);
+                try buf.appendSlice(self.allocator, ", ");
+                try callables.writeReason(failure, &buf, self.allocator);
+                try self.vm.setPendingException("Error", buf.items);
+                return error.RuntimeError;
+            },
+        }
+        if (self.vm.pending_exception != null) return error.RuntimeError;
+        return self.invokeCallable(callable, args);
+    }
+
     fn invokeCallableAsCaller(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
         const callee = try self.vm.callbackCallee(callable);
         try self.warnValuesForReferences(callee, args.len);
