@@ -233,7 +233,7 @@ pub const Arity = struct {
         // tries several argument lists and words its own TypeError
         if (std.mem.eql(u8, name, "DatePeriod::__construct")) return .{};
         // parses no parameters at all: it throws whatever it is given
-        if (std.mem.eql(u8, name, "FiberError::__construct")) return .{};
+        if (std.mem.eql(u8, name, "FiberError::__construct") or std.mem.eql(u8, name, "ReflectionAttribute::__construct")) return .{};
         const signature = native_params.get(name) orelse return .{};
         var arity: Arity = .{ .max = 0 };
         for (signature.params) |param| {
