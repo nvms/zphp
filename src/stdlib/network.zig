@@ -1118,8 +1118,16 @@ fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 }
 
 // stream_socket_client(string $address, &$error_code, &$error_message, ?float $timeout, int $flags, $context)
+// a timeout argument php refuses when it isn't finite
+fn finiteTimeout(ctx: *NativeContext, args: []const Value, index: usize, comptime what: []const u8) RuntimeError!void {
+    if (index >= args.len or args[index] != .float or std.math.isFinite(args[index].float)) return;
+    try ctx.vm.setPendingException("ValueError", what ++ " must be a finite value");
+    return error.RuntimeError;
+}
+
 fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    try finiteTimeout(ctx, args, 3, "stream_socket_client(): Argument #4 ($timeout)");
     const flags: i64 = if (args.len > 4) Value.toInt(args[4]) else 4;
     _ = try streamContext(ctx, if (args.len > 5) args[5] else null);
     const result = try connectStream(ctx, args, 1, args[0].string.bytes(), if (args.len > 3) args[3] else null, (flags & 2) != 0, "stream_socket_client");
@@ -1198,6 +1206,7 @@ fn contextBacklog(context: *PhpObject) u31 {
 // stream for the next connection, or false once the timeout passes
 fn native_stream_socket_accept(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const listener = try filesystem.streamArg(ctx, args, .{ .func = "stream_socket_accept", .param = "socket" });
+    try finiteTimeout(ctx, args, 1, "stream_socket_accept(): Argument #2 ($timeout)");
     const server = platform.socketFromInt(objectFd(listener) orelse return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
     var fds = [_]sys.pollfd{.{ .fd = server, .events = sys.POLL.IN, .revents = 0 }};
     ctx.vm.flushOutputToStdout();
