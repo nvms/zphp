@@ -7280,6 +7280,24 @@ pub const VM = struct {
                         };
                         self.push(found);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
+                        // spl_fixedarray_object_has_dimension: empty() on an
+                        // SplFixedArray whose offsetExists() is its own reads
+                        // the element itself, converting the offset once
+                        if (op == .array_get_empty and self.isInstanceOf(arr_val.object.class_name, "SplFixedArray") and
+                            std.mem.eql(u8, self.resolveMethod(arr_val.object.class_name, "offsetExists") catch "", "SplFixedArray::offsetExists"))
+                        {
+                            var fa_ctx = self.makeContext(null);
+                            const filled = @import("../stdlib/spl_fixedarray.zig").hasDimension(&fa_ctx, arr_val.object, key, true) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (self.pending_exception != null) {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
+                            self.push(.{ .bool = filled });
+                            continue;
+                        }
                         // an unset's fetch is offsetGet alone (BP_VAR_UNSET)
                         if (op != .array_get_unset and self.hasMethod(arr_val.object.class_name, "offsetExists")) {
                             const exists = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch {
