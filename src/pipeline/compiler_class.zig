@@ -595,32 +595,75 @@ fn constExprWalk(self: *Compiler, idx: u32, allow_dynamic: bool) Error!void {
             if (info & (1 << 30) == 0) return self.fail(self.const_expr_at, "Closures in constant expressions must be static");
             if (ast.extra_data[node.data.rhs + 1] != 0) return self.fail(self.const_expr_at, "Cannot use(...) variables in constant expression");
         },
-        .callable_ref => {
-            const callee = ast.nodes[node.data.lhs];
-            switch (callee.tag) {
-                .identifier, .qualified_name => {},
-                .grouped_expr => {
-                    var inner = ast.nodes[callee.data.lhs];
-                    while (inner.tag == .grouped_expr) inner = ast.nodes[inner.data.lhs];
-                    switch (inner.tag) {
-                        .string_literal => if (isEncapsString(ast, inner)) return self.fail(self.const_expr_at, "Cannot use dynamic function name in constant expression"),
-                        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal, .array_literal => return self.fail(self.const_expr_at, "Illegal function name"),
-                        else => return self.fail(self.const_expr_at, "Cannot use dynamic function name in constant expression"),
-                    }
-                },
-                .static_call, .dynamic_static_call => {
-                    const class_node = ast.nodes[callee.data.lhs];
-                    if (class_node.tag != .identifier and class_node.tag != .qualified_name) return self.fail(self.const_expr_at, "Cannot use dynamic class name in constant expression");
-                    if (class_node.tag == .identifier and std.ascii.eqlIgnoreCase(ast.tokenSlice(class_node.main_token), "static"))
-                        return self.fail(self.const_expr_at, "\"static\" is not allowed in compile-time constants");
-                    if (callee.tag == .dynamic_static_call or ast.tokens[callee.main_token].tag == .variable)
-                        return self.fail(self.const_expr_at, "Cannot use dynamic method name in constant expression");
-                },
-                .method_call, .nullsafe_method_call => return self.fail(self.const_expr_at, invalid),
+        // a partial application (zend_compile_const_expr_fcc, then
+        // zend_compile_const_expr_args): named like a first-class callable,
+        // with constant arguments
+        .call, .static_call => {
+            const args = ast.extraSlice(node.data.rhs);
+            const partial = for (args) |arg_idx| {
+                const arg = ast.nodes[arg_idx];
+                if (arg.tag == .placeholder_arg or (arg.tag == .named_arg and ast.nodes[arg.data.lhs].tag == .placeholder_arg)) break true;
+            } else false;
+            if (!partial) return self.fail(self.const_expr_at, invalid);
+            if (node.tag == .call) {
+                try checkConstExprCallee(self, ast.nodes[node.data.lhs]);
+            } else try checkConstExprCallee(self, node);
+            var named = false;
+            var variadic = false;
+            for (args) |arg_idx| {
+                const arg = ast.nodes[arg_idx];
+                switch (arg.tag) {
+                    .splat_expr => return self.fail(self.const_expr_at, "Argument unpacking in constant expressions is not supported"),
+                    .named_arg => {
+                        named = true;
+                        if (variadic) return self.fail(self.const_expr_at, "Variadic placeholder must be last");
+                    },
+                    else => {
+                        const is_variadic = arg.tag == .placeholder_arg and arg.data.lhs == 1;
+                        if (named and !is_variadic) return self.fail(self.const_expr_at, "Cannot use positional argument after named argument");
+                        if (variadic) return self.fail(self.const_expr_at, if (is_variadic) "Variadic placeholder may only appear once" else "Variadic placeholder must be last");
+                        if (is_variadic) variadic = true;
+                    },
+                }
+            }
+            for (args) |arg_idx| {
+                const arg = ast.nodes[arg_idx];
+                const value = if (arg.tag == .named_arg) arg.data.lhs else arg_idx;
+                if (ast.nodes[value].tag == .placeholder_arg) continue;
+                try constExprWalk(self, value, allow_dynamic);
+            }
+        },
+        .callable_ref => try checkConstExprCallee(self, ast.nodes[node.data.lhs]),
+        else => return self.fail(self.const_expr_at, invalid),
+    }
+}
+
+// zend_compile_const_expr_fcc: what a first-class callable or partial
+// application in a constant expression may name
+fn checkConstExprCallee(self: *Compiler, callee: Ast.Node) Error!void {
+    const ast = self.ast;
+    const invalid = "Constant expression contains invalid operations";
+    switch (callee.tag) {
+        .identifier, .qualified_name => {},
+        .grouped_expr => {
+            var inner = ast.nodes[callee.data.lhs];
+            while (inner.tag == .grouped_expr) inner = ast.nodes[inner.data.lhs];
+            switch (inner.tag) {
+                .string_literal => if (isEncapsString(ast, inner)) return self.fail(self.const_expr_at, "Cannot use dynamic function name in constant expression"),
+                .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal, .array_literal => return self.fail(self.const_expr_at, "Illegal function name"),
                 else => return self.fail(self.const_expr_at, "Cannot use dynamic function name in constant expression"),
             }
         },
-        else => return self.fail(self.const_expr_at, invalid),
+        .static_call, .dynamic_static_call => {
+            const class_node = ast.nodes[callee.data.lhs];
+            if (class_node.tag != .identifier and class_node.tag != .qualified_name) return self.fail(self.const_expr_at, "Cannot use dynamic class name in constant expression");
+            if (class_node.tag == .identifier and std.ascii.eqlIgnoreCase(ast.tokenSlice(class_node.main_token), "static"))
+                return self.fail(self.const_expr_at, "\"static\" is not allowed in compile-time constants");
+            if (callee.tag == .dynamic_static_call or ast.tokens[callee.main_token].tag == .variable)
+                return self.fail(self.const_expr_at, "Cannot use dynamic method name in constant expression");
+        },
+        .method_call, .nullsafe_method_call => return self.fail(self.const_expr_at, invalid),
+        else => return self.fail(self.const_expr_at, "Cannot use dynamic function name in constant expression"),
     }
 }
 
@@ -1586,7 +1629,7 @@ fn isPrimitiveType(name: []const u8) bool {
 // counts newlines from the start of source up to a byte offset to derive a
 // 1-based line number. used to populate ObjFunction.start_line so that
 // ReflectionFunction::getStartLine can report PHP-style line numbers
-fn lineForToken(self: *Compiler, tok_idx: u32) u32 {
+pub fn lineForToken(self: *Compiler, tok_idx: u32) u32 {
     if (tok_idx >= self.ast.tokens.len) return 0;
     return lineForOffset(self, self.ast.tokens[tok_idx].start);
 }
@@ -2149,7 +2192,7 @@ fn extractMethodReturnType(self: *Compiler, member: Ast.Node, param_count: u32) 
 }
 
 // classify a declared return type for fastLoop's return_val fast/slow split
-fn returnTypeKind(t: []const u8) @import("bytecode.zig").ReturnTypeKind {
+pub fn returnTypeKind(t: []const u8) @import("bytecode.zig").ReturnTypeKind {
     if (t.len == 0) return .none;
     if (std.mem.eql(u8, t, "int")) return .int;
     if (std.mem.eql(u8, t, "float")) return .float;

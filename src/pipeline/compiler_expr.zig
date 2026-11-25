@@ -2481,6 +2481,173 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
 
 pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
     const callee = self.ast.nodes[node.data.lhs];
+    try emitCallableTarget(self, node.data.lhs, node.main_token);
+    if (self.const_expr) {
+        // a name written with a backslash doesn't fall back to the global one
+        try self.emitOp(.const_expr_fcc_check);
+        try self.emitByte(@intFromBool(callee.tag == .qualified_name));
+    }
+    // a function named in the code is php 8.6's cached ZEND_CALLABLE_CONVERT
+    // ('strlen'(...) is one too; 'A::m'(...) is a method, which the vm leaves)
+    const named_function = !self.const_expr and (callee.tag == .identifier or callee.tag == .qualified_name or
+        (callee.tag == .string_literal and callee.data.rhs != Ast.interpolated));
+    try self.emitOp(if (named_function) .callable_closure_cached else .callable_closure);
+}
+
+// the arguments of a call with a placeholder among them (php 8.6's partial
+// application), or null for any other node
+pub fn partialCallArgs(self: *Compiler, node: Ast.Node) ?[]const u32 {
+    const args: []const u32 = switch (node.tag) {
+        .call, .method_call, .nullsafe_method_call, .static_call, .new_expr_dynamic => self.ast.extraSlice(node.data.rhs),
+        .new_expr => self.ast.extraSlice(node.data.lhs),
+        .anonymous_class => blk: {
+            const extra = self.ast.extra_data[node.data.rhs..];
+            break :blk extra[1 .. 1 + extra[0]];
+        },
+        else => return null,
+    };
+    for (args) |arg_idx| if (isPlaceholder(self.ast, arg_idx)) return args;
+    return null;
+}
+
+fn isPlaceholder(ast: *const Ast, arg_idx: u32) bool {
+    const arg = ast.nodes[arg_idx];
+    if (arg.tag == .placeholder_arg) return true;
+    return arg.tag == .named_arg and ast.nodes[arg.data.lhs].tag == .placeholder_arg;
+}
+
+// php's name for a partial application, `{closure:pfa:<scope>:<line>}`
+// (zend_compile_partial_name): the enclosing closure's name, `Class::method()`,
+// `func()`, or the file at the top level
+fn partialDisplayName(self: *Compiler, line: u32) Error![]const u8 {
+    const f = self.current_function;
+    const name = if (std.mem.startsWith(u8, f, "{closure"))
+        try std.fmt.allocPrint(self.allocator, "{{closure:pfa:{s}:{d}}}", .{ f, line })
+    else if (f.len > 0 and f[0] != 0 and self.current_class.len > 0)
+        try std.fmt.allocPrint(self.allocator, "{{closure:pfa:{s}::{s}():{d}}}", .{ self.current_class, f, line })
+    else if (f.len > 0 and f[0] != 0)
+        try std.fmt.allocPrint(self.allocator, "{{closure:pfa:{s}():{d}}}", .{ f, line })
+    else
+        try std.fmt.allocPrint(self.allocator, "{{closure:pfa:{s}:{d}}}", .{ self.file_path, line });
+    try self.string_allocs.append(self.allocator, name);
+    return name;
+}
+
+// a partial application, f(1, ?, x: 2, ...): the callable is pushed as a
+// first-class callable's is, then the bound arguments in an array (positional
+// ones appended, named ones by name), and partial_closure makes the Closure.
+// its descriptor says what each argument was: byte 0 holds 1 when `...` was
+// given, then per argument 'v' (a positional value), 'p' (a positional
+// placeholder), 'n' (a named value) or 'q' (a named placeholder), the named
+// two followed by the name's length byte and the name
+pub fn compilePartialCall(self: *Compiler, idx: u32, node: Ast.Node, args: []const u32) Error!void {
+    switch (node.tag) {
+        .new_expr, .new_expr_dynamic, .anonymous_class => return self.fail(node.main_token, "Cannot create Closure for new expression"),
+        else => {},
+    }
+    // zend_compile_args_ex's checks, in its order
+    var uses_named = false;
+    var uses_variadic = false;
+    for (args) |arg_idx| {
+        const arg = self.ast.nodes[arg_idx];
+        if (arg.tag == .splat_expr) {
+            if (uses_named) return self.fail(node.main_token, "Cannot use argument unpacking after named arguments");
+            return self.fail(node.main_token, "Cannot combine partial application and unpacking");
+        }
+        if (arg.tag == .named_arg) {
+            uses_named = true;
+            if (uses_variadic) return self.fail(node.main_token, "Variadic placeholder must be last");
+            continue;
+        }
+        const variadic = arg.tag == .placeholder_arg and arg.data.lhs == 1;
+        if (uses_named and !variadic) return self.fail(node.main_token, "Cannot use positional argument after named argument");
+        if (uses_variadic) return self.fail(node.main_token, if (variadic) "Variadic placeholder may only appear once" else "Variadic placeholder must be last");
+        if (variadic) uses_variadic = true;
+    }
+    // f(...,) is a first-class callable
+    if (args.len == 1 and uses_variadic) {
+        const callee_idx: u32 = if (node.tag == .call) node.data.lhs else idx;
+        return compileCallableRef(self, .{ .tag = .callable_ref, .main_token = node.main_token, .data = .{ .lhs = callee_idx } });
+    }
+    switch (node.tag) {
+        .nullsafe_method_call => return self.fail(node.main_token, "Cannot combine nullsafe operator with Closure creation"),
+        .static_call => try checkClassRef(self, node.data.lhs),
+        else => {},
+    }
+    const callee_idx: u32 = if (node.tag == .call) node.data.lhs else idx;
+    const callee = self.ast.nodes[callee_idx];
+    // a call's callee that is itself a call is the value it returns
+    const callee_is_call = node.tag == .call and switch (callee.tag) {
+        .call, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call => true,
+        else => false,
+    };
+    if (callee_is_call) try self.compileNode(callee_idx) else try emitCallableTarget(self, callee_idx, node.main_token);
+    if (self.const_expr) {
+        try self.emitOp(.const_expr_fcc_check);
+        try self.emitByte(@intFromBool(callee.tag == .qualified_name));
+    }
+
+    var desc: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer desc.deinit(self.allocator);
+    try desc.append(self.allocator, @intFromBool(uses_variadic));
+    const chain = self.nullsafe_chain_jumps;
+    self.nullsafe_chain_jumps = null;
+    defer self.nullsafe_chain_jumps = chain;
+    var guards: ArgGuards = .empty;
+    errdefer guards.deinit(self.allocator);
+    // the positional arguments go on the stack as a call's do (a placeholder
+    // as a null), so by-reference intent finds their position; the named
+    // ones follow in an array
+    var positional: usize = 0;
+    var named_array = false;
+    for (args) |arg_idx| {
+        const arg = self.ast.nodes[arg_idx];
+        if (arg.tag == .placeholder_arg) {
+            if (arg.data.lhs == 0) {
+                try desc.append(self.allocator, 'p');
+                try self.emitOp(.op_null);
+                positional += 1;
+            }
+            continue;
+        }
+        if (arg.tag == .named_arg) {
+            if (!named_array) try self.emitOp(.array_new);
+            named_array = true;
+            const name = self.ast.tokenSlice(arg.main_token);
+            if (name.len > 0xFF) return self.fail(arg.main_token, "Named argument name too long");
+            const placeholder = self.ast.nodes[arg.data.lhs].tag == .placeholder_arg;
+            try desc.append(self.allocator, if (placeholder) 'q' else 'n');
+            try desc.append(self.allocator, @intCast(name.len));
+            try desc.appendSlice(self.allocator, name);
+            if (placeholder) continue;
+            try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+            // a constant expression's arguments are values, which a
+            // by-reference parameter refuses when the closure is made
+            if (self.const_expr) try self.compileNode(arg.data.lhs) else try compileArg(self, arg.data.lhs, .{ .pos = ArgPos.named, .guards = &guards });
+            try self.emitOp(.arg_array_set);
+            continue;
+        }
+        try desc.append(self.allocator, 'v');
+        if (positional <= ArgPos.max and !self.const_expr) {
+            try compileArg(self, arg_idx, .{ .pos = @intCast(positional), .guards = &guards });
+        } else try self.compileNode(arg_idx);
+        positional += 1;
+    }
+    if (!named_array) try self.emitOp(.array_new);
+    const desc_bytes = try desc.toOwnedSlice(self.allocator);
+    try self.string_allocs.append(self.allocator, desc_bytes);
+    const name = try partialDisplayName(self, @import("compiler_class.zig").lineForToken(self, node.main_token));
+    const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
+    const desc_idx = try self.addConstant(.{ .string = Value.String.borrowed(desc_bytes) });
+    self.current_source_offset = self.ast.tokens[node.main_token].start;
+    try emitCallOp(self, &guards, .partial_closure, .{ .a = name_idx, .b = desc_idx });
+}
+
+// the callable a first-class callable or a partial application names, as a
+// value: a function name, [object, method], [class, method] or the
+// expression's own value. ref_tok is where a nullsafe refusal is reported
+fn emitCallableTarget(self: *Compiler, callee_idx: u32, ref_tok: u32) Error!void {
+    const callee = self.ast.nodes[callee_idx];
     if (callee.tag == .identifier) {
         // named as a call names it: in the namespace, falling back to the
         // global function when the closure is made. die is exit's alias,
@@ -2517,7 +2684,7 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
     } else if (callee.tag == .property_access and self.isDynamicProp(callee)) {
         // $obj->{expr}(...) and $obj->$name(...) as the parser leaves them
         if (isShortCircuited(self, callee.data.lhs))
-            return self.fail(node.main_token, "Cannot combine nullsafe operator with Closure creation");
+            return self.fail(ref_tok, "Cannot combine nullsafe operator with Closure creation");
         try self.emitOp(.array_new);
         try self.compileNode(callee.data.lhs);
         try self.emitOp(.array_push);
@@ -2566,18 +2733,8 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(method_idx);
         try self.emitOp(.array_push);
     } else {
-        try self.compileNode(node.data.lhs);
+        try self.compileNode(callee_idx);
     }
-    if (self.const_expr) {
-        // a name written with a backslash doesn't fall back to the global one
-        try self.emitOp(.const_expr_fcc_check);
-        try self.emitByte(@intFromBool(callee.tag == .qualified_name));
-    }
-    // a function named in the code is php 8.6's cached ZEND_CALLABLE_CONVERT
-    // ('strlen'(...) is one too; 'A::m'(...) is a method, which the vm leaves)
-    const named_function = !self.const_expr and (callee.tag == .identifier or callee.tag == .qualified_name or
-        (callee.tag == .string_literal and callee.data.rhs != Ast.interpolated));
-    try self.emitOp(if (named_function) .callable_closure_cached else .callable_closure);
 }
 
 pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {

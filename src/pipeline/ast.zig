@@ -247,6 +247,9 @@ pub const Ast = struct {
             interp_varname, // main_token = the name of "${name}": a read of $name
             interp_offset, // main_token = the offset name or number of "$a[k]", lhs = 1 after a `-`
             interp_dollar_brace, // main_token = the string token, lhs = the read, rhs = offset of `${` | dollar_brace_expr for "${expr}"
+            // a partial application's placeholder argument (php 8.6):
+            // main_token = the `?` or `...`, lhs = 1 for `...`
+            placeholder_arg,
         };
     };
 

@@ -570,6 +570,7 @@ const Formatter = struct {
                 self.write("...");
                 self.formatNode(node.data.lhs);
             },
+            .placeholder_arg => self.write(if (node.data.lhs == 1) "..." else "?"),
             .qualified_name => self.formatQualifiedName(node),
             .enum_decl => self.formatEnumDecl(node),
             .enum_case => self.formatEnumCase(node),

@@ -647,9 +647,15 @@ pub const OpCode = enum(u16) {
     // static variables) declared in a function: php 8.6 makes it once per
     // call site for the first called scope and keeps it for the request
     closure_new_cached,
+    // u16 name, u16 descriptor: a partial application (php 8.6). pops the
+    // bound arguments' array and the callable below it, pushes the Closure.
+    // the name is php's `{closure:pfa:...}`; the descriptor says which
+    // arguments were placeholders (compilePartialCall)
+    partial_closure,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
+            .partial_closure => 6,
             .arg_variable => 7,
             .arg_unpack => 6,
             .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread => 3,
@@ -1207,6 +1213,12 @@ pub const ObjFunction = struct {
     // 2.0, use x()", or ""), null without the attribute. the body starts with
     // check_deprecated
     deprecated: ?[]const u8 = null,
+    // a partial application's closure (php 8.6): 1, or 2 when it calls a
+    // Closure, which rebinding it rebinds too. set at run time, never serialized
+    partial: u8 = 0,
+    // the class default initializers run in when the function's name doesn't
+    // say it (a partial application's defaults, copied from its callee)
+    default_scope: ?[]const u8 = null,
     // 0 = unconditional (hoisted at registration). > 0 = conditionally
     // declared; registration is deferred until the declare_fn opcode with the
     // matching id executes (PHP runtime function binding)

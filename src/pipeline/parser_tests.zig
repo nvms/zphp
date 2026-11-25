@@ -508,6 +508,7 @@ fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
             try renderNode(ast, node.data.lhs, buf);
             try buf.append(')');
         },
+        .placeholder_arg => try buf.appendSlice(if (node.data.lhs == 1) "..." else "?"),
         .require_expr => {
             try buf.appendSlice("(");
             try buf.appendSlice(ast.tokenSlice(node.main_token));
@@ -627,6 +628,11 @@ test "pipe precedence vs arithmetic" {
 }
 test "pipe precedence vs comparison" {
     try expectParse("<?php $x |> strlen(...) == 4;", "(== (|> $x (callable_ref strlen)) 4)");
+}
+test "partial application placeholders" {
+    try expectParse("<?php f(1, ?, x: ?, ...);", "(call f 1 ? (named x ?) ...)");
+    try expectParse("<?php f(...$a);", "(call f (...$a))");
+    try expectParse("<?php f(...);", "(callable_ref f)");
 }
 test "assignment" {
     try expectParse("<?php $x = 42;", "(= $x 42)");

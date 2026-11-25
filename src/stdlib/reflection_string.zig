@@ -433,7 +433,10 @@ fn functionView(ctx: *NativeContext, this: *PhpObject) FnView {
     view.is_closure = instance != null or boolProp(this, "__from_closure");
     if (instance) |name| {
         view.closure_instance = name;
-        view.scope = stringProp(this, "__scope_class") orelse vm.closureScopeByName(name);
+        // a partial application prints as a method of the class it runs in
+        // (php's func.common.scope), which isn't the class static:: names
+        const partial = if (view.user) |f| f.partial != 0 else false;
+        view.scope = stringProp(this, "__scope_class") orelse if (partial) vm.closureDefClassByName(name) else vm.closureScopeByName(name);
         if (view.user) |f| view.info.is_static = f.is_static;
     }
     return view;

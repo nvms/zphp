@@ -572,6 +572,7 @@ const Exporter = struct {
                 try e.str("...");
                 try e.expr(n.data.lhs, priority, indent);
             },
+            .placeholder_arg => try e.str(if (n.data.lhs == 1) "..." else "?"),
             .named_arg => {
                 try e.str(e.tok(n.main_token));
                 try e.str(": ");

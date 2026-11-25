@@ -999,6 +999,7 @@ pub const Compiler = struct {
             else => false,
         };
         defer self.hoistable = was_hoistable;
+        if (compiler_expr.partialCallArgs(self, node)) |args| return compiler_expr.compilePartialCall(self, idx, node, args);
         switch (node.tag) {
             .expression_stmt => {
                 // a bare variable statement reads nothing in php, so it never
@@ -1277,6 +1278,8 @@ pub const Compiler = struct {
             .global_stmt => try compiler_stmt.compileGlobal(self, node),
             .static_var => try compiler_stmt.compileStaticVar(self, node),
             .splat_expr => {},
+            // only a call's argument, which compilePartialCall reads
+            .placeholder_arg => return self.fail(node.main_token, "Cannot use placeholder here"),
             .require_expr => try compiler_stmt.compileRequire(self, node),
             .namespace_decl => try compiler_stmt.compileNamespace(self, node),
             .use_stmt => try compiler_stmt.compileUse(self, node),

@@ -41,6 +41,7 @@ const parser_mod = @import("../pipeline/parser.zig");
 const compiler_mod = @import("../pipeline/compiler.zig");
 const enums = @import("../stdlib/enums.zig");
 const callables = @import("callables.zig");
+const partial = @import("partial.zig");
 const object_properties = @import("object_properties.zig");
 const object_iter = @import("object_iter.zig");
 const spl_iterator_classes = @import("../stdlib/spl_iterator_classes.zig");
@@ -988,6 +989,12 @@ pub const VM = struct {
     // first-class callable got this request, by its registered name; each
     // holds a reference, dropped in reset()
     fcc_cache: std.StringHashMapUnmanaged(*PhpObject) = .{},
+    // php 8.6's partial applications: the compiled closure (its compile
+    // name) by call site, callee and generated source, for the request
+    pfa_cache: std.StringHashMapUnmanaged([]const u8) = .{},
+    // the attribute lists partial applications' closures took from their
+    // callees (#[\NoDiscard]), freed with the vm
+    partial_attrs: std.ArrayListUnmanaged(struct { name: []const u8, list: []AttributeDef }) = .empty,
     // php 8.6's DATEG(duration_cache): the last non-negative Time\Duration a
     // factory made, held with a reference until the request ends
     duration_cache: ?*PhpObject = null,
@@ -1684,7 +1691,7 @@ pub const VM = struct {
         for (entry.pipe_fds.items) |*pipe| pipe.close();
     }
 
-    fn newRefCell(self: *VM) RuntimeError!*Value {
+    pub fn newRefCell(self: *VM) RuntimeError!*Value {
         const cell = self.free_cells.pop() orelse blk: {
             const c = try self.allocator.create(RefCell);
             errdefer self.allocator.destroy(c);
@@ -1695,7 +1702,7 @@ pub const VM = struct {
         return &cell.value;
     }
 
-    fn bindCell(_: *VM, value: *Value) void {
+    pub fn bindCell(_: *VM, value: *Value) void {
         const cell = cellOf(value);
         std.debug.assert(!cell.dead);
         cell.binders += 1;
@@ -3857,6 +3864,7 @@ pub const VM = struct {
     pub fn deinit(self: *VM) void {
         self.sensitive_params.deinit(self.allocator);
         self.fcc_cache.deinit(self.allocator);
+        self.pfa_cache.deinit(self.allocator);
         self.lambda_cache.deinit(self.allocator);
         self.stream_errors.deinit(self);
         if (self.unwind_marker) |marker| {
@@ -3950,8 +3958,11 @@ pub const VM = struct {
         }
         self.phar_cache.deinit(self.allocator);
         self.profile_calls.deinit(self.allocator);
-        // the compile results own the attributes
+        // the compile results own the attributes, but for the lists partial
+        // applications copied (their elements are the callee's)
         self.function_attributes.deinit(self.allocator);
+        for (self.partial_attrs.items) |entry| self.allocator.free(entry.list);
+        self.partial_attrs.deinit(self.allocator);
         self.last_dt.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
@@ -4125,6 +4136,12 @@ pub const VM = struct {
         var fcc_it = self.fcc_cache.valueIterator();
         while (fcc_it.next()) |closure| self.releaseValue(.{ .object = closure.* });
         self.fcc_cache.clearRetainingCapacity();
+        self.pfa_cache.clearRetainingCapacity();
+        for (self.partial_attrs.items) |entry| {
+            _ = self.function_attributes.remove(entry.name);
+            self.allocator.free(entry.list);
+        }
+        self.partial_attrs.clearRetainingCapacity();
         var lambda_it = self.lambda_cache.valueIterator();
         while (lambda_it.next()) |entry| self.releaseValue(.{ .object = entry.closure });
         self.lambda_cache.clearRetainingCapacity();
@@ -11202,6 +11219,58 @@ pub const VM = struct {
                     self.push(.{ .object = try self.newFakeClosure(callable, forwarded) });
                 },
 
+                .partial_closure => {
+                    const op_ip = self.currentFrame().ip - bytecode.op_bytes;
+                    const consts = self.currentChunk().constants.items;
+                    const pfa_name = consts[self.readU16()].string.bytes();
+                    const desc = consts[self.readU16()].string.bytes();
+                    var npos: usize = 0;
+                    {
+                        var di: usize = 1;
+                        while (di < desc.len) {
+                            switch (desc[di]) {
+                                'v', 'p' => {
+                                    npos += 1;
+                                    di += 1;
+                                },
+                                else => di += 2 + desc[di + 1],
+                            }
+                        }
+                    }
+                    const named_val = self.pop();
+                    const base = self.sp - npos;
+                    const callable = self.stack[base - 1];
+                    var source_buf: [32]RefSource = undefined;
+                    const sources = if (npos <= source_buf.len) source_buf[0..npos] else try self.allocator.alloc(RefSource, npos);
+                    defer if (sources.ptr != &source_buf) self.allocator.free(sources);
+                    for (sources, base..) |*source, slot| {
+                        source.* = if (self.ic != null and slot < self.arg_source_end) self.ic.?.arg_stack[slot] else .none;
+                    }
+                    const pos = self.currentSourcePosition();
+                    const made = partial.create(self, .{
+                        .callable = callable,
+                        .positional = self.stack[base..self.sp],
+                        .sources = sources,
+                        .named = named_val.array,
+                        .name = pfa_name,
+                        .desc = desc,
+                        .file = pos.file,
+                        .line = @intCast(@max(pos.line, 0)),
+                        .site = @intFromPtr(self.currentChunk()) ^ (op_ip *% 0x9E3779B97F4A7C15),
+                    });
+                    self.clearArgArraySources(named_val.array);
+                    self.clearArgStackFrom(base - 1);
+                    for (self.stack[base - 1 .. self.sp]) |v| self.stackRelease(v);
+                    self.sp = base - 1;
+                    self.stackRelease(named_val);
+                    const closure = made catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
+                    // the instance comes with the stack's reference
+                    self.pushTransfer(closure);
+                },
+
                 .closure_bind => {
                     if (self.frame_count == 1) self.global_vars_dirty = true;
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
@@ -17899,7 +17968,7 @@ pub const VM = struct {
 
     // the attributes declared on a compiled function or method, and the
     // class its expressions are evaluated in
-    fn functionAttributesOf(self: *VM, func: *const ObjFunction) struct { attrs: ?[]const AttributeDef, scope: []const u8 } {
+    pub fn functionAttributesOf(self: *VM, func: *const ObjFunction) struct { attrs: ?[]const AttributeDef, scope: []const u8 } {
         if (self.function_attributes.get(func.name)) |attrs| return .{ .attrs = attrs, .scope = "" };
         // a trait method's attributes stay with the trait
         const name = if (func.trait_origin.len > 0) func.trait_origin else func.name;
@@ -23021,7 +23090,7 @@ pub const VM = struct {
     // keys the instance's function, captures and statics by that name. the
     // object comes with the one reference the caller takes; captures
     // appended by the following closure_bind ops extend the registered range
-    fn newClosureInstance(self: *VM, compile_name: []const u8, func: *const ObjFunction) !Value {
+    pub fn newClosureInstance(self: *VM, compile_name: []const u8, func: *const ObjFunction) !Value {
         const name = try self.allocClosureInstanceName(compile_name);
         const gop = try self.functions.getOrPut(self.allocator, name);
         if (!gop.found_existing) self.live_closure_instances += 1;
@@ -23052,6 +23121,43 @@ pub const VM = struct {
             const kept = try self.internName(var_name);
             retainValue(val);
             try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = kept, .value = val });
+            self.capture_index.getPtr(name).?.len += 1;
+        }
+        return instance;
+    }
+
+    pub const PartialCapture = struct { name: []const u8, value: Value, cell: ?*Value = null };
+
+    // a partial application's Closure: an instance of its compiled closure
+    // with the bound values as captures (by-reference ones bound to their
+    // cells, as closure_bind_ref binds), its $this, called class and scope
+    pub fn newPartialInstance(self: *VM, compile_name: []const u8, caps: []const PartialCapture, this: Value, scope: ?[]const u8, called: ?[]const u8) !Value {
+        const func = self.functions.get(compile_name) orelse return error.RuntimeError;
+        const instance = try self.newClosureInstance(compile_name, func);
+        const name = instance.object.closureName().?;
+        for (caps) |cap| {
+            const value = if (cap.cell) |cell| cell.* else cap.value;
+            retainValue(value);
+            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = cap.name, .value = value, .ref_cell = cap.cell });
+            const range = self.capture_index.getPtr(name).?;
+            range.len += 1;
+            if (cap.cell) |cell| {
+                range.has_refs = true;
+                self.bindCell(cell);
+                try self.regRefCapture(range, cell, cap.name);
+            }
+        }
+        if (this == .object) {
+            retainValue(this);
+            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = "$this", .value = this });
+            self.capture_index.getPtr(name).?.len += 1;
+        }
+        if (called) |class_name| {
+            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = "$__closure_scope", .value = .{ .string = Value.String.borrowed(class_name) } });
+            self.capture_index.getPtr(name).?.len += 1;
+        }
+        if (scope) |class_name| {
+            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = "$__closure_defclass", .value = .{ .string = Value.String.borrowed(class_name) } });
             self.capture_index.getPtr(name).?.len += 1;
         }
         return instance;
@@ -23544,13 +23650,13 @@ pub const VM = struct {
         return value;
     }
 
-    const CallableCheck = union(enum) { ok, failed: callables.Failure };
+    pub const CallableCheck = union(enum) { ok, failed: callables.Failure };
 
     // a first-class callable's target, resolved as a dynamic call would be.
     // `Class::method(...)` of an instance method from inside an instance of
     // that class is bound to $this (rewritten in pair), as php does; names
     // relative to the scope (self, parent, static) are resolved when called
-    fn callableClosureCheck(self: *VM, callable: Value, pair: *?*PhpArray, function: *?[]const u8, forwarded: *?[]const u8) RuntimeError!CallableCheck {
+    pub fn callableClosureCheck(self: *VM, callable: Value, pair: *?*PhpArray, function: *?[]const u8, forwarded: *?[]const u8) RuntimeError!CallableCheck {
         if (callable == .string and std.mem.indexOf(u8, callable.string.bytes(), "::") == null) {
             const raw = callable.string.bytes();
             const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
@@ -23662,6 +23768,34 @@ pub const VM = struct {
         return instance;
     }
 
+    // a partial application of a Closure, bound anew, calls its Closure bound
+    // the same way (do_closure_bind's ZEND_PARTIAL_OF_CLOSURE): the first
+    // capture is that Closure
+    pub fn rebindPartialInner(self: *VM, bound: Value, new_this: Value, scope: ?[]const u8, called: ?[]const u8) !void {
+        const name = bound.closureName() orelse return;
+        const func = self.functions.get(name) orelse return;
+        if (func.partial != 2) return;
+        const range = self.capture_index.get(name) orelse return;
+        if (range.len == 0) return;
+        const cap = &self.captures.items[range.start];
+        const inner = cap.value;
+        if (inner != .object) return;
+        const rebound: Value = if (inner.object.closureName()) |inner_name|
+            try self.copyClosureInstance(inner_name, new_this, scope, called)
+        else blk: {
+            const callable = inner.object.fakeCallable();
+            if (new_this == .object and callable == .array and callable.array.entries.items.len == 2) {
+                const made = try self.newFakeMethodClosure(new_this, callable.array.entries.items[1].value, null);
+                made.retain();
+                break :blk Value{ .object = made };
+            }
+            return;
+        };
+        // the capture's reference moves to the new Closure
+        self.captures.items[range.start].value = rebound;
+        self.releaseValue(inner);
+    }
+
     fn copyClosureStatics(self: *VM, from: []const u8, to: []const u8, func: *const ObjFunction) !void {
         for (func.static_vars) |sv| {
             var from_buf: [256]u8 = undefined;
@@ -23682,6 +23816,27 @@ pub const VM = struct {
     pub fn closureBindingRefusal(self: *VM, closure: *PhpObject, new_this: Value, scope: ?[]const u8) RuntimeError!?[]const u8 {
         if (closure.closureName()) |name| {
             const func = self.functions.get(name) orelse return null;
+            // a partial application binds as a closure made from a callable
+            // does, as a method of the class it was made in
+            if (func.partial != 0) {
+                const current = self.closureDefClassByName(name);
+                if (new_this == .object) {
+                    if (func.is_static) return try self.allocator.dupe(u8, "Cannot bind an instance to a static closure, this will be an error in PHP 9");
+                    if (current) |class| if (!self.isInstanceOf(new_this.object.class_name, class)) {
+                        return try std.fmt.allocPrint(self.allocator, "Cannot bind method {s}::{s}() to object of class {s}, this will be an error in PHP 9", .{ self.declaredClassName(class), func.display_name, new_this.object.class_name });
+                    };
+                } else if (current != null and !func.is_static) {
+                    return try self.allocator.dupe(u8, "Cannot unbind $this of method, this will be an error in PHP 9");
+                }
+                if (try self.internalScopeRefusal(scope, current)) |msg| return msg;
+                if (!sameClass(scope, current)) {
+                    return try self.allocator.dupe(u8, if (current == null)
+                        "Cannot rebind scope of closure created from function, this will be an error in PHP 9"
+                    else
+                        "Cannot rebind scope of closure created from method, this will be an error in PHP 9");
+                }
+                return null;
+            }
             if (new_this == .object) {
                 if (func.is_static) return try self.allocator.dupe(u8, "Cannot bind an instance to a static closure, this will be an error in PHP 9");
             } else if (self.closureThisByName(name) == .object and closureUsesThis(func)) {
@@ -25018,7 +25173,7 @@ pub const VM = struct {
         }
     }
 
-    fn regRefCapture(self: *VM, range: *CaptureRange, cell: *Value, var_name: []const u8) RuntimeError!void {
+    pub fn regRefCapture(self: *VM, range: *CaptureRange, cell: *Value, var_name: []const u8) RuntimeError!void {
         const owner = range.object orelse return;
         if (range.ref_owner == 0) range.ref_owner = (try self.refIndex()).createOwner();
         try (try self.refIndex()).addOwned(self.allocator, range.ref_owner, cell, .{ .capture = .{ .closure = owner, .var_name = var_name } });
@@ -25166,6 +25321,9 @@ pub const VM = struct {
         const slots = guardSlots(code, call_ip);
         const guard = self.guardIdentity(slots, args_base);
         const by_value = (temporary and self.callSiteNamesNoRef(chunk, call_ip)) or (self.callSiteByValue(chunk, call_ip, pos, args_base) orelse false);
+        // a partial application's callee isn't at a fixed place below its
+        // arguments: it isn't cached
+        if (bytecode.opAt(code, call_ip) == .partial_closure) return !by_value;
         if (self.ic) |ic| if (guard) |g| {
             const chunk_key = @intFromPtr(chunk);
             ic.intent[InlineCache.intentIndex(chunk_key, field)] = .{ .key = field, .chunk_key = chunk_key, .guard = g, .generation = self.registryGeneration(), .slots = slots, .capture = !by_value };
@@ -25282,8 +25440,30 @@ pub const VM = struct {
                 };
             },
             .parent_hook_call => true,
+            .partial_closure => self.callableByValue(self.partialCallable(chunk, call_ip, pos, args_base) orelse return null, pos),
             else => null,
         };
+    }
+
+    // the callable of a partial application whose argument is being sent:
+    // below the positional arguments, which the named ones' array follows
+    fn partialCallable(self: *VM, chunk: *const Chunk, call_ip: usize, pos: u8, args_base: usize) ?Value {
+        if (pos != arg_pos_named) return if (args_base >= 1) self.stack[args_base - 1] else null;
+        const code = chunk.code.items;
+        const desc = chunk.constants.items[callOpU16(code, call_ip + bytecode.op_bytes + 2)].string.bytes();
+        var npos: usize = 0;
+        var di: usize = 1;
+        while (di < desc.len) {
+            switch (desc[di]) {
+                'v', 'p' => {
+                    npos += 1;
+                    di += 1;
+                },
+                else => di += 2 + desc[di + 1],
+            }
+        }
+        if (args_base < npos + 1) return null;
+        return self.stack[args_base - npos - 1];
     }
 
     // the registered name of the callee a call site will call, as far as it
@@ -25317,8 +25497,8 @@ pub const VM = struct {
                 return self.resolveMethod(class_name, "__construct") catch null;
             },
             // $f(...): a closure by the function it runs, a function name
-            .call_indirect => {
-                const callee = self.stack[args_base - 1];
+            .call_indirect, .partial_closure => {
+                const callee = if (call_op == .partial_closure) (self.partialCallable(chunk, call_ip, 0, args_base) orelse return null) else self.stack[args_base - 1];
                 if (callee.closureName()) |name| return self.functions.getKey(name);
                 if (callee != .string or std.mem.indexOf(u8, callee.string.bytes(), "::") != null) return null;
                 const raw = callee.string.bytes();
@@ -26089,7 +26269,7 @@ pub const VM = struct {
 
     // a named argument's provenance: what its guard recorded, else the
     // reference an unpacked element already is
-    fn namedArgSource(self: *VM, arr: *PhpArray, index: usize) RefSource {
+    pub fn namedArgSource(self: *VM, arr: *PhpArray, index: usize) RefSource {
         const entry = arr.entries.items[index];
         const source = self.argArraySource(arr, entry.key);
         if (source != .none) return source;
@@ -26120,7 +26300,7 @@ pub const VM = struct {
 
     // the reference cell a by-reference argument binds to: the one its
     // source names, or a new one the caller's variable is bound to
-    fn argSourceCell(self: *VM, source: RefSource) !?*Value {
+    pub fn argSourceCell(self: *VM, source: RefSource) !?*Value {
         return switch (source) {
             .none => null,
             .cell => |c| blk: {
@@ -29534,7 +29714,7 @@ pub const VM = struct {
         const floor = self.handler_floor;
         self.handler_floor = self.handler_count;
         defer self.handler_floor = floor;
-        const scope = self.functionScope(func.name) orelse "";
+        const scope = self.functionScopeOf(func) orelse "";
         // the call's result is borrowed; the frame's local owns the default
         return self.callByName(name, &.{.{ .string = Value.String.borrowed(scope) }});
     }
@@ -30396,7 +30576,12 @@ pub const VM = struct {
 
     // the class a method's self and parent name: the part of its registered
     // name before "::". functions and closures have none here
-    fn functionScope(self: *VM, name: []const u8) ?[]const u8 {
+    // the class a function's default initializers run in
+    pub fn functionScopeOf(self: *VM, func: *const ObjFunction) ?[]const u8 {
+        return func.default_scope orelse self.functionScope(func.name);
+    }
+
+    pub fn functionScope(self: *VM, name: []const u8) ?[]const u8 {
         const sep = std.mem.indexOf(u8, name, "::") orelse return null;
         // a trait method's self is the class using it, not known here
         if (self.traits.contains(name[0..sep])) return null;
@@ -30405,7 +30590,7 @@ pub const VM = struct {
 
     // zend_check_type: the value as a parameter or return value of the
     // declared type takes it, or null when the type refuses it
-    fn verifyDeclaredType(self: *VM, val: Value, type_str: []const u8, scope: ?[]const u8, strict: bool) RuntimeError!?Value {
+    pub fn verifyDeclaredType(self: *VM, val: Value, type_str: []const u8, scope: ?[]const u8, strict: bool) RuntimeError!?Value {
         const shape = php_types.shape(type_str);
         if (self.typeHoldsExactly(val, type_str, shape, scope orelse "")) return val;
         if (self.representationHolds(val, type_str, shape, scope)) return val;
@@ -31037,7 +31222,7 @@ pub const VM = struct {
 
     // zend_forbid_dynamic_call's users: functions that read or write the
     // calling scope
-    fn forbidsDynamicCall(name: []const u8) bool {
+    pub fn forbidsDynamicCall(name: []const u8) bool {
         for ([_][]const u8{ "extract", "compact", "get_defined_vars", "func_get_args", "func_get_arg", "func_num_args" }) |f| {
             if (std.ascii.eqlIgnoreCase(name, f)) return true;
         }

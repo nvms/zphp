@@ -2953,7 +2953,12 @@ const Parser = struct {
                         callable_convert = true;
                     }
                     while (self.peek() != .r_paren) {
-                        try list.append(self.allocator, try self.parseCallArg());
+                        const arg = try self.parseCallArg();
+                        try list.append(self.allocator, arg);
+                        // and a partial application, #[A(1, ?)]
+                        var arg_node = self.nodes.items[arg];
+                        if (arg_node.tag == .named_arg) arg_node = self.nodes.items[arg_node.data.lhs];
+                        if (arg_node.tag == .placeholder_arg) callable_convert = true;
                         if (self.peek() != .comma) break;
                         _ = self.advance();
                     }
@@ -3252,7 +3257,7 @@ const Parser = struct {
                     _ = try self.expect(.r_paren);
                     const plain = args.items.len >= 1 and args.items.len <= 2 and for (args.items) |arg| {
                         const tag = self.nodes.items[arg].tag;
-                        if (tag == .named_arg or tag == .splat_expr) break false;
+                        if (tag == .named_arg or tag == .splat_expr or tag == .placeholder_arg) break false;
                     } else true;
                     // clone($o)->x is clone of ($o)->x: the parentheses belong
                     // to the operand when a dereference follows them
@@ -3776,20 +3781,35 @@ const Parser = struct {
         // unset()'s arguments are php's unset_variable: a `new` expression
         // there is only the start of a dereference
         const is_unset = self.nodes.items[callee].tag == .identifier and self.tokens[self.nodes.items[callee].main_token].tag == .kw_unset;
+        // isset(), empty(), unset() and eval() take expressions, no placeholders
+        const construct = self.nodes.items[callee].tag == .identifier and switch (self.tokens[self.nodes.items[callee].main_token].tag) {
+            .kw_isset, .kw_empty, .kw_unset, .kw_eval => true,
+            else => false,
+        };
         if (self.peek() != .r_paren) {
             try args.append(self.allocator, try self.parseCallArg());
             if (is_unset) try self.refuseUnsetNew(args.items[args.items.len - 1]);
+            if (construct) try self.refusePlaceholder(args.items[args.items.len - 1]);
             while (self.peek() == .comma) {
                 _ = self.advance();
                 if (self.peek() == .r_paren) break;
                 try args.append(self.allocator, try self.parseCallArg());
                 if (is_unset) try self.refuseUnsetNew(args.items[args.items.len - 1]);
+                if (construct) try self.refusePlaceholder(args.items[args.items.len - 1]);
             }
         }
         _ = try self.expect(.r_paren);
 
         const extra = try self.addExtraList(args.items);
         return self.addNode(.{ .tag = .call, .main_token = paren_tok, .data = .{ .lhs = callee, .rhs = extra } });
+    }
+
+    fn refusePlaceholder(self: *Parser, arg: u32) Error!void {
+        var node = self.nodes.items[arg];
+        if (node.tag == .named_arg) node = self.nodes.items[node.data.lhs];
+        if (node.tag != .placeholder_arg) return;
+        try self.addErrorAt(node.main_token, .unexpected_token);
+        return error.ParseError;
     }
 
     fn refuseUnsetNew(self: *Parser, arg: u32) Error!void {
@@ -3803,6 +3823,16 @@ const Parser = struct {
     }
 
     fn parseCallArg(self: *Parser) Error!u32 {
+        // php 8.6's partial application: `?` and `...` standing alone are
+        // placeholders, `...` before an expression unpacks it
+        if (self.peek() == .ellipsis and (self.peekAt(1) == .comma or self.peekAt(1) == .r_paren)) {
+            const tok = self.advance();
+            return self.addNode(.{ .tag = .placeholder_arg, .main_token = tok, .data = .{ .lhs = 1 } });
+        }
+        if (self.peek() == .question and (self.peekAt(1) == .comma or self.peekAt(1) == .r_paren)) {
+            const tok = self.advance();
+            return self.addNode(.{ .tag = .placeholder_arg, .main_token = tok, .data = .{} });
+        }
         if (self.peek() == .ellipsis) {
             _ = self.advance();
             const expr = try self.parseExpression();
@@ -3812,6 +3842,11 @@ const Parser = struct {
         if (self.peekAt(1) == .colon and (self.peek() == .identifier or self.isNamedArgKeyword())) {
             const name_tok = self.advance();
             _ = self.advance(); // colon
+            if (self.peek() == .question and (self.peekAt(1) == .comma or self.peekAt(1) == .r_paren)) {
+                const tok = self.advance();
+                const placeholder = try self.addNode(.{ .tag = .placeholder_arg, .main_token = tok, .data = .{} });
+                return self.addNode(.{ .tag = .named_arg, .main_token = name_tok, .data = .{ .lhs = placeholder } });
+            }
             const expr = try self.parseExpression();
             return self.addNode(.{ .tag = .named_arg, .main_token = name_tok, .data = .{ .lhs = expr } });
         }

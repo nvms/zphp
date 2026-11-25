@@ -4721,7 +4721,9 @@ fn bindClosure(ctx: *NativeContext, comptime func: []const u8, comptime this_par
     // an object bound without a scope gets Closure as a dummy scope
     const effective_scope: ?[]const u8 = scope orelse if (new_this == .object) @as([]const u8, "Closure") else null;
     const called = if (new_this == .object) new_this.object.class_name else scope;
-    return NativeResult.borrowed(vm.disownedClosure(try vm.copyClosureInstance(name, new_this, effective_scope, called)));
+    const bound = try vm.copyClosureInstance(name, new_this, effective_scope, called);
+    try vm.rebindPartialInner(bound, new_this, effective_scope, called);
+    return NativeResult.borrowed(vm.disownedClosure(bound));
 }
 
 // a Closure made from a callable, bound anew: a method's now runs on new_this
@@ -4752,6 +4754,7 @@ fn closureCall(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         return NativeResult.share(try vm.callValueCallable(bound, call_args));
     };
     const bound = try vm.copyClosureInstance(instance, new_this, scope, scope);
+    try vm.rebindPartialInner(bound, new_this, scope, scope);
     // the temporary bound closure lives for this call only; the callee
     // frame holds it while it runs
     defer vm.releaseValue(bound);

@@ -783,6 +783,19 @@ pub fn writeReason(failure: Failure, buf: *std.ArrayListUnmanaged(u8), allocator
 pub fn throwDynamicFailure(vm: *VM, failure: Failure) RuntimeError!bool {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(vm.allocator);
+    try dynamicFailureMessage(vm, failure, &buf);
+    return vm.throwBuiltinException("Error", buf.items);
+}
+
+// throwDynamicFailure's Error left pending, for code that unwinds itself
+pub fn setDynamicFailure(vm: *VM, failure: Failure) RuntimeError!void {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(vm.allocator);
+    try dynamicFailureMessage(vm, failure, &buf);
+    try vm.setPendingException("Error", buf.items);
+}
+
+fn dynamicFailureMessage(vm: *VM, failure: Failure, buf: *std.ArrayListUnmanaged(u8)) RuntimeError!void {
     const a = vm.allocator;
     switch (failure) {
         .not_callable => |v| if (v == .object)
@@ -802,9 +815,8 @@ pub fn throwDynamicFailure(vm: *VM, failure: Failure) RuntimeError!bool {
             try buf.print(a, "Call to {s} method {s}::{s}() from scope {s}", .{ visibilityName(m.visibility), m.class, m.method, scope })
         else
             try buf.print(a, "Call to {s} method {s}::{s}() from global scope", .{ visibilityName(m.visibility), m.class, m.method }),
-        .invalid_function_name, .no_scope, .no_parent, .not_subclass => try writeReason(failure, &buf, a),
+        .invalid_function_name, .no_scope, .no_parent, .not_subclass => try writeReason(failure, buf, a),
     }
-    return vm.throwBuiltinException("Error", buf.items);
 }
 
 fn visibilityName(v: ClassDef.Visibility) []const u8 {
