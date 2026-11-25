@@ -3111,8 +3111,6 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
     const context_obj: ?*PhpObject = if (context) |cv| (if (cv == .resource) cv.resource else null) else null;
     const configured = @import("http_wrapper.zig").contextOption(context_obj, "filter", "max_filter_count");
     const max_filters: i64 = if (configured) |v| Value.toInt(v) else 16;
-    var read_count: i64 = 0;
-    var write_count: i64 = 0;
     // "Unable to create filter" waits for the end of the operation in php
     // 8.6, after the filter lookups' own warnings
     var failed_names: std.ArrayListUnmanaged([]u8) = .empty;
@@ -3139,8 +3137,10 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
         }
         var names = std.mem.tokenizeScalar(u8, list, '|');
         while (names.next()) |raw_name| {
-            const rc = if (on_read) read_count else 0;
-            const wc = if (on_write) write_count else 0;
+            // the stream's chains as they stand: a nested php://filter
+            // resource put its own filters on the same stream
+            const rc = if (on_read) chainLength(&s.readfilters) else 0;
+            const wc = if (on_write) chainLength(&s.writefilters) else 0;
             if (rc == max_filters or wc == max_filters) {
                 if (configured != null) {
                     _ = try closeStream(ctx, obj);
@@ -3156,7 +3156,6 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
                     if (try stream_filters.create(ctx, name, null)) |f| {
                         const chain = if (is_read) &s.readfilters else &s.writefilters;
                         if (!try stream_filters.append(ctx, obj, chain, f)) try stream_filters.remove(ctx, f);
-                        if (is_read) read_count += 1 else write_count += 1;
                     } else {
                         try failed_names.append(ctx.allocator, try ctx.allocator.dupe(u8, name));
                     }
@@ -3174,6 +3173,13 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
     try obj.setCopiedString(ctx.allocator, "__path", path);
     try obj.set(ctx.allocator, "__filter_wrapped", .{ .bool = true });
     return NativeResult.borrowed(opened);
+}
+
+fn chainLength(chain: *const stream_filters.Chain) i64 {
+    var n: i64 = 0;
+    var it = chain.head;
+    while (it) |f| : (it = f.next) n += 1;
+    return n;
 }
 
 // http://: the wrapper's stream (allow_url_fopen permitting)
