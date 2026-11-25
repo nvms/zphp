@@ -2189,6 +2189,19 @@ fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUn
         try user_streams.closedir(ctx, w);
         return true;
     }
+    // php's glob stream: the matches' base names, in glob's order, none
+    // when nothing matches
+    if (std.mem.startsWith(u8, path, "glob://")) {
+        const matched = try ctx.vm.callByName("glob", &.{.{ .string = Value.String.borrowed(path["glob://".len..]) }});
+        if (matched != .array) return false;
+        for (matched.array.entries.items) |e| {
+            if (e.value != .string) continue;
+            const full = e.value.string.bytes();
+            const sep = std.mem.lastIndexOfAny(u8, full, if (platform.is_windows) "/\\" else "/");
+            try appendName(ctx, names, if (sep) |p| full[p + 1 ..] else full);
+        }
+        return true;
+    }
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir_path = bundle.osPath(&os_buf, path);
     var listing = bundle.listDir(dir_path);
