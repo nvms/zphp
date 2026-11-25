@@ -766,7 +766,10 @@ pub fn errorText(err: anyerror) []const u8 {
         error.FileBusy, error.DeviceBusy => "Device or resource busy",
         error.CrossDevice => "Invalid cross-device link",
         error.LinkQuotaExceeded => "Too many links",
-        error.NotLink, error.InvalidArgument, error.BadPathName => "Invalid argument",
+        error.NotLink, error.InvalidArgument => "Invalid argument",
+        // php's windows io layer maps an invalid name (a unc path to no
+        // share, say) to ENOENT
+        error.BadPathName => if (platform.is_windows) "No such file or directory" else "Invalid argument",
         error.NoDevice => "No such device",
         // an unreachable \\server\share, which windows' c runtime maps to ENOENT
         error.NetworkNotFound => "No such file or directory",
@@ -1281,8 +1284,9 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             const name = func orelse return null;
-            if (err == error.IsDir) {
-                // a directory opens, and the read is what fails
+            if (err == error.IsDir and !platform.is_windows) {
+                // a directory opens, and the read is what fails (windows
+                // refuses the open instead)
                 const chunk: i64 = 8192;
                 const size: i64 = if (std.mem.eql(u8, name, "file_get_contents")) (if (plainStat(path, false)) |st| st.size else 0) else 0;
                 try se.raise(ctx, .{ .code = .ReadFailed, .wrapper = se.plainfile, .func = name, .severity = se.E_NOTICE, .terminating = false }, "Read of {d} bytes failed with errno=21 Is a directory", .{if (size > 0) size + chunk else chunk});
