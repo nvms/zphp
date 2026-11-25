@@ -62,7 +62,7 @@ if [ -f "build.zig" ]; then
     fi
   else
     issues+=("${YELLOW}php not found, skipped compat + examples${RESET}")
-    fixes+=("${CYAN}install php 8.5+${RESET}")
+    fixes+=("${CYAN}install php 8.6+${RESET}")
   fi
 fi
 

@@ -9,7 +9,7 @@
 #
 # pass a tarball or an unpacked source tree to skip the download:
 #
-#   scripts/gen-jis-tables ~/Downloads/php-8.5.13.tar.xz
+#   scripts/gen-jis-tables ~/Downloads/php-8.6.0.tar.xz
 
 import os, re, sys, tarfile, tempfile, urllib.request
 

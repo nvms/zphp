@@ -13,7 +13,7 @@
 # pass a tarball, an unpacked source tree or the header itself to skip the
 # download:
 #
-#   scripts/gen-html-tables ~/Downloads/php-8.5.13.tar.xz
+#   scripts/gen-html-tables ~/Downloads/php-8.6.0.tar.xz
 
 import os, re, sys, tarfile, tempfile, urllib.request
 

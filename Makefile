@@ -15,7 +15,7 @@ test: ## Run zig unit tests
 	tests/fast_loop_isolation
 
 .PHONY: compat
-compat: build ## Run PHP compatibility tests (requires PHP 8.5)
+compat: build ## Run PHP compatibility tests (requires PHP 8.6)
 	python3 ./tests/compat_runner_test
 	python3 ./tests/asymmetric_declaration_validation_test
 	./tests/run
@@ -25,7 +25,7 @@ pdo: build ## Run PDO driver tests
 	./tests/pdo_test
 
 .PHONY: examples
-examples: build ## Run example project tests (requires PHP 8.5)
+examples: build ## Run example project tests (requires PHP 8.6)
 	./tests/examples_test
 
 .PHONY: bench
@@ -96,11 +96,11 @@ bench-macro: ## Track real-app perf vs php (WordPress + Laravel harnesses, Relea
 	./benchmarks/macro/run
 
 .PHONY: laravel
-laravel: build ## Run Laravel compatibility tests (requires PHP 8.5 + composer)
+laravel: build ## Run Laravel compatibility tests (requires PHP 8.6 + composer)
 	./tests/laravel/run
 
 .PHONY: symfony
-symfony: build ## Run Symfony component and serve compatibility tests (requires PHP 8.5 + composer)
+symfony: build ## Run Symfony component and serve compatibility tests (requires PHP 8.6 + composer)
 	./tests/symfony/run
 	./tests/symfony/serve_run
 

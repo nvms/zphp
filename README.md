@@ -1,6 +1,6 @@
 # zphp
 
-A PHP runtime written in Zig that tracks the latest stable PHP release (currently 8.5). It includes a built-in HTTP server, worker threads, a native extension API, and standalone executables.
+A PHP runtime written in Zig that tracks the latest stable PHP release (currently 8.6). It includes a built-in HTTP server, worker threads, a native extension API, and standalone executables.
 
 ```sh
 zphp run script.php
