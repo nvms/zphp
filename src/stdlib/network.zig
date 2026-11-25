@@ -814,12 +814,15 @@ fn posixSocketError(err: anyerror) SocketError {
     };
 }
 
+// php's windows build registers no unix or udg transport
+const has_unix_transports = !platform.is_windows;
+
 // the host and port of a tcp target as php's parse_ip_address_ex reads
 // them: "[v6]:port" or "host:port", the port as strtol reads it
 fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
     const scheme, const rest = splitScheme(target);
-    if (std.ascii.eqlIgnoreCase(scheme, "unix")) return .{ .unix = rest };
-    if (std.ascii.eqlIgnoreCase(scheme, "udg")) return .{ .udg = rest };
+    if (has_unix_transports and std.ascii.eqlIgnoreCase(scheme, "unix")) return .{ .unix = rest };
+    if (has_unix_transports and std.ascii.eqlIgnoreCase(scheme, "udg")) return .{ .udg = rest };
     const udp = std.ascii.eqlIgnoreCase(scheme, "udp");
     if (!udp and !std.ascii.eqlIgnoreCase(scheme, "tcp")) return error.UnsupportedTransport;
     const hp = try splitHostPort(rest);
@@ -1151,9 +1154,9 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
             "tcp_socket/ssl"
         else if (std.ascii.eqlIgnoreCase(scheme, "udp"))
             "udp_socket"
-        else if (std.ascii.eqlIgnoreCase(scheme, "unix"))
+        else if (has_unix_transports and std.ascii.eqlIgnoreCase(scheme, "unix"))
             "unix_socket"
-        else if (std.ascii.eqlIgnoreCase(scheme, "udg"))
+        else if (has_unix_transports and std.ascii.eqlIgnoreCase(scheme, "udg"))
             "udg_socket"
         else
             break :unconnected;

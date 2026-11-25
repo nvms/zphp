@@ -4477,7 +4477,11 @@ fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError
 fn native_stream_get_transports(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     const names = [_][]const u8{ "tcp", "udp", "unix", "udg", "ssl", "tls", "tlsv1.2", "tlsv1.3" };
-    for (names) |n| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(n) });
+    for (names) |n| {
+        // php's windows build registers no unix or udg transport
+        if (platform.is_windows and (std.mem.eql(u8, n, "unix") or std.mem.eql(u8, n, "udg"))) continue;
+        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(n) });
+    }
     return NativeResult.borrowed(.{ .array = arr });
 }
 
