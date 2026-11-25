@@ -1725,8 +1725,21 @@ fn native_stream_filter_register(ctx: *NativeContext, args: []const Value) Runti
         try ctx.vm.setPendingException("ValueError", "stream_filter_register(): Argument #1 ($filter_name) must be a non-empty string");
         return error.RuntimeError;
     }
-    if (class.len == 0) {
-        try ctx.vm.setPendingException("ValueError", "stream_filter_register(): Argument #2 ($class) must be a non-empty string");
+    // Z_PARAM_CLASS: a class that exists, and php 8.6 wants one it can make
+    const bare = if (class.len > 0 and class[0] == '\\') class[1..] else class;
+    if (bare.len > 0 and std.mem.indexOfScalar(u8, bare, 0) == null and !ctx.vm.classes.contains(bare) and !ctx.vm.interfaces.contains(bare) and !ctx.vm.traits.contains(bare)) {
+        try ctx.vm.tryAutoload(bare);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
+    const known = ctx.vm.classes.get(bare);
+    if (known == null and !ctx.vm.interfaces.contains(bare) and !ctx.vm.traits.contains(bare)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "stream_filter_register(): Argument #2 ($class) must be a valid class name, \"{s}\" given", .{class});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+    if (known == null or known.?.is_abstract or known.?.is_enum or ctx.vm.interfaces.contains(bare) or ctx.vm.traits.contains(bare)) {
+        try ctx.vm.setPendingException("ValueError", "stream_filter_register(): Argument #2 ($class) must be a concrete class");
         return error.RuntimeError;
     }
     const map = &ctx.vm.stream_filters_user;

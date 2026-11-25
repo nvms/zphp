@@ -359,6 +359,27 @@ fn argStr(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize,
     return ctx.createString(s.bytes());
 }
 
+// getPathInfo's "C!" and its own check: a class that exists, then one
+// derived from SplFileInfo, named as declared
+fn argInfoClass(ctx: *NativeContext, label: []const u8, args: []const Value) RuntimeError!?[]const u8 {
+    const v = args[0];
+    if (v == .null) return null;
+    if (v != .string) {
+        try sic.typeError(ctx, label, 1, "class", "?string", v);
+        return error.RuntimeError;
+    }
+    const name = v.string.bytes();
+    ctx.vm.tryAutoload(name) catch |err| if (ctx.vm.pending_exception == null) return err;
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    const declared = ctx.vm.classes.getKey(name) orelse {
+        try sic.raise(ctx, "TypeError", "{s}(): Argument #1 ($class) must be a valid class name or null, \"{s}\" given", .{ label, name });
+        return error.RuntimeError;
+    };
+    if (ctx.vm.isInstanceOf(declared, "SplFileInfo")) return declared;
+    try sic.raise(ctx, "TypeError", "{s}(): Argument #1 ($class) must be a class name derived from SplFileInfo or null, {s} given", .{ label, declared });
+    return error.RuntimeError;
+}
+
 // "C": a class derived from base, autoloaded when unknown
 fn argClass(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8, base: []const u8, nullable: bool) RuntimeError!?[]const u8 {
     const v = args[i];
@@ -1075,7 +1096,7 @@ fn fiGetPathInfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const obj = try this(ctx);
     const label = "SplFileInfo::getPathInfo";
     if (!try sic.argCount(ctx, label, args.len, 0, 1)) return error.RuntimeError;
-    const ce = (if (args.len > 0) try argClass(ctx, label, args, 0, "class", "SplFileInfo", true) else null) orelse infoClass(obj);
+    const ce = (if (args.len > 0) try argInfoClass(ctx, label, args) else null) orelse infoClass(obj);
     const path = (try getPathname(ctx, obj)) orelse return NativeResult.scalar(.null);
     if (path.len == 0) return NativeResult.scalar(.null);
     const dir = try ctx.createString(filesystem.phpDirname(path));

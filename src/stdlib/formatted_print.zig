@@ -115,6 +115,7 @@ fn getArgnum(st: *State, format: []const u8, i: *usize) RuntimeError!?usize {
     var t = i.*;
     while (t < format.len and isDigit(format[t])) t += 1;
     if (at(format, t) != '$') return null;
+    if (t == i.*) return st.valueError("Argument number specifier must not be empty", .{});
     const num = getNumber(format, i);
     if (num <= 0) return st.valueError("Argument number specifier must be greater than zero and less than {d}", .{int_max});
     i.* += 1;

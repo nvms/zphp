@@ -20603,7 +20603,7 @@ pub const VM = struct {
         const vr = self.findPropertyVisibility(obj.class_name, name);
         if (!vr.is_readonly or obj.rawForScope(name, vr.defining_class) == .undef or obj.isUnset(name)) return null;
         if (self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name)) return null;
-        return try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+        return try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ class_names.display(vr.defining_class), name });
     }
 
     fn throwIncdecRef(self: *VM, src: TypeSource, up: bool) RuntimeError {
@@ -21514,15 +21514,19 @@ pub const VM = struct {
             if (!prop.is_virtual or !prop.has_set_visibility or prop.set_visibility == prop.visibility) continue;
             const setter = try std.fmt.allocPrint(self.allocator, "{s}$hook_set", .{prop.name});
             defer self.allocator.free(setter);
-            if (!def.methods.contains(setter)) {
-                self.setErrorMsg("Read-only virtual property {s}::${s} must not specify asymmetric visibility", .{ class_name, prop.name });
-                return error.RuntimeError;
-            }
             const getter = try std.fmt.allocPrint(self.allocator, "{s}$hook_get", .{prop.name});
             defer self.allocator.free(getter);
-            if (!def.methods.contains(getter)) {
-                self.setErrorMsg("Write-only virtual property {s}::${s} must not specify asymmetric visibility", .{ class_name, prop.name });
-                return error.RuntimeError;
+            const has_get = def.methods.contains(getter);
+            if (!has_get or !def.methods.contains(setter)) {
+                // zend_verify_hooked_property, at the line its hooks end on
+                var line = def.start_line;
+                var key_buf: [512]u8 = undefined;
+                for ([_][]const u8{ getter, setter }) |hook| if (self.functions.get(class_names.memberKey(&key_buf, class_name, hook))) |f| {
+                    line = @max(line, f.start_line);
+                };
+                const msg = try std.fmt.allocPrint(self.allocator, "{s} virtual property {s}::${s} must not specify asymmetric visibility", .{ if (has_get) "get-only" else "set-only", class_name, prop.name });
+                defer self.allocator.free(msg);
+                return self.raiseCompileFatal(msg, .{ .file = def.file_path, .line = line });
             }
         }
 
@@ -21690,7 +21694,8 @@ pub const VM = struct {
             const func = self.functions.get(class_names.memberKey(&key_buf, class_name, method));
             var shown_buf: [512]u8 = undefined;
             const shown = if (hook_at) |at| std.fmt.bufPrint(&shown_buf, "${s}::{s}", .{ method[0..at], method[at + "$hook_".len ..] }) catch method else method;
-            const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_name, shown });
+            // ZEND_FN_SCOPE_NAME with %s: an anonymous class's name up to its nul
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_names.display(class_name), shown });
             defer self.allocator.free(msg);
             const at: SourcePosition = if (func) |f| .{ .file = if (f.file_path.len > 0) f.file_path else def.file_path, .line = f.start_line } else .{ .file = def.file_path, .line = def.start_line };
             return self.raiseCompileFatal(msg, at);
@@ -27317,7 +27322,7 @@ pub const VM = struct {
         } else if (action == .write and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef and !obj.isUnset(name) and !(self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name))) {
             // zend_std_write_property: an initialized readonly property is
             // refused before its set visibility is
-            msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+            msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ class_names.display(vr.defining_class), name });
         } else if (action == .unset and vr.is_readonly and self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name)) {
             // __clone may unset a readonly property once
             self.consumeReinit(obj, name);
@@ -32283,7 +32288,7 @@ pub const VM = struct {
     // argument parsing does before the function runs. a scalar parameter
     // before them that the argument cannot fit stops the checks: the native
     // reports that one itself
-    fn checkCallbackArgs(self: *VM, name: []const u8, label: []const u8, callbacks: u32, arrays: u32, args: []const Value) RuntimeError!void {
+    pub fn checkCallbackArgs(self: *VM, name: []const u8, label: []const u8, callbacks: u32, arrays: u32, args: []const Value) RuntimeError!void {
         const signature = native_params.get(name) orelse return;
         if (signature.params.len == 0) return;
         for (args, 0..) |arg, i| {

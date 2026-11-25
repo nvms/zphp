@@ -94,6 +94,11 @@ pub fn acceptsNamedExtras(name: []const u8) bool {
 pub fn callbackParams(name: []const u8) u32 {
     // Z_PARAM_ZVAL: it reports a bad callable in its own words
     if (std.mem.eql(u8, name, "Closure::fromCallable")) return 0;
+    // php 8.6's ArrayObject and ArrayIterator sorts take any value and
+    // leave the check to the array function they call
+    for ([_][]const u8{ "ArrayObject::uasort", "ArrayObject::uksort", "ArrayIterator::uasort", "ArrayIterator::uksort" }) |n| {
+        if (std.mem.eql(u8, name, n)) return 0;
+    }
     const signature = native_params.get(name) orelse return 0;
     var positions: u32 = 0;
     for (signature.params, 0..) |param, i| {

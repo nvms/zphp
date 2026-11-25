@@ -175,6 +175,9 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
     const path = displayPath(path_raw);
     const lead: []const u8 = if (copy == .log) "PHP " else "";
     const gap: []const u8 = if (copy == .log) ":  " else ": ";
+    // the log writes a fatal's message with %s, which ends at a NUL (an
+    // anonymous class's name); the display writes it whole
+    const fatal_message = if (copy == .log) message[0 .. std.mem.indexOfScalar(u8, message, 0) orelse message.len] else message;
 
     // an uncaught ParseError or CompileError prints the way php reports a
     // syntax error or compile-time fatal: at the exception's own file and line
@@ -185,7 +188,7 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
         const line: i64 = if (line_v == .int) line_v.int else 0;
         const parse = std.mem.eql(u8, class_name, "ParseError");
         const label: []const u8 = if (parse) "Parse error" else "Fatal error";
-        writeFmt(buf, alloc, "{s}{s}{s}{s} in {s} on line {d}\n", .{ lead, label, gap, message, where, line });
+        writeFmt(buf, alloc, "{s}{s}{s}{s} in {s} on line {d}\n", .{ lead, label, gap, fatal_message, where, line });
         if (!parse) writeFatalTrace(buf, alloc, vm, exc.object);
         return;
     }
@@ -197,11 +200,11 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
         const file_v = if (exc == .object) exc.object.get("file") else Value.null;
         const line_v = if (exc == .object) exc.object.get("line") else Value.null;
         if (file_v == .string and file_v.string.bytes().len > 0 and line_v == .int) {
-            writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s} on line {d}\n", .{ lead, gap, message, file_v.string.bytes(), line_v.int });
+            writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s} on line {d}\n", .{ lead, gap, fatal_message, file_v.string.bytes(), line_v.int });
         } else if (vm.sourceLocation(frame.chunk, ip)) |loc| {
-            writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s} on line {d}\n", .{ lead, gap, message, path, loc.line });
+            writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s} on line {d}\n", .{ lead, gap, fatal_message, path, loc.line });
         } else {
-            writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s}\n", .{ lead, gap, message, path });
+            writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s}\n", .{ lead, gap, fatal_message, path });
         }
         if (exc == .object) writeFatalTrace(buf, alloc, vm, exc.object);
         return;

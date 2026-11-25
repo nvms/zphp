@@ -1672,7 +1672,7 @@ fn applyOptions(ctx: *NativeContext, uctx: *UnserCtx, opts: *PhpArray) RuntimeEr
                     break :blk try ctx.vm.objectToString(v.object);
                 };
                 if (!validClassName(name)) {
-                    const msg = try std.fmt.allocPrint(a, "unserialize(): Option \"allowed_classes\" must be an array of class names, \"{s}\" given", .{name[0 .. std.mem.indexOfScalar(u8, name, 0) orelse name.len]});
+                    const msg = try std.fmt.allocPrint(a, "unserialize(): Option \"allowed_classes\" must be an array of class names, \"{s}\" given", .{name});
                     defer a.free(msg);
                     try ctx.vm.setPendingException("ValueError", msg);
                     return false;
@@ -2015,8 +2015,8 @@ pub fn restoreSplArrayState(ctx: *NativeContext, obj: *PhpObject, state: Value) 
             try ctx.vm.setPendingException("UnexpectedValueException", msg);
             return error.RuntimeError;
         }
-        if (!ctx.vm.isInstanceOf(iterator.string.bytes(), "Iterator")) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot deserialize ArrayObject with iterator class '{s}'; this class does not implement the Iterator interface", .{iterator.string.bytes()});
+        if (!ctx.vm.isInstanceOf(iterator.string.bytes(), "ArrayIterator")) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot deserialize ArrayObject with iterator class '{s}'; this class is not derived from ArrayIterator", .{iterator.string.bytes()});
             defer ctx.allocator.free(msg);
             try ctx.vm.setPendingException("UnexpectedValueException", msg);
             return error.RuntimeError;

@@ -2916,6 +2916,10 @@ const QueryBuilder = struct {
             };
             const is_enum = v == .object and if (self.ctx.vm.classes.get(v.object.class_name)) |cd| cd.is_enum else false;
             if (v == .array or (v == .object and !is_enum)) {
+                if (v == .object) {
+                    try @import("filesystem.zig").deprecatedDocref(self.ctx, "object values within argument #1 $data to http_build_query() being interpreted as arrays is deprecated, instead the $data argument should be preprocessed with get_object_vars()", .{});
+                    if (self.ctx.vm.pending_exception != null) return error.RuntimeError;
+                }
                 var new_prefix: std.ArrayListUnmanaged(u8) = .empty;
                 defer new_prefix.deinit(a);
                 if (is_str) {

@@ -5425,7 +5425,7 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
         // readonly is implicitly protected(set): any class of the hierarchy
         // may initialize it, none may modify it
         if (initialized) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot modify readonly property {s}::${s}", .{ target.class_name, prop_name });
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot modify readonly property {s}::${s}", .{ class_names.display(target.class_name), prop_name });
             defer ctx.allocator.free(msg);
             _ = try ctx.vm.throwBuiltinException("Error", msg);
             return error.RuntimeError;

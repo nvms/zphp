@@ -1297,6 +1297,8 @@ fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     // php 8.6 reads the arguments before it looks the function up
     const arg = try sortCallback(ctx, args, "uasort");
     try requireSortFunction(ctx, "uasort");
+    // the callback is uasort()'s second argument, which checks it
+    try ctx.vm.checkCallbackArgs("uasort", "uasort", 0b10, 0, &.{ .null, arg });
     return splSort(ctx, .{ .user_values = arg });
 }
 
@@ -1304,6 +1306,8 @@ fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     // php 8.6 reads the arguments before it looks the function up
     const arg = try sortCallback(ctx, args, "uksort");
     try requireSortFunction(ctx, "uksort");
+    // the callback is uksort()'s second argument, which checks it
+    try ctx.vm.checkCallbackArgs("uksort", "uksort", 0b10, 0, &.{ .null, arg });
     return splSort(ctx, .{ .user_keys = arg });
 }
 

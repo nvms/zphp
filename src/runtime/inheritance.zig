@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const vm_mod = @import("vm.zig");
+const class_names = @import("class_names.zig");
 const VM = vm_mod.VM;
 const ClassDef = vm_mod.ClassDef;
 const RuntimeError = vm_mod.RuntimeError;
@@ -304,7 +305,8 @@ fn parseType(p: *const Pending, arena: std.mem.Allocator, text: []const u8, scop
 fn declaration(p: *const Pending, arena: std.mem.Allocator, m: Method) ![]const u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     if (m.returns_ref) try out.append(arena, '&');
-    try out.print(arena, "{s}::{s}(", .{ m.class, m.name });
+    // zend_get_function_declaration writes an anonymous class's name up to its nul
+    try out.print(arena, "{s}::{s}(", .{ class_names.display(m.class), m.name });
     for (m.params, 0..) |param, i| {
         if (i > 0) try out.appendSlice(arena, ", ");
         if (param.type_text.len > 0) {
