@@ -3345,8 +3345,9 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
                 try self.emitOp(.op_null);
             }
         } else if (member.tag == .class_property_hooks) {
+            // a hooked property's default waits like any other's
             const default_idx = self.ast.extra_data[member.data.lhs];
-            if (default_idx != 0) try self.compileNode(default_idx);
+            if (default_idx != 0) try self.emitOp(.op_null);
         }
     }
     // compile trait property defaults (hook properties keep their default in
@@ -3845,8 +3846,9 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     }
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property and member.data.lhs != 0 and defaultIsImmediate(self.ast, member.data.lhs)) {
-            try self.compileNode(member.data.lhs);
+        const default_idx = instanceDefault(self.ast, member);
+        if (default_idx != 0 and defaultIsImmediate(self.ast, default_idx)) {
+            try self.compileNode(default_idx);
             var p_name = self.ast.tokenSlice(member.main_token);
             if (p_name.len > 0 and p_name[0] == '$') p_name = p_name[1..];
             const p_idx = try self.addConstant(.{ .string = Value.String.borrowed(p_name) });
@@ -5059,8 +5061,22 @@ fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m
 // compiles the non-literal instance defaults into the class's hidden
 // initializer; returns whether there were any
 fn isDeferredDefault(ast: *const Ast, member: Ast.Node) bool {
-    if (member.tag != .class_property and member.tag != .static_class_property) return false;
-    return member.data.lhs != 0 and !defaultIsImmediate(ast, member.data.lhs);
+    const default_idx = propertyDefault(ast, member);
+    return default_idx != 0 and !defaultIsImmediate(ast, default_idx);
+}
+
+// a property's default expression, 0 for none: a hooked property keeps it
+// in its extra data
+fn propertyDefault(ast: *const Ast, member: Ast.Node) u32 {
+    return switch (member.tag) {
+        .class_property, .static_class_property => member.data.lhs,
+        .class_property_hooks => ast.extra_data[member.data.lhs],
+        else => 0,
+    };
+}
+
+fn instanceDefault(ast: *const Ast, member: Ast.Node) u32 {
+    return if (member.tag == .static_class_property) 0 else propertyDefault(ast, member);
 }
 
 // a class constant's value: a constant expression folded while compiling
@@ -5249,7 +5265,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
         const member = self.ast.nodes[member_idx];
         if (!isDeferredDefault(self.ast, member)) continue;
         if (first_tok == 0) first_tok = member.main_token;
-        try sub.compileNode(member.data.lhs);
+        try sub.compileNode(propertyDefault(self.ast, member));
         var p_name = self.ast.tokenSlice(member.main_token);
         if (p_name.len > 0 and p_name[0] == '$') p_name = p_name[1..];
         const p_idx = try sub.addConstant(.{ .string = Value.String.borrowed(p_name) });
