@@ -292,6 +292,11 @@ fn appendType(w: *Writer, raw: []const u8, nullable_in: bool, self_class: ?[]con
     if (self_class) |sc| if (std.mem.eql(u8, clean, "self")) {
         clean = sc;
     };
+    // parent is the parent class, resolved as php's compiler does
+    const parent_class: ?[]const u8 = if (self_class) |sc| if (w.ctx.vm.classes.get(sc)) |cd| cd.parent else null else null;
+    if (parent_class) |pc| if (std.ascii.eqlIgnoreCase(clean, "parent")) {
+        clean = w.ctx.vm.declaredClassName(pc);
+    };
     if (std.mem.indexOfScalar(u8, clean, '|') != null) {
         var has_null = false;
         var non_null: usize = 0;
@@ -306,7 +311,12 @@ fn appendType(w: *Writer, raw: []const u8, nullable_in: bool, self_class: ?[]con
         }
         const intersection = std.mem.indexOfScalar(u8, only, '&') != null or (only.len > 0 and only[0] == '(');
         if (has_null and non_null == 1 and !intersection) {
-            const name = if (self_class != null and std.mem.eql(u8, only, "self")) self_class.? else only;
+            const name = if (self_class != null and std.mem.eql(u8, only, "self"))
+                self_class.?
+            else if (parent_class != null and std.ascii.eqlIgnoreCase(only, "parent"))
+                w.ctx.vm.declaredClassName(parent_class.?)
+            else
+                only;
             return w.fmt("?{s}", .{name});
         }
         return w.str(try reflection.canonicalUnion(w.ctx, clean, self_class));

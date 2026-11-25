@@ -1300,9 +1300,14 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, dec
     }
     // PHP resolves 'self' / 'parent' at the class definition site but keeps
     // 'static' literal so reflection callers see the late-binding type
+    // and parent by the parent the class names (zend_compile_single_typename)
+    const parent_class: ?[]const u8 = if (self_class) |sc| if (ctx.vm.classes.get(sc)) |cd| cd.parent else null else null;
     if (self_class) |sc| {
         if (std.mem.eql(u8, clean, "self")) clean = sc;
     }
+    if (parent_class) |pc| if (std.ascii.eqlIgnoreCase(clean, "parent")) {
+        clean = try ctx.vm.stableClassName(pc);
+    };
     if (std.mem.indexOfScalar(u8, clean, '|') != null) {
         // detect "T|null" / "null|T" - PHP normalizes to nullable named type
         var has_null = false;
@@ -1327,6 +1332,9 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, dec
             if (self_class) |sc| {
                 if (std.mem.eql(u8, resolved, "self")) resolved = sc;
             }
+            if (parent_class) |pc| if (std.ascii.eqlIgnoreCase(resolved, "parent")) {
+                resolved = try ctx.vm.stableClassName(pc);
+            };
             return createNamedTypeObj(ctx, resolved, true);
         }
         const obj = try ctx.createObject("ReflectionUnionType");
