@@ -190,14 +190,47 @@ fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         try ctx.vm.raiseError(VM.E_WARNING, "define(): Argument #3 ($case_insensitive) is ignored since declaration of case-insensitive constants is no longer supported, this will be an error in PHP 9.0");
         if (ctx.vm.pending_exception != null) return error.RuntimeError;
     }
+    // copy_constant_array: the constant holds the values, not references
+    var path: std.ArrayListUnmanaged(*PhpArray) = .empty;
+    defer path.deinit(ctx.allocator);
+    const value: Value = if (args[1] == .array) (if (try derefCopy(ctx, args[1].array, &path)) |copy| .{ .array = copy } else args[1]) else args[1];
     if (ctx.vm.php_constants.contains(args[0].string.bytes())) {
-        _ = try ctx.vm.defineConstant(args[0].string.bytes(), args[1]);
+        _ = try ctx.vm.defineConstant(args[0].string.bytes(), value);
         return NativeResult.scalar(.{ .bool = false });
     }
     const name = try ctx.createString(args[0].string.bytes());
-    if (!try ctx.vm.defineConstant(name, args[1])) return NativeResult.scalar(.{ .bool = false });
+    if (!try ctx.vm.defineConstant(name, value)) return NativeResult.scalar(.{ .bool = false });
     try ctx.vm.user_constants.put(ctx.allocator, name, try ctx.vm.internName(ctx.vm.currentSourcePosition().file));
     return NativeResult.scalar(.{ .bool = true });
+}
+
+// a copy of arr without its references (ZVAL_COPY_DEREF), or null when it has
+// none at any depth and can be shared
+fn derefCopy(ctx: *NativeContext, arr: *PhpArray, path: *std.ArrayListUnmanaged(*PhpArray)) RuntimeError!?*PhpArray {
+    // validate_constant_array: an array that contains itself is refused
+    if (std.mem.indexOfScalar(*PhpArray, path.items, arr) != null or path.items.len > 4096) {
+        try ctx.vm.setPendingException("ValueError", "define(): Argument #2 ($value) cannot be a recursive array");
+        return error.RuntimeError;
+    }
+    try path.append(ctx.allocator, arr);
+    defer path.items.len -= 1;
+    var needed = false;
+    var nested: std.ArrayListUnmanaged(?*PhpArray) = .empty;
+    defer nested.deinit(ctx.allocator);
+    for (arr.entries.items) |e| {
+        if (e.ref != null) needed = true;
+        const v = if (e.ref) |r| r.* else e.value;
+        const inner: ?*PhpArray = if (v == .array) try derefCopy(ctx, v.array, path) else null;
+        if (inner != null) needed = true;
+        try nested.append(ctx.allocator, inner);
+    }
+    if (!needed) return null;
+    const copy = try ctx.createArray();
+    for (arr.entries.items, nested.items) |e, inner| {
+        const v: Value = if (inner) |c| .{ .array = c } else if (e.ref) |r| r.* else e.value;
+        try copy.set(ctx.allocator, e.key, v);
+    }
+    return copy;
 }
 
 // zend_get_class_constant_ex's zend_fetch_class: self, parent and static name
