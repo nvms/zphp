@@ -2927,6 +2927,22 @@ fn native_gzfile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 }
 
 fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const result = try openWithWrapper(ctx, args);
+    if (result.value == .resource) try attachContext(ctx, result.value.resource, if (args.len > 3) args[3] else null);
+    return result;
+}
+
+// _php_stream_open_wrapper_ex: a stream keeps the context it was opened
+// with, unless that is the default context or it has one of its own
+pub fn attachContext(ctx: *NativeContext, stream: *PhpObject, arg: ?Value) RuntimeError!void {
+    const v = arg orelse return;
+    if (v != .resource or !std.mem.eql(u8, v.resource.class_name, "StreamContext")) return;
+    if (ctx.vm.default_stream_context == v.resource) return;
+    if (stream.get("__context") == .resource) return;
+    try stream.set(ctx.allocator, "__context", v);
+}
+
+fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const given_path = try strArg(ctx, args, "fopen", 0, "filename", true);
     const mode = try strArg(ctx, args, "fopen", 1, "mode", false);
     if (given_path.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
