@@ -3809,6 +3809,19 @@ fn rpGetDeclaringFunction(ctx: *NativeContext, _: []const Value) RuntimeError!Na
             try setClosureInvokeMethod(ctx, obj, closure);
             return NativeResult.borrowed(.{ .object = obj });
         }
+        // a closure with a scope is a method of it (reflection_method_factory
+        // on fptr->common.scope), named as the closure
+        if (ctx.vm.closureDefClassByName(closure.closureName().?)) |scope| {
+            const obj = try ctx.createObject("ReflectionMethod");
+            try setClosureInvokeMethod(ctx, obj, closure);
+            const display = if (ctx.vm.functions.get(closure.closureName().?)) |func| func.display_name else "{closure}";
+            const class: Value = .{ .string = Value.String.borrowed(try ctx.vm.internName(ctx.vm.declaredClassName(scope))) };
+            try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(display) });
+            try obj.set(ctx.allocator, "class", class);
+            try obj.set(ctx.allocator, "__class", class);
+            try obj.set(ctx.allocator, "__declaring_class", class);
+            return NativeResult.borrowed(.{ .object = obj });
+        }
         const obj = try ctx.createObject("ReflectionFunction");
         _ = try ctx.callMethod(obj, "__construct", &.{closure});
         return NativeResult.borrowed(.{ .object = obj });
