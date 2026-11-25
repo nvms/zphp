@@ -1613,6 +1613,10 @@ fn runDelayed(ctx: *NativeContext, uctx: *UnserCtx) void {
         if (!failed) {
             serialize_lock += 1;
             defer serialize_lock -= 1;
+            // __unserialize may set each readonly property once more, its
+            // default included (zend_object_set_properties_reinitable)
+            const windowed = d.data != null and (ctx.vm.openReinitWindow(d.obj) catch null) != null;
+            defer if (windowed) ctx.vm.closeReinitWindow();
             const r = if (d.data) |data|
                 ctx.vm.callMethod(d.obj, "__unserialize", &.{.{ .array = data }})
             else

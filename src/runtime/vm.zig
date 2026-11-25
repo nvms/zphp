@@ -19284,11 +19284,11 @@ pub const VM = struct {
         return dispatched;
     }
 
-    fn openReinitWindow(self: *VM, obj: *PhpObject) !void {
+    pub fn openReinitWindow(self: *VM, obj: *PhpObject) !void {
         try self.reinit_windows.append(self.allocator, .{ .obj = obj });
     }
 
-    fn closeReinitWindow(self: *VM) void {
+    pub fn closeReinitWindow(self: *VM) void {
         var window = self.reinit_windows.pop() orelse return;
         window.written.deinit(self.allocator);
     }
