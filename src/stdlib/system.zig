@@ -829,6 +829,11 @@ fn native_php_ini_scanned_files(_: *NativeContext, _: []const Value) RuntimeErro
 // library php can't open does
 fn native_dl(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const filename = try @import("string_ports.zig").Args.init(ctx, "dl", args).str(0, "extension_filename");
+    // Z_PARAM_PATH
+    if (std.mem.indexOfScalar(u8, filename, 0) != null) {
+        try ctx.vm.setPendingException("ValueError", "dl(): Argument #1 ($extension_filename) must not contain any null bytes");
+        return error.RuntimeError;
+    }
     const enabled = ctx.vm.ini_settings.get("enable_dl") orelse "1";
     if (!iniBool(enabled)) {
         try ctx.vm.emitWarning("dl(): Dynamically loaded extensions aren't enabled");

@@ -2901,10 +2901,24 @@ fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const message = args[0].string.bytes();
     const msg_type: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    // Z_PARAM_PATH_STR_OR_NULL
+    if (args.len >= 3 and args[2] == .string and std.mem.indexOfScalar(u8, args[2].string.bytes(), 0) != null) {
+        try ctx.vm.setPendingException("ValueError", "error_log(): Argument #3 ($destination) must not contain any null bytes");
+        return error.RuntimeError;
+    }
     switch (msg_type) {
+        2 => {
+            try ctx.vm.setPendingException("ValueError", "TCP/IP option is not available for error logging");
+            return error.RuntimeError;
+        },
         3 => {
-            // append to the file named by arg #3
-            if (args.len < 3 or args[2] != .string) return NativeResult.scalar(.{ .bool = false });
+            // append to the file named by arg #3; php_stream_open_wrapper
+            // refuses no path at all
+            if (args.len < 3 or args[2] == .null or (args[2] == .string and args[2].string.bytes().len == 0)) {
+                try ctx.vm.setPendingException("ValueError", "Path must not be empty");
+                return error.RuntimeError;
+            }
+            if (args[2] != .string) return NativeResult.scalar(.{ .bool = false });
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const path = paths.streamPath(&path_buf, args[2].string.bytes());
             if (open_basedir.setting(ctx.vm) != null and !paths.hasScheme(path) and !try open_basedir.allows(ctx.vm, "error_log", path)) {
