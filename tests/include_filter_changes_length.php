@@ -29,3 +29,9 @@ var_dump($f === realpath($file), $d === dirname(realpath($file)), $l);
 [$f] = include 'php://filter/read=string.rot13/resource=php://filter/read=string.rot13/resource=file://' . $file;
 var_dump($f === realpath($file));
 unlink($file);
+// a filter that fails the read (php_user_filter's own filter() is fatal)
+// fails the include
+class Failing extends php_user_filter {}
+stream_filter_register('test.failing', 'Failing');
+var_dump(@include 'php://filter/read=test.failing/resource=' . __FILE__);
+var_dump(strstr(error_get_last()['message'] ?? '', "'", true));

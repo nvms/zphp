@@ -706,18 +706,27 @@ pub fn readIncludeSource(vm: *VM, path: []const u8) ?[]u8 {
             else => break :blk 0,
         }
     };
-    if (size == 0) {
-        const data = streams.copyToMem(&ctx, fh, null) catch return null;
-        return data orelse (vm.allocator.alloc(u8, 0) catch null);
-    }
-    var out = vm.allocator.alloc(u8, size) catch return null;
+    // zend_stream_fixup: the known size, or 4 KB growing; a read that
+    // fails (a filter's fatal error) fails the include
+    var out = vm.allocator.alloc(u8, if (size == 0) 4096 else size) catch return null;
     var got: usize = 0;
-    while (got < size) {
+    while (true) {
+        if (got == out.len) {
+            if (size != 0) break;
+            out = vm.allocator.realloc(out, out.len * 2) catch {
+                vm.allocator.free(out);
+                return null;
+            };
+        }
         const n = streams.read(&ctx, fh, out[got..]) catch {
             vm.allocator.free(out);
             return null;
         };
-        if (n <= 0) break;
+        if (n < 0) {
+            vm.allocator.free(out);
+            return null;
+        }
+        if (n == 0) break;
         got += @intCast(n);
     }
     out = vm.allocator.realloc(out, got) catch out;
