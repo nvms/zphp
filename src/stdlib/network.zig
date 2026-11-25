@@ -1200,7 +1200,7 @@ fn native_stream_socket_accept(ctx: *NativeContext, args: []const Value) Runtime
     ctx.vm.flushOutputToStdout();
     const ready = sys.poll(&fds, timeoutMs(ctx, if (args.len > 1) args[1] else null) orelse -1) catch 0;
     if (ready == 0) {
-        try se.raise(ctx, .{ .code = .AcceptFailed, .wrapper = "stream", .func = "stream_socket_accept" }, "Accept failed: " ++ comptime socketError(error.Timeout).message, .{});
+        try se.raise(ctx, .{ .code = .AcceptFailed, .wrapper = "stream", .func = "stream_socket_accept" }, "Accept failed: {s}", .{socketError(error.Timeout).message});
         return NativeResult.scalar(.{ .bool = false });
     }
     var peer: net.Address = undefined;
