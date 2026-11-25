@@ -531,6 +531,15 @@ fn writeCall(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), t: *const T
     var named = false;
     var merged: std.ArrayListUnmanaged(u8) = .empty;
     for (lay.slots, 0..) |slot, i| {
+        // a skipped by-reference parameter gets its default as php passes
+        // it, a value, which the call refuses
+        if (slot == .undef and mustBeByRef(t, i) and !(named and lay.names.extra != null)) {
+            if (!first) try out.appendSlice(a, ", ");
+            first = false;
+            if (named) try out.print(a, "{s}: ", .{paramAt(t, i).name});
+            try out.appendSlice(a, "null");
+            continue;
+        }
         if (slot == .undef) {
             named = true;
             continue;
