@@ -1857,6 +1857,23 @@ pub fn directiveMissingHere(name: []const u8) bool {
     return platform.is_windows and std.mem.eql(u8, name, "zend.signal_check");
 }
 
+// the directives php registers with a NULL default (ini_get_all() reports
+// null for them until something sets them; ini_get() reads "")
+fn noBuiltinDefault(name: []const u8) bool {
+    const names = std.StaticStringMap(void).initComptime(.{
+        .{"assert.callback"},     .{"auto_append_file"},           .{"auto_prepend_file"},     .{"browscap"},
+        .{"doc_root"},            .{"error_append_string"},        .{"error_log"},             .{"error_prepend_string"},
+        .{"error_reporting"},     .{"fiber.stack_size"},           .{"filter.default_flags"},  .{"from"},
+        .{"input_encoding"},      .{"internal_encoding"},          .{"mail.force_extra_parameters"}, .{"mail.log"},
+        .{"memory_hard_limit_percent"}, .{"mysqlnd.debug"},        .{"mysqlnd.sha256_server_public_key"}, .{"mysqlnd.trace_alloc"},
+        .{"opcache.file_cache"},  .{"open_basedir"},               .{"openssl.cafile"},        .{"openssl.capath"},
+        .{"output_encoding"},     .{"output_handler"},             .{"request_order"},         .{"sendmail_from"},
+        .{"sqlite3.extension_dir"}, .{"sys_temp_dir"},             .{"unserialize_callback_func"}, .{"upload_tmp_dir"},
+        .{"user_agent"},          .{"user_dir"},                   .{"zend.script_encoding"},
+    });
+    return names.has(name);
+}
+
 pub fn iniDefault(name: []const u8) ?[]const u8 {
     if (directiveMissingHere(name)) return null;
     if (std.mem.eql(u8, name, "date.timezone")) return "UTC";
@@ -2042,6 +2059,8 @@ fn native_ini_get(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const name = args[0].string.bytes();
     if (ctx.vm.ini_settings.get(name)) |stored| return NativeResult.copyString(ctx.allocator, stored);
     if (iniDefault(name)) |def| return NativeResult.copyString(ctx.allocator, def);
+    // a directive with no default that nothing set reads as ""
+    if (noBuiltinDefault(name) and !directiveMissingHere(name)) return NativeResult.copyString(ctx.allocator, "");
     return NativeResult.scalar(Value{ .bool = false });
 }
 
@@ -2670,8 +2689,10 @@ fn native_ini_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const ini_config = @import("../ini_config.zig");
     const result = try ctx.createArray();
     for (names.items) |name| {
-        const local_text: ?[]const u8 = ctx.vm.ini_settings.get(name) orelse ini_config.get(name) orelse iniDefault(name);
-        const global_text: ?[]const u8 = ini_config.get(name) orelse iniDefault(name);
+        // a directive with no compiled-in default reads as null until set
+        const builtin_text: ?[]const u8 = if (noBuiltinDefault(name)) null else iniDefault(name);
+        const local_text: ?[]const u8 = ctx.vm.ini_settings.get(name) orelse ini_config.get(name) orelse builtin_text;
+        const global_text: ?[]const u8 = ini_config.get(name) orelse builtin_text;
         const local: Value = if (local_text) |v| .{ .string = try Value.String.create(ctx.allocator, v) } else .null;
         defer if (local == .string) local.string.release();
         const key = PhpArray.Key{ .string = Value.String.borrowed(name) };
@@ -2685,7 +2706,7 @@ fn native_ini_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("global_value") }, global);
         try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("local_value") }, local);
         // php 8.6: the default the directive is built with, whatever the ini said
-        const builtin: Value = if (iniDefault(name)) |v| .{ .string = try Value.String.create(ctx.allocator, v) } else .null;
+        const builtin: Value = if (builtin_text) |v| .{ .string = try Value.String.create(ctx.allocator, v) } else .null;
         defer if (builtin == .string) builtin.string.release();
         try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("builtin_default_value") }, builtin);
         const system = std.mem.eql(u8, name, "max_memory_limit") or @import("mail.zig").isSystemIni(name) or std.mem.eql(u8, name, "syslog.facility") or std.mem.eql(u8, name, "syslog.ident");
