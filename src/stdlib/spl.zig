@@ -256,7 +256,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::__unset", aoMagicUnset);
 
     // WeakMap (simplified - uses spl_object_id as key, no weak reference semantics)
-    var wm_def = ClassDef{ .name = "WeakMap", .is_final = true, .native_properties = weakMapProperties };
+    var wm_def = ClassDef{ .name = "WeakMap", .is_final = true, .native_properties = weakMapProperties, .native_clone = weakMapClone };
     try wm_def.interfaces.append(a, "ArrayAccess");
     try wm_def.interfaces.append(a, "Countable");
     try wm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
@@ -1512,6 +1512,20 @@ fn wmConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
     // register for weak-key cleanup on object destruct
     try ctx.vm.weakmaps.append(ctx.allocator, obj);
     return NativeResult.scalar(.null);
+}
+
+// zend_weakmap_clone_obj: the copy's keys are weak too, and it is a map the
+// keys' destruction removes them from
+fn weakMapClone(vm: *VM, src: *PhpObject, dst: *PhpObject) bool {
+    _ = src;
+    // the property copy took a reference to each key: give them back
+    const keys = dst.get("__keys");
+    if (keys == .array and !keys.array.weak) {
+        for (keys.array.entries.items) |e| vm.releaseValue(e.value);
+        keys.array.weak = true;
+    }
+    vm.weakmaps.append(vm.allocator, dst) catch return false;
+    return true;
 }
 
 // zend_weakmap's dimension handlers refuse anything but an object key, and a

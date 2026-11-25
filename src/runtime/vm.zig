@@ -9040,6 +9040,11 @@ pub const VM = struct {
                         var unwrap_failed = false;
                         var unwrap_steps: u8 = 0;
                         unwrap: while (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator") and !self.isInstanceOf(iterable.object.class_name, "Iterator") and spl_iterator_classes.foreachDirect(self, iterable.object) == 0 and unwrap_steps < 8) {
+                            // the iterator of a class whose get_iterator
+                            // handler doesn't call getIterator() is no object
+                            // in php: it takes no handle (WeakMap, which is
+                            // final, so the method is its own)
+                            const native_iterator = isWeakMap(iterable.object);
                             const inner = self.callMethod(iterable.object, "getIterator", &.{}) catch {
                                 if (self.dispatchPendingException(base_frame)) {
                                     unwrap_dispatched = true;
@@ -9059,6 +9064,7 @@ pub const VM = struct {
                                 } else unwrap_failed = true;
                                 break :unwrap;
                             }
+                            if (native_iterator and inner == .object and inner.object.refcount <= 1) self.freeHandle(inner.object);
                             // inner takes the stack slot - it holds a reference (Stage 1)
                             retainValue(inner);
                             self.stackRelease(self.stack[self.sp - 1]);
