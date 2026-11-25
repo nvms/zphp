@@ -77,3 +77,5 @@ gmp_php86_ranges.php: php's windows builds use MPIR, which has no gmp_prevprime(
 io_poll.php: php picks WSAPoll there, so the backend names and what each backend reports differ, and the runner's php cannot make the unix socket pairs the test polls
 proc_signal_status.php: posix signals; windows has no signal status
 cli_server_routing.php: starts php's built-in server as a background process and probes it over tcp; the windows build of zphp -S is unverified
+socket_read_buffered_no_wait.php: uses a unix socket pair, which php's windows build doesn't create
+stream_socket_client_no_connect.php: php's windows build has no unix transport ("Unable to find the socket transport")
