@@ -2919,6 +2919,8 @@ pub const VM = struct {
         try c.put(a, "ZEND_THREAD_SAFE", .{ .bool = false });
         try c.put(a, "ZEND_DEBUG_BUILD", .{ .bool = @import("builtin").mode == .debug });
         try c.put(a, "PHP_MAXPATHLEN", .{ .int = 1024 });
+        // FD_SETSIZE as php is built: the system's, 256 in php's windows build
+        try c.put(a, "PHP_FD_SETSIZE", .{ .int = if (@import("builtin").os.tag == .windows) 256 else 1024 });
         try c.put(a, "ICONV_VERSION", .{ .string = Value.String.borrowed("1.11") });
         try c.put(a, "OPENSSL_VERSION_TEXT", .{ .string = Value.String.borrowed("OpenSSL 3") });
         try c.put(a, "OPENSSL_VERSION_NUMBER", .{ .int = 0x30000000 });

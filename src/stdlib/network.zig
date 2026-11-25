@@ -163,6 +163,16 @@ fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!N
         try ctx.vm.setPendingException("ValueError", "No stream arrays were passed");
         return error.RuntimeError;
     }
+    // php selects with select(2): a descriptor past FD_SETSIZE fails the
+    // call (_php_check_fd_setsize; php's windows build counts sockets)
+    if (!platform.is_windows) {
+        var max_fd: i64 = -1;
+        for (pollfds.items) |p| max_fd = @max(max_fd, @as(i64, @intCast(p.fd)));
+        if (max_fd >= 1024) {
+            try filesystem.warnDocref(ctx, "You MUST recompile PHP with a larger value of FD_SETSIZE.\nIt is set to {d}, but you have descriptors numbered at least as high as {d}.\n --enable-fd-setsize={d} is recommended, but you may want to set it\nto equal the maximum number of open files supported by your system,\nin order to avoid seeing this error again at a later date.", .{ 1024, max_fd, (max_fd + 1024) & ~@as(i64, 1023) });
+            return NativeResult.scalar(.{ .bool = false });
+        }
+    }
 
     const sec_null = args.len < 4 or args[3] == .null;
     const usec_null = args.len < 5 or args[4] == .null;
