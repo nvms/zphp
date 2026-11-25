@@ -6057,6 +6057,14 @@ fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) Runtim
     const label = if (variadic) "ReflectionMethod::invoke" else "ReflectionMethod::invokeArgs";
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    if (methodIsAbstract(ctx.vm, this, method_name, declaring)) return throwReflectionFmt(ctx, "Trying to invoke abstract method {s}::{s}()", .{ declaring, method_name });
+    // the argument count is checked after that (zend_parse_parameters)
+    const arity: @import("../runtime/natives.zig").Arity = if (variadic) .{ .min = 1 } else .{ .min = 2, .max = 2 };
+    if (!arity.admits(args.len)) {
+        var buf: [128]u8 = undefined;
+        try ctx.vm.setPendingException("ArgumentCountError", arity.describe(&buf, label, args.len));
+        return error.RuntimeError;
+    }
     if (this.get("__closure") != .null) {
         const target = if (args.len > 0) args[0] else Value.null;
         if (!isClosureValue(target)) {
@@ -6070,7 +6078,6 @@ fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) Runtim
         defer bound.deinit(ctx.allocator);
         return NativeResult.share(try ctx.invokeCallable(target, bound.list.items));
     }
-    if (methodIsAbstract(ctx.vm, this, method_name, declaring)) return throwReflectionFmt(ctx, "Trying to invoke abstract method {s}::{s}()", .{ declaring, method_name });
     var object: ?*PhpObject = null;
     var closure_target: ?Value = null;
     if (args.len > 0 and args[0].closureName() != null) closure_target = args[0] else object = try zpp.optObject(ctx, label, args, 0, "object");

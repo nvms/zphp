@@ -234,6 +234,8 @@ pub const Arity = struct {
         if (std.mem.eql(u8, name, "DatePeriod::__construct")) return .{};
         // parses no parameters at all: it throws whatever it is given
         if (std.mem.eql(u8, name, "FiberError::__construct") or std.mem.eql(u8, name, "ReflectionAttribute::__construct")) return .{};
+        // refuses an abstract method before it parses its arguments
+        if (std.mem.eql(u8, name, "ReflectionMethod::invoke") or std.mem.eql(u8, name, "ReflectionMethod::invokeArgs")) return .{};
         const signature = native_params.get(name) orelse return .{};
         var arity: Arity = .{ .max = 0 };
         for (signature.params) |param| {
