@@ -276,7 +276,9 @@ fn exceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Nativ
         return NativeResult.literal("");
     }
     const message = this_val.object.get("message");
-    return if (message == .string) NativeResult.shareString(message.string) else NativeResult.borrowed(message);
+    if (message == .string) return NativeResult.shareString(message.string);
+    // RETURN_STR(zval_get_string(prop))
+    return NativeResult.copyString(ctx.allocator, try ctx.vm.valueToString(message));
 }
 
 fn undefinedThrowableProperty(ctx: *NativeContext, obj: *PhpObject, name: []const u8) RuntimeError!void {
@@ -340,7 +342,12 @@ pub fn describe(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
         defer ctx.allocator.free(trace);
         if (e.isUnset("message")) try undefinedThrowableProperty(ctx, e, "message");
         const message = e.get("message");
-        const message_text = if (message == .string) message.string.bytes() else "";
+        // zval_get_string: a message that isn't a string is converted
+        const message_text = switch (message) {
+            .string => |s| s.bytes(),
+            .null => "",
+            else => try ctx.vm.valueToString(message),
+        };
         const file = e.get("file");
         const line = e.get("line");
         const where = .{ if (file == .string) file.string.bytes() else "", if (line == .int) line.int else 0 };
