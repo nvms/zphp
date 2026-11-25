@@ -12522,7 +12522,7 @@ pub const VM = struct {
                                 }
                                 if (self.pending_exception) |exc| {
                                     self.pending_exception = null;
-                                    if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                                    if (self.handler_count > self.handler_floor and !self.uncatchable_fatal and self.topHandlerInLoop()) {
                                         const handler = self.exception_handlers[self.handler_count - 1];
                                         if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                         continue;
@@ -12773,7 +12773,7 @@ pub const VM = struct {
                                 }
                                 if (self.pending_exception) |exc| {
                                     self.pending_exception = null;
-                                    if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                                    if (self.handler_count > self.handler_floor and !self.uncatchable_fatal and self.topHandlerInLoop()) {
                                         const handler = self.exception_handlers[self.handler_count - 1];
                                         if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                         continue;
@@ -13703,7 +13703,7 @@ pub const VM = struct {
                             }
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
-                                if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                                if (self.handler_count > self.handler_floor and !self.uncatchable_fatal and self.topHandlerInLoop()) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
                                     if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                     continue;
@@ -13989,7 +13989,7 @@ pub const VM = struct {
                             }
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
-                                if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                                if (self.handler_count > self.handler_floor and !self.uncatchable_fatal and self.topHandlerInLoop()) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
                                     if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                     continue;
@@ -14161,7 +14161,7 @@ pub const VM = struct {
                             }
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
-                                if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                                if (self.handler_count > self.handler_floor and !self.uncatchable_fatal and self.topHandlerInLoop()) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
                                     if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                     continue;
@@ -14349,7 +14349,7 @@ pub const VM = struct {
                             }
                             if (self.pending_exception) |exc| {
                                 self.pending_exception = null;
-                                if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                                if (self.handler_count > self.handler_floor and !self.uncatchable_fatal and self.topHandlerInLoop()) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
                                     if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                     continue;
@@ -15661,7 +15661,7 @@ pub const VM = struct {
                         }
                         if (self.pending_exception) |exc| {
                             self.pending_exception = null;
-                            if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                            if (self.handler_count > self.handler_floor and !self.uncatchable_fatal and self.topHandlerInLoop()) {
                                 const handler = self.exception_handlers[self.handler_count - 1];
                                 if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                                 return;
@@ -19489,6 +19489,14 @@ pub const VM = struct {
             try obj.set(self.allocator, "line", .{ .int = pos.line });
         }
         return obj;
+    }
+
+    // whether the innermost catch belongs to the running loop: one pushed
+    // by a frame at or below the loop's base frame (the caller of an eval,
+    // include or callback the loop runs) is an outer loop's to enter
+    inline fn topHandlerInLoop(self: *const VM) bool {
+        const handler = self.exception_handlers[self.handler_count - 1];
+        return handler.frame_count > self.run_base_frame or self.run_base_frame == 0;
     }
 
     // lands in this loop's nearest catch; false leaves it pending for an
@@ -31388,7 +31396,7 @@ pub const VM = struct {
             const result = self.invokeNative(native, &ctx, .{ .args = args_s, .name = name, .dynamic = dynamic }) catch {
                 if (self.pending_exception) |exc| {
                     self.pending_exception = null;
-                    if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                    if (self.handler_count > self.handler_floor and !self.uncatchable_fatal and self.topHandlerInLoop()) {
                         const handler = self.exception_handlers[self.handler_count - 1];
                         if (!self.enterHandler(handler, exc, .owned)) return error.RuntimeError;
                         return;
