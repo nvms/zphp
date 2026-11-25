@@ -50,6 +50,9 @@ pub const Stream = struct {
     chunk_size: usize = chunk_default,
     eof: bool = false,
     fatal_error: bool = false,
+    // php's has_buffered_data: a read already took bytes from the buffer,
+    // so a blocking socket doesn't wait for more
+    has_buffered_data: bool = false,
     // reads bypass the buffer (php://memory and php://temp)
     no_buffer: bool = false,
     no_seek: bool = false,
@@ -261,7 +264,12 @@ pub fn rawRead(ctx: *NativeContext, obj: *PhpObject, s: *Stream, dest: []u8) Run
             // php_sock_stream_wait_for_data: a blocking socket with a
             // timeout from stream_set_timeout waits that long for data, and
             // a read that times out returns nothing and marks timed_out
-            if (io.socket) if (obj.get("__timeout_us") == .int) {
+            // with data already taken from the buffer, a blocking socket
+            // reads only what has arrived (MSG_DONTWAIT)
+            if (io.socket and s.has_buffered_data) {
+                var fds = [_]@import("../sys.zig").pollfd{.{ .fd = io.sock(), .events = @import("../sys.zig").POLL.IN, .revents = 0 }};
+                if ((@import("../sys.zig").poll(&fds, 0) catch 1) == 0) return 0;
+            } else if (io.socket) if (obj.get("__timeout_us") == .int) {
                 try obj.set(ctx.allocator, "__timed_out", .{ .bool = false });
                 const blocking = obj.get("__blocking") != .bool or obj.get("__blocking").bool;
                 const us = obj.get("__timeout_us").int;
@@ -480,6 +488,7 @@ pub fn read(ctx: *NativeContext, obj: *PhpObject, dest: []u8) RuntimeError!isize
             size -= toread;
             buf = buf[toread..];
             didread += toread;
+            s.has_buffered_data = true;
         }
         if (size == 0) break;
         var toread: usize = 0;
@@ -505,9 +514,13 @@ pub fn read(ctx: *NativeContext, obj: *PhpObject, dest: []u8) RuntimeError!isize
         didread += toread;
         buf = buf[toread..];
         size -= toread;
+        s.has_buffered_data = true;
         if (!s.greedy) break;
     }
-    if (didread > 0) s.position += @intCast(didread);
+    if (didread > 0) {
+        s.position += @intCast(didread);
+        s.has_buffered_data = false;
+    }
     return @intCast(didread);
 }
 
