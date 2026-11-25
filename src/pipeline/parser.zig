@@ -1431,6 +1431,14 @@ const Parser = struct {
                     class_expr = try self.addNode(.{ .tag = .property_access, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = prop } });
                     continue;
                 }
+                // new_variable T_NULLSAFE_OBJECT_OPERATOR property_name
+                if (self.peek() == .question_arrow and (self.peekAt(1) == .identifier or self.peekAt(1) == .variable)) {
+                    _ = self.advance();
+                    const name_tok = self.advance();
+                    const prop = try self.addNode(.{ .tag = if (self.tokens[name_tok].tag == .variable) .variable else .identifier, .main_token = name_tok, .data = .{} });
+                    class_expr = try self.addNode(.{ .tag = .nullsafe_property_access, .main_token = if (self.tokens[name_tok].tag == .variable) 0 else name_tok, .data = .{ .lhs = class_expr, .rhs = prop } });
+                    continue;
+                }
                 // new_variable '::' simple_variable: a static property of
                 // the class the variable names
                 if (self.peek() == .colon_colon and self.peekAt(1) == .variable) {
