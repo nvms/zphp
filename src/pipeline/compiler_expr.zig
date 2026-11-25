@@ -3446,8 +3446,17 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
             return;
         },
         // any other expression in the class position, `(self::class)::m()`,
-        // `A::NAME::m()`, `('A')::m()`: its value names the class
-        .identifier, .qualified_name => {},
+        // `A::NAME::m()`, `('A')::m()`: its value names the class. a name in
+        // parentheses, `(NAME)::m()`, is a constant
+        .identifier, .qualified_name => if (class_lhs_idx != node.data.lhs) {
+            try self.compileNode(class_lhs_idx);
+            const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
+            if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
+            var guards = try compileArgs(self, args);
+            self.current_source_offset = self.ast.tokens[node.main_token].start;
+            try emitCallOp(self, &guards, .static_call_dynamic, .{ .a = method_idx, .argc = @intCast(args.len) });
+            return;
+        },
         else => {
             try self.compileNode(class_lhs_idx);
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
