@@ -8854,8 +8854,17 @@ pub const VM = struct {
                 .array_elem_inc, .array_elem_dec, .array_elem_pre_inc, .array_elem_pre_dec => {
                     const up = op == .array_elem_inc or op == .array_elem_pre_inc;
                     const pre = op == .array_elem_pre_inc or op == .array_elem_pre_dec;
+                    const aei_fetched = self.ic.?.stack_fetch[self.sp - 2];
+                    defer self.value_returned = null;
                     const aei_key = self.pop();
-                    const aei_arr = self.pop();
+                    var aei_arr = self.pop();
+                    // a call's by-value result is separated from its owners
+                    // before the step (SEPARATE_ARRAY), as array_set does
+                    if (aei_arr == .array and !aei_fetched and self.value_returned == aei_arr.array and aei_arr.array.refcount > 0) {
+                        const copy = try self.shallowCloneCow(aei_arr.array);
+                        self.queueArrayRelease(copy);
+                        aei_arr = .{ .array = copy };
+                    }
                     if (aei_arr == .string) {
                         if (self.throwWrongStringOffset(aei_key, "Cannot increment/decrement string offsets") catch try self.resumeRaised()) continue;
                         return error.RuntimeError;

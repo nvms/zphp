@@ -777,7 +777,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .array_elem_inc => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
-                    if (aei_arr == .array and aei_key != .resource and aei_key != .float and aei_key != .null) {
+                    if (aei_arr == .array and (self.value_returned != aei_arr.array or self.ic.?.stack_fetch[sp - 2]) and aei_key != .resource and aei_key != .float and aei_key != .null) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         if (old == .int) {
@@ -801,7 +801,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .array_elem_pre_inc => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
-                    if (aei_arr == .array and aei_key != .resource and aei_key != .float and aei_key != .null) {
+                    if (aei_arr == .array and (self.value_returned != aei_arr.array or self.ic.?.stack_fetch[sp - 2]) and aei_key != .resource and aei_key != .float and aei_key != .null) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         // an int that doesn't overflow; anything else is runLoop's
@@ -826,7 +826,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .array_elem_pre_dec => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
-                    if (aei_arr == .array and aei_key != .resource and aei_key != .float and aei_key != .null) {
+                    if (aei_arr == .array and (self.value_returned != aei_arr.array or self.ic.?.stack_fetch[sp - 2]) and aei_key != .resource and aei_key != .float and aei_key != .null) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         // an int that doesn't overflow; anything else is runLoop's
@@ -851,7 +851,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .array_elem_dec => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
-                    if (aei_arr == .array and aei_key != .resource and aei_key != .float and aei_key != .null) {
+                    if (aei_arr == .array and (self.value_returned != aei_arr.array or self.ic.?.stack_fetch[sp - 2]) and aei_key != .resource and aei_key != .float and aei_key != .null) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         if (old == .int) {
