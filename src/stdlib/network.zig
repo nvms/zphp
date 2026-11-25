@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const se = @import("stream_errors.zig");
 const net = @import("../net.zig");
 const sys = @import("../sys.zig");
 const platform = @import("../platform.zig");
@@ -958,17 +959,17 @@ pub fn defaultSocketTimeoutSeconds(ctx: *NativeContext) f64 {
 pub fn connectTransport(ctx: *NativeContext, target: []const u8, timeout_s: f64, options: i64) RuntimeError!?*PhpObject {
     const timeout_ms: ?i32 = if (timeout_s >= 0) @intFromFloat(@min(timeout_s * 1000.0, @as(f64, std.math.maxInt(i32)))) else null;
     const endpoint = parseEndpoint(ctx.allocator, target) catch |err| {
-        try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "{s}", .{socketError(err).message});
         return null;
     };
     _ = endpointAddress(endpoint) catch |err| {
-        try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "{s}", .{socketError(err).message});
         return null;
     };
     const sock = connectTarget(ctx.allocator, endpoint, target, timeout_ms, false) catch |err| {
         // php made the stream before the connect failed
         ctx.vm.skipResourceId();
-        try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "{s}", .{socketError(err).message});
         return null;
     };
     return try endpointStream(ctx, sock, endpoint, true, null);
@@ -1095,7 +1096,10 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const flags: i64 = if (args.len > 4) Value.toInt(args[4]) else 4;
     _ = try streamContext(ctx, if (args.len > 5) args[5] else null);
-    return connectStream(ctx, args, 1, args[0].string.bytes(), if (args.len > 3) args[3] else null, (flags & 2) != 0, "stream_socket_client");
+    const result = try connectStream(ctx, args, 1, args[0].string.bytes(), if (args.len > 3) args[3] else null, (flags & 2) != 0, "stream_socket_client");
+    // the socket keeps the context it was made with (php_stream_xport_create)
+    if (result.value == .resource) try filesystem.attachContext(ctx, result.value.resource, if (args.len > 5) args[5] else null);
+    return result;
 }
 
 fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, target: []const u8, timeout: ?Value, async_connect: bool, comptime func: []const u8) RuntimeError!NativeResult {
@@ -1122,6 +1126,7 @@ fn native_stream_socket_server(ctx: *NativeContext, args: []const Value) Runtime
     try reportSocketError(ctx, args, 1, null);
     const obj = try endpointStream(ctx, sock, endpoint, true, target);
     try obj.set(ctx.allocator, "__server", .{ .bool = true });
+    try filesystem.attachContext(ctx, obj, if (args.len > 4) args[4] else null);
     return NativeResult.borrowed(.{ .resource = obj });
 }
 
@@ -1172,15 +1177,13 @@ fn native_stream_socket_accept(ctx: *NativeContext, args: []const Value) Runtime
     ctx.vm.flushOutputToStdout();
     const ready = sys.poll(&fds, timeoutMs(ctx, if (args.len > 1) args[1] else null) orelse -1) catch 0;
     if (ready == 0) {
-        try ctx.vm.emitWarning("stream_socket_accept(): Accept failed: " ++ comptime socketError(error.Timeout).message);
+        try se.raise(ctx, .{ .code = .AcceptFailed, .wrapper = "stream", .func = "stream_socket_accept" }, "Accept failed: " ++ comptime socketError(error.Timeout).message, .{});
         return NativeResult.scalar(.{ .bool = false });
     }
     var peer: net.Address = undefined;
     var len: std.posix.socklen_t = @sizeOf(net.Address);
     const sock = sys.accept(server, &peer.any, &len, if (platform.is_windows) 0 else std.posix.SOCK.CLOEXEC) catch |err| {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "stream_socket_accept(): Accept failed: {s}", .{socketError(err).message});
-        defer ctx.allocator.free(msg);
-        try ctx.vm.emitWarning(msg);
+        try se.raise(ctx, .{ .code = .AcceptFailed, .wrapper = "stream", .func = "stream_socket_accept" }, "Accept failed: {s}", .{socketError(err).message});
         return NativeResult.scalar(.{ .bool = false });
     };
     // the connection keeps whatever mode the OS gives it: BSDs and windows

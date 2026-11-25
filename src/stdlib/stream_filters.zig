@@ -358,7 +358,7 @@ pub fn append(ctx: *NativeContext, stream_obj: *PhpObject, chain: *Chain, f: *Fi
         .err_fatal => {
             brig_in.clear();
             brig_out.clear();
-            try fs.warnDocref(ctx, "Filter failed to process pre-buffered data", .{});
+            try @import("stream_errors.zig").warn(ctx, .FilterFailed, @import("stream_errors.zig").streamLabel(ctx.vm, stream_obj), "Filter failed to process pre-buffered data", .{});
             return false;
         },
         .feed_me => {
