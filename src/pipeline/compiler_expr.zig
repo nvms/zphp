@@ -766,7 +766,6 @@ fn isNamedVariable(self: *Compiler, idx: u32, name: []const u8) bool {
 // IS_TMP_VAR, IS_VAR, IS_CV), which orders a commutative opcode's operands
 const operand_const: u8 = 1;
 const operand_tmp: u8 = 2;
-const operand_var: u8 = 4;
 const operand_cv: u8 = 8;
 
 fn phpOperandKind(self: *Compiler, idx: u32) u8 {
@@ -786,10 +785,8 @@ fn phpOperandKind(self: *Compiler, idx: u32) u8 {
             if (std.mem.eql(u8, name, "$this") or isSuperglobalName(name)) return operand_tmp;
             return operand_cv;
         },
-        // php 8.6 gives a call read as a value a temporary
-        // (zend_compile_call_common); new still makes a var
-        .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .call => return operand_tmp,
-        .new_expr, .new_expr_dynamic, .anonymous_class => return operand_var,
+        // php 8.6 gives a call read as a value, and new, a temporary
+        // (zend_compile_call_common, zend_compile_new)
         else => return operand_tmp,
     }
 }
