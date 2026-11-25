@@ -988,6 +988,9 @@ pub const VM = struct {
     // first-class callable got this request, by its registered name; each
     // holds a reference, dropped in reset()
     fcc_cache: std.StringHashMapUnmanaged(*PhpObject) = .{},
+    // php 8.6's DATEG(duration_cache): the last non-negative Time\Duration a
+    // factory made, held with a reference until the request ends
+    duration_cache: ?*PhpObject = null,
     // php 8.6's stateless closures (EG(lambda_cache)), by the compiled
     // closure, each held with one reference until the request ends
     lambda_cache: std.StringHashMapUnmanaged(struct { scope: ?[]const u8, closure: *PhpObject }) = .{},
@@ -2678,6 +2681,7 @@ pub const VM = struct {
         try @import("../stdlib/buffer.zig").register(vm, allocator);
         try @import("../stdlib/select.zig").register(vm, allocator);
         try @import("../stdlib/bcmath.zig").register(vm, allocator);
+        try @import("../stdlib/time_duration.zig").register(vm, allocator);
         try @import("../stdlib/gd.zig").register(vm, allocator);
         try @import("../stdlib/soap.zig").register(vm, allocator);
         try @import("../stdlib/mysqli.zig").register(vm, allocator);
@@ -4117,6 +4121,8 @@ pub const VM = struct {
         var lambda_it = self.lambda_cache.valueIterator();
         while (lambda_it.next()) |entry| self.releaseValue(.{ .object = entry.closure });
         self.lambda_cache.clearRetainingCapacity();
+        if (self.duration_cache) |cached| self.releaseValue(.{ .object = cached });
+        self.duration_cache = null;
         self.iap_positions.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();
         if (self.ic) |ic| {

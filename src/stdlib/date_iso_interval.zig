@@ -32,6 +32,8 @@ pub const Interval = struct {
     period: ?Period = null,
     // 0 unless the string has an R part
     recurrences: i64 = 0,
+    // the string has an R part (timelib's r is not -1), even R0
+    has_recurrences: bool = false,
     errors: usize = 0,
 };
 
@@ -58,6 +60,7 @@ pub fn parse(input: []const u8) Interval {
             .recurrences => {
                 var p: usize = 1;
                 out.recurrences = unsignedNumber(token, &p, 9);
+                out.has_recurrences = true;
             },
             .datetime => {
                 const current = if (have_date or have_period) &end else &begin;

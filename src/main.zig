@@ -1182,6 +1182,7 @@ test {
     _ = @import("stdlib/registry.zig");
     _ = @import("stdlib/datetime.zig");
     _ = @import("stdlib/date_iso_interval.zig");
+    _ = @import("stdlib/time_duration.zig");
     _ = @import("stdlib/phar_path.zig");
     _ = @import("serve.zig");
     _ = @import("observe.zig");
