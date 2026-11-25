@@ -4861,6 +4861,19 @@ fn callableClosureTable(ctx: *NativeContext, table: *PhpArray, callable: Value) 
         else => return,
     }
     try table.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("function") }, function);
+    // the function's static variables, as for a closure expression
+    if (ctx.vm.functions.get(function)) |func| if (func.static_vars.len > 0) {
+        const statics = try ctx.vm.allocArray();
+        const key_name = ctx.vm.functions.getKey(function) orelse function;
+        for (func.static_vars) |sv| {
+            var key_buf: [256]u8 = undefined;
+            const storage = class_names.memberKey(&key_buf, key_name, sv.name);
+            const value = if (ctx.vm.statics_cells.get(storage)) |cell| cell.* else if (ctx.vm.statics.get(storage)) |v| v else try ctx.vm.resolveDefault(sv.initial);
+            const key = if (sv.name.len > 0 and sv.name[0] == '$') sv.name[1..] else sv.name;
+            try statics.setCopiedKey(ctx.allocator, key, value);
+        }
+        try setNamed(ctx, table, "static", .{ .array = statics });
+    };
     if (this == .object) try setNamed(ctx, table, "this", this);
     if (ctx.vm.functions.get(function)) |func| {
         try parameterTable(ctx, table, func.params, func.ref_params, func.required_params, func.is_variadic);
