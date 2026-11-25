@@ -54,7 +54,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // Random\IntervalBoundary, the interval getFloat() draws from
     var boundary = ClassDef{ .name = "Random\\IntervalBoundary", .is_enum = true, .no_dynamic_properties = true };
-    try boundary.properties.append(a, .{ .name = "name", .default = .null, .is_readonly = true, .has_set_visibility = true, .type_str = "string" });
+    try boundary.properties.append(a, .{ .name = "name", .default = .null, .is_readonly = true, .has_set_visibility = true, .set_visibility = .protected, .type_str = "string" });
     for (boundary_cases) |name| {
         const case_obj = try a.create(PhpObject);
         case_obj.* = .{ .class_name = "Random\\IntervalBoundary", .enum_case = true };

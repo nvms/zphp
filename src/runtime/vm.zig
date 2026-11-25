@@ -21882,7 +21882,7 @@ pub const VM = struct {
         const allocator = vm.allocator;
         var def = ClassDef{ .name = name, .is_enum = true, .no_dynamic_properties = true };
         // a case's name is its public readonly property, as for a user enum
-        try def.properties.append(allocator, .{ .name = "name", .default = .null, .is_readonly = true, .has_set_visibility = true, .type_str = "string" });
+        try def.properties.append(allocator, .{ .name = "name", .default = .null, .is_readonly = true, .has_set_visibility = true, .set_visibility = .protected, .type_str = "string" });
         for (cases) |case| {
             const case_obj = try allocator.create(PhpObject);
             case_obj.* = .{ .class_name = name, .enum_case = true };
@@ -21913,8 +21913,8 @@ pub const VM = struct {
         def.no_dynamic_properties = true;
         // php declares them without the protected(set) user readonly
         // properties imply
-        try def.properties.append(self.allocator, .{ .name = "name", .default = .null, .is_readonly = true, .has_set_visibility = true, .type_str = "string" });
-        if (def.backed_type != .none) try def.properties.append(self.allocator, .{ .name = "value", .default = .null, .is_readonly = true, .has_set_visibility = true, .type_str = if (def.backed_type == .int_type) "int" else "string" });
+        try def.properties.append(self.allocator, .{ .name = "name", .default = .null, .is_readonly = true, .has_set_visibility = true, .set_visibility = .protected, .type_str = "string" });
+        if (def.backed_type != .none) try def.properties.append(self.allocator, .{ .name = "value", .default = .null, .is_readonly = true, .has_set_visibility = true, .set_visibility = .protected, .type_str = if (def.backed_type == .int_type) "int" else "string" });
 
         const case_names = try self.allocator.alloc([]const u8, case_count);
         defer self.allocator.free(case_names);
