@@ -399,7 +399,9 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         if (have & HAVE_CONTENT_LENGTH == 0) try req.print(a, "Content-Length: {d}\r\n", .{content.?.len});
         if (have & HAVE_TYPE == 0) {
             try req.appendSlice(a, "Content-Type: application/x-www-form-urlencoded\r\n");
-            try fs.noticeDocref(ctx, "Content-type not specified assuming application/x-www-form-urlencoded", .{});
+            // php_stream_wrapper_notice: dropped unless the opener reports
+            // errors, which php_stream_open_wrapper_ex never lets it
+            if (options & user_streams.REPORT_ERRORS != 0) try fs.noticeDocref(ctx, "Content-type not specified assuming application/x-www-form-urlencoded", .{});
         }
         try req.appendSlice(a, "\r\n");
         try req.appendSlice(a, content.?);
