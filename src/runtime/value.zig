@@ -1932,6 +1932,11 @@ pub const Value = union(enum) {
     }
 
     // php compares a resource by its id
+    fn threeWay(a: f64, b: f64) i64 {
+        if (a == b) return 0;
+        return if (a < b) -1 else 1;
+    }
+
     inline fn resourceAsId(v: Value) Value {
         return if (v == .resource) .{ .int = v.resource.id } else v;
     }
@@ -2096,6 +2101,13 @@ pub const Value = union(enum) {
     }
 
     pub fn compare(a_in: Value, b_in: Value) i64 {
+        // zend_std_compare_objects: an object can't be cast to a resource,
+        // and is the greater side
+        if (a_in == .object and b_in == .resource) return 1;
+        if (a_in == .resource and b_in == .object) return -1;
+        // zend_compare converts a resource and a string both to numbers
+        if (a_in == .resource and b_in == .string) return threeWay(@floatFromInt(a_in.resource.id), toFloat(b_in));
+        if (a_in == .string and b_in == .resource) return threeWay(toFloat(a_in), @floatFromInt(b_in.resource.id));
         const a = resourceAsId(a_in);
         const b = resourceAsId(b_in);
         // zend_compare's numeric pairs: ints exactly, a float against
