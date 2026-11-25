@@ -760,19 +760,42 @@ const Endpoint = union(enum) {
 
 const SocketError = struct { code: i64, message: []const u8 };
 
-// errno values and strerror text for the failures sockets report
+// what php reports for a failed socket call: errno and strerror's text, or
+// on windows the winsock error and the system's message for it
+// (php_socket_errno, php_socket_strerror)
 fn socketError(err: anyerror) SocketError {
+    if (platform.is_windows) if (winsockCode(err)) |code| {
+        return .{ .code = code, .message = @import("filesystem_win.zig").systemMessage(&winsock_message, @intCast(code)) };
+    };
+    return posixSocketError(err);
+}
+
+threadlocal var winsock_message: [512]u8 = undefined;
+
+fn winsockCode(err: anyerror) ?i64 {
+    return switch (err) {
+        error.AccessDenied, error.PermissionDenied => 10013, // WSAEACCES
+        error.AddressInUse => 10048, // WSAEADDRINUSE
+        error.AddressNotAvailable => 10049, // WSAEADDRNOTAVAIL
+        error.NetworkUnreachable => 10051, // WSAENETUNREACH
+        error.ConnectionTimedOut, error.Timeout => 10060, // WSAETIMEDOUT
+        error.ConnectionRefused => 10061, // WSAECONNREFUSED
+        else => null,
+    };
+}
+
+fn posixSocketError(err: anyerror) SocketError {
     const E = std.posix.E;
     const mac = @import("builtin").os.tag.isDarwin();
     return switch (err) {
-        error.AddressInUse => .{ .code = @intFromEnum(E.ADDRINUSE), .message = "Address already in use" },
-        error.ConnectionRefused => .{ .code = @intFromEnum(E.CONNREFUSED), .message = "Connection refused" },
-        error.AccessDenied, error.PermissionDenied => .{ .code = @intFromEnum(E.ACCES), .message = "Permission denied" },
-        error.NetworkUnreachable => .{ .code = @intFromEnum(E.NETUNREACH), .message = "Network is unreachable" },
-        error.AddressNotAvailable => .{ .code = @intFromEnum(E.ADDRNOTAVAIL), .message = "Can't assign requested address" },
-        error.ConnectionTimedOut, error.Timeout => .{ .code = @intFromEnum(E.TIMEDOUT), .message = if (mac) "Operation timed out" else "Connection timed out" },
-        error.FileNotFound => .{ .code = @intFromEnum(E.NOENT), .message = "No such file or directory" },
-        error.OperationUnsupported, error.OperationNotSupported => .{ .code = @intFromEnum(E.OPNOTSUPP), .message = "Operation not supported" },
+        error.AddressInUse => .{ .code = @backingInt(E.ADDRINUSE), .message = "Address already in use" },
+        error.ConnectionRefused => .{ .code = @backingInt(E.CONNREFUSED), .message = "Connection refused" },
+        error.AccessDenied, error.PermissionDenied => .{ .code = @backingInt(E.ACCES), .message = "Permission denied" },
+        error.NetworkUnreachable => .{ .code = @backingInt(E.NETUNREACH), .message = "Network is unreachable" },
+        error.AddressNotAvailable => .{ .code = @backingInt(E.ADDRNOTAVAIL), .message = "Can't assign requested address" },
+        error.ConnectionTimedOut, error.Timeout => .{ .code = @backingInt(E.TIMEDOUT), .message = if (mac) "Operation timed out" else "Connection timed out" },
+        error.FileNotFound => .{ .code = @backingInt(E.NOENT), .message = "No such file or directory" },
+        error.OperationUnsupported, error.OperationNotSupported => .{ .code = @backingInt(E.OPNOTSUPP), .message = "Operation not supported" },
         error.UnknownHostName, error.HostNotFound => .{ .code = 0, .message = "php_network_getaddresses: getaddrinfo failed" },
         else => .{ .code = 0, .message = @errorName(err) },
     };

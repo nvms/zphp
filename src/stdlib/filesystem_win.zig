@@ -91,17 +91,39 @@ fn native_stream_set_blocking(ctx: *NativeContext, args: []const Value) RuntimeE
     return NativeResult.scalar(.{ .bool = path == .string and std.mem.startsWith(u8, path.string.bytes(), "php://") });
 }
 
-// php_win32_docref1_from_error's text: the system's message for the error
-// without its trailing line break and period, then two more characters cut
-// off (php trims twice), and the code
-pub fn docrefFromError(buf: []u8, code: u32) []const u8 {
+// php_win32_stream_wrapper_warn_error's text: the system's message for the
+// error without its trailing line break and period, then the code
+pub fn errorMessage(buf: []u8, code: u32) []const u8 {
+    var text_buf: [1024]u8 = undefined;
+    return std.fmt.bufPrint(buf, "{s} (code: {d})", .{ systemMessage(&text_buf, code), code }) catch "";
+}
+
+// php_win32_error_to_msg: FormatMessage's text without its trailing line
+// break and period
+pub fn systemMessage(buf: []u8, code: u32) []const u8 {
     const win32 = @import("../win32.zig");
     var wide: [512]u16 = undefined;
     const n = win32.FormatMessageW(win32.FORMAT_MESSAGE_FROM_SYSTEM | win32.FORMAT_MESSAGE_IGNORE_INSERTS, null, code, 0, &wide, wide.len, null);
     var text: []const u16 = wide[0..n];
     while (text.len > 0 and (text[text.len - 1] == '\r' or text[text.len - 1] == '\n' or text[text.len - 1] == '.')) text = text[0 .. text.len - 1];
-    if (text.len >= 2) text = text[0 .. text.len - 2];
-    var utf8: [1024]u8 = undefined;
-    const len = std.unicode.utf16LeToUtf8(&utf8, text) catch 0;
-    return std.fmt.bufPrint(buf, "{s} (code: {d})", .{ utf8[0..len], code }) catch "";
+    const len = std.unicode.utf16LeToUtf8(buf, text) catch 0;
+    return buf[0..len];
+}
+
+// the GetLastError code behind an error std reported for a file operation
+pub fn errorCode(err: anyerror) u32 {
+    return switch (err) {
+        error.FileNotFound => 2, // ERROR_FILE_NOT_FOUND
+        error.AccessDenied, error.PermissionDenied, error.IsDir => 5, // ERROR_ACCESS_DENIED
+        error.FileBusy, error.DeviceBusy => 32, // ERROR_SHARING_VIOLATION
+        error.NetworkNotFound => 53, // ERROR_BAD_NETPATH
+        error.NotSameFileSystem, error.CrossDevice => 17, // ERROR_NOT_SAME_DEVICE
+        error.BadPathName, error.InvalidArgument => 123, // ERROR_INVALID_NAME
+        error.PathAlreadyExists => 183, // ERROR_ALREADY_EXISTS
+        error.NameTooLong => 206, // ERROR_FILENAME_EXCED_RANGE
+        error.NotDir => 267, // ERROR_DIRECTORY
+        error.DirNotEmpty => 145, // ERROR_DIR_NOT_EMPTY
+        error.NoSpaceLeft => 112, // ERROR_DISK_FULL
+        else => 31, // ERROR_GEN_FAILURE
+    };
 }

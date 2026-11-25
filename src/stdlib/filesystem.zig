@@ -754,7 +754,8 @@ pub fn errorText(err: anyerror) []const u8 {
         error.PathAlreadyExists => "File exists",
         error.AccessDenied => "Permission denied",
         error.PermissionDenied => "Operation not permitted",
-        error.IsDir => "Is a directory",
+        // windows' c runtime refuses to open a directory with EACCES
+        error.IsDir => if (platform.is_windows) "Permission denied" else "Is a directory",
         error.NotDir => "Not a directory",
         error.DirNotEmpty => "Directory not empty",
         error.NameTooLong => "File name too long",
@@ -767,6 +768,8 @@ pub fn errorText(err: anyerror) []const u8 {
         error.LinkQuotaExceeded => "Too many links",
         error.NotLink, error.InvalidArgument, error.BadPathName => "Invalid argument",
         error.NoDevice => "No such device",
+        // an unreachable \\server\share, which windows' c runtime maps to ENOENT
+        error.NetworkNotFound => "No such file or directory",
         error.SystemResources => "Cannot allocate memory",
         error.ProcessFdQuotaExceeded => "Too many open files",
         error.FileTooBig => "File too large",
@@ -2002,7 +2005,17 @@ fn requirePath(ctx: *NativeContext, path: []const u8) RuntimeError!void {
 // a plain file opened for reading; an empty path names nothing
 fn openPlain(path: []const u8) !std.Io.File {
     if (path.len == 0) return error.FileNotFound;
-    return std.Io.Dir.cwd().openFile(platform.io, path, .{});
+    const file = try std.Io.Dir.cwd().openFile(platform.io, path, .{});
+    // windows' c runtime refuses to open a directory, which posix opens
+    // for reading
+    if (platform.is_windows) {
+        const st = file.stat(platform.io) catch return file;
+        if (st.kind == .directory) {
+            file.close(platform.io);
+            return error.IsDir;
+        }
+    }
+    return file;
 }
 
 // a plain file created or truncated for writing, mode "wb"
@@ -2035,7 +2048,10 @@ fn native_rename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     bundle.prepareWrite(to, .create);
     bundle.prepareWrite(from, .edit);
     renamePath(from, to) catch |err| {
-        try se.raise(ctx, .{ .code = .RenameFailed, .wrapper = se.plainfile, .func = "rename" }, "{s}", .{errorText(err)});
+        // php's windows build words a failed rename with the system's message
+        var win_buf: [1100]u8 = undefined;
+        const text = if (platform.is_windows) @import("filesystem_win.zig").errorMessage(&win_buf, @import("filesystem_win.zig").errorCode(err)) else errorText(err);
+        try se.raise(ctx, .{ .code = .RenameFailed, .wrapper = se.plainfile, .func = "rename" }, "{s}", .{text});
         return NativeResult.scalar(.{ .bool = false });
     };
     _ = bundle.remove(from);
@@ -2071,7 +2087,6 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
         const err = dirOpenError(args[0].string.bytes());
         if (userWrapperFor(ctx.vm, args[0].string.bytes()) == null) {
-            try warnWindowsDirFailure(ctx, "scandir", err);
             try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.plainfile, .func = "scandir" }, "Failed to open directory: {s}", .{err.text});
         }
         try warn(ctx, "scandir(): (errno {d}): {s}", .{ err.errno, err.text });
@@ -2101,8 +2116,8 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 // the names in a directory, `.` and `..` first: the disk and the executable's
 // packed application both contribute, a name once; false when neither has the
 // directory
-// errno and its text, and the windows error the same failure gives there
-const DirOpenError = struct { errno: i64, text: []const u8, win32: u32 = 2 };
+// errno and its text
+const DirOpenError = struct { errno: i64, text: []const u8 };
 
 // why the plain wrapper's opendir failed, as strerror(errno) words it
 fn dirOpenError(path: []const u8) DirOpenError {
@@ -2110,22 +2125,14 @@ fn dirOpenError(path: []const u8) DirOpenError {
     const dir_path = bundle.osPath(&os_buf, path);
     var dir = std.Io.Dir.cwd().openDir(platform.io, dir_path, .{ .iterate = true }) catch |err| return switch (err) {
         error.FileNotFound, error.BadPathName => .{ .errno = 2, .text = "No such file or directory" },
-        error.NotDir => .{ .errno = 20, .text = "Not a directory", .win32 = 267 },
-        error.AccessDenied, error.PermissionDenied => .{ .errno = 13, .text = "Permission denied", .win32 = 5 },
-        error.NameTooLong => .{ .errno = 36, .text = "File name too long", .win32 = 206 },
-        error.SymLinkLoop => .{ .errno = 40, .text = "Too many levels of symbolic links", .win32 = 1921 },
+        error.NotDir => .{ .errno = 20, .text = "Not a directory" },
+        error.AccessDenied, error.PermissionDenied => .{ .errno = 13, .text = "Permission denied" },
+        error.NameTooLong => .{ .errno = 36, .text = "File name too long" },
+        error.SymLinkLoop => .{ .errno = 40, .text = "Too many levels of symbolic links" },
         else => .{ .errno = 2, .text = "No such file or directory" },
     };
     dir.close(platform.io);
     return .{ .errno = 2, .text = "No such file or directory" };
-}
-
-// php's windows plain wrapper reports the system's own error before the
-// generic failure
-fn warnWindowsDirFailure(ctx: *NativeContext, comptime func: []const u8, err: DirOpenError) RuntimeError!void {
-    if (!platform.is_windows) return;
-    var buf: [1100]u8 = undefined;
-    try warn(ctx, func ++ "(): {s}", .{@import("filesystem_win.zig").docrefFromError(&buf, err.win32)});
 }
 
 fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUnmanaged(Value.String)) RuntimeError!bool {
@@ -2248,7 +2255,6 @@ fn openDirectory(ctx: *NativeContext, args: []const Value, comptime func: []cons
     defer for (names.items) |name| name.release();
     if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
         const err = dirOpenError(args[0].string.bytes());
-        try warnWindowsDirFailure(ctx, func, err);
         try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.plainfile, .func = func }, "Failed to open directory: {s}", .{err.text});
         return NativeResult.scalar(.{ .bool = false });
     }
