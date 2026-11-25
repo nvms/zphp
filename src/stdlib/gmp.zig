@@ -75,28 +75,67 @@ const ulong_max: u64 = std.math.maxInt(c_ulong);
 
 // GMP_Z_PARAM_INTO_MPZ_PTR: a GMP, an int, or an integer string (no NUL in
 // it since php 8.6), else php's TypeError or ValueError for the argument
-fn mpzArg(ctx: *NativeContext, comptime func: []const u8, args: []const Value, i: usize, comptime pname: []const u8) RuntimeError!*ZphpMpz {
+fn mpzArg(ctx: *NativeContext, func: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError!*ZphpMpz {
     const v: Value = if (i < args.len) args[i] else .null;
     const p = zphp_mpz_create() orelse return error.OutOfMemory;
     errdefer zphp_mpz_destroy(p);
     switch (v) {
         .int => |n| _ = zphp_mpz_set_si(p, n),
-        .float => |f| _ = zphp_mpz_set_si(p, Value.toInt(.{ .float = f })),
+        .float => |f| _ = zphp_mpz_set_si(p, try weakFloat(ctx, f)),
         .bool => |b| _ = zphp_mpz_set_si(p, @intFromBool(b)),
-        .string => |s| {
-            const bytes = s.bytes();
-            if (std.mem.indexOfScalar(u8, bytes, 0) != null) return throwOperand(ctx, "ValueError", func ++ "(): Argument #{d} ($" ++ pname ++ ") is not an integer string", .{i + 1});
-            const z = try dupZ(ctx, bytes);
-            defer ctx.allocator.free(z);
-            if (zphp_mpz_set_str(p, z.ptr, 0) != 0) return throwOperand(ctx, "ValueError", func ++ "(): Argument #{d} ($" ++ pname ++ ") is not an integer string", .{i + 1});
-        },
+        .string => |s| try convertString(ctx, p, s.bytes(), 0, func, i + 1, pname),
         .object => |o| {
             const src = if (std.mem.eql(u8, o.class_name, "GMP")) getMpz(o) else null;
-            zphp_mpz_set(p, src orelse return throwOperand(ctx, "TypeError", func ++ "(): Argument #{d} ($" ++ pname ++ ") must be of type GMP|string|int, {s} given", .{ i + 1, o.class_name }));
+            zphp_mpz_set(p, src orelse return throwOperand(ctx, "TypeError", "{s}(): Argument #{d} (${s}) must be of type GMP|string|int, {s} given", .{ func, i + 1, pname, o.class_name }));
         },
-        else => return throwOperand(ctx, "TypeError", func ++ "(): Argument #{d} ($" ++ pname ++ ") must be of type GMP|string|int, {s} given", .{ i + 1, v.typeName() }),
+        else => return throwOperand(ctx, "TypeError", "{s}(): Argument #{d} (${s}) must be of type GMP|string|int, {s} given", .{ func, i + 1, pname, v.typeName() }),
     }
     return p;
+}
+
+// convert_zstr_to_gmp: leading whitespace is skipped, base 0 detects the
+// 0x, 0o, 0b and 0 prefixes, and a NUL byte or anything gmp can't read is a
+// ValueError (worded for the argument, or for an operator's operand when
+// func is empty)
+fn convertString(ctx: *NativeContext, p: *ZphpMpz, bytes: []const u8, base_in: i64, func: []const u8, arg: usize, pname: []const u8) RuntimeError!void {
+    var ok = std.mem.indexOfScalar(u8, bytes, 0) == null;
+    if (ok) {
+        var str = bytes;
+        while (str.len > 0 and std.ascii.isWhitespace(str[0])) str = str[1..];
+        var base = base_in;
+        if (str.len >= 2 and str[0] == '0') {
+            const c = str[1];
+            if ((base == 0 or base == 16) and (c == 'x' or c == 'X')) {
+                base = 16;
+                str = str[2..];
+            } else if ((base == 0 or base == 8) and (c == 'o' or c == 'O')) {
+                base = 8;
+                str = str[2..];
+            } else if ((base == 0 or base == 2) and (c == 'b' or c == 'B')) {
+                base = 2;
+                str = str[2..];
+            }
+        }
+        const z = try dupZ(ctx, str);
+        defer ctx.allocator.free(z);
+        ok = zphp_mpz_set_str(p, z.ptr, @intCast(base)) == 0;
+    }
+    if (ok) return;
+    if (func.len == 0) return throwOperand(ctx, "ValueError", "Number is not an integer string", .{});
+    return throwOperand(ctx, "ValueError", "{s}(): Argument #{d} (${s}) is not an integer string", .{ func, arg, pname });
+}
+
+// gmp_verify_base
+fn verifyBase(ctx: *NativeContext, func: []const u8, base: i64) RuntimeError!void {
+    if (base != 0 and (base < 2 or base > 62)) return throwOperand(ctx, "ValueError", "{s}(): Argument #2 ($base) must be 0 or between 2 and 62", .{func});
+}
+
+// gmp_initialize_number: an int, or a string in the given base
+fn initializeNumber(ctx: *NativeContext, p: *ZphpMpz, v: Value, base: i64, func: []const u8) RuntimeError!void {
+    switch (v) {
+        .string => |str| try convertString(ctx, p, str.bytes(), base, func, 1, "num"),
+        else => _ = zphp_mpz_set_si(p, Value.toInt(v)),
+    }
 }
 
 fn longArg(args: []const Value, i: usize) i64 {
@@ -129,71 +168,15 @@ fn createGmpObj(ctx: *NativeContext) !*PhpObject {
     return obj;
 }
 
-// coerce a php value into a freshly-created mpz. caller frees with zphp_mpz_destroy
-fn coerceArgToMpz(ctx: *NativeContext, v: Value) !?*ZphpMpz {
-    const p = zphp_mpz_create() orelse return error.OutOfMemory;
-    switch (v) {
-        .int => |i| {
-            _ = zphp_mpz_set_si(p, i);
-            return p;
-        },
-        .string => |s| {
-            const z = try dupZ(ctx, s.bytes());
-            defer ctx.allocator.free(z);
-            const rc = zphp_mpz_set_str(p, z.ptr, 0);
-            if (rc != 0) {
-                zphp_mpz_destroy(p);
-                return null;
-            }
-            return p;
-        },
-        .object => |o| {
-            if (std.mem.eql(u8, o.class_name, "GMP")) {
-                if (getMpz(o)) |src| {
-                    // copy via string round-trip is expensive but correct; alternatively
-                    // expose a mpz_set wrapper. for now use the source pointer directly
-                    // by adding/subtracting 0 from it through a new value
-                    const zero = zphp_mpz_create() orelse {
-                        zphp_mpz_destroy(p);
-                        return error.OutOfMemory;
-                    };
-                    defer zphp_mpz_destroy(zero);
-                    zphp_mpz_add(p, src, zero);
-                    return p;
-                }
-            }
-            zphp_mpz_destroy(p);
-            return null;
-        },
-        else => {
-            zphp_mpz_destroy(p);
-            return null;
-        },
-    }
-}
-
 // ---------------- top-level functions ----------------
 
 fn gmpInit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    const base: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+    try verifyBase(ctx, "gmp_init", base);
+    // the object exists before the number converts (INIT_GMP_RETVAL), so a
+    // failed conversion frees its handle as php's does
     const obj = try createGmpObj(ctx);
-    const dst = getMpz(obj).?;
-
-    // explicit base via second arg (PHP signature: gmp_init($num, $base = 0))
-    // 0 = autodetect from prefix, 2..62 = explicit base
-    if (args[0] == .string and args.len >= 2 and args[1] == .int) {
-        const base: c_int = @intCast(args[1].int);
-        const z = try dupZ(ctx, args[0].string.bytes());
-        defer ctx.allocator.free(z);
-        if (zphp_mpz_set_str(dst, z.ptr, base) != 0) return NativeResult.scalar(.{ .bool = false });
-        return NativeResult.borrowed(.{ .object = obj });
-    }
-
-    const src = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .bool = false });
-    defer zphp_mpz_destroy(src);
-    const zero = zphp_mpz_create() orelse return error.OutOfMemory;
-    defer zphp_mpz_destroy(zero);
-    zphp_mpz_add(dst, src, zero);
+    try initializeNumber(ctx, getMpz(obj).?, if (args.len > 0) args[0] else Value{ .int = 0 }, base, "gmp_init");
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -201,7 +184,7 @@ fn gmpStrval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     if (args.len < 1) return NativeResult.scalar(.null);
     var base: c_int = 10;
     if (args.len > 1 and args[1] == .int) base = @intCast(args[1].int);
-    const src = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.null);
+    const src = try mpzArg(ctx, "gmp_strval", args, 0, "num");
     defer zphp_mpz_destroy(src);
     const cstr = zphp_mpz_get_str(base, src);
     if (cstr == null) return try NativeResult.copyString(ctx.allocator, "");
@@ -213,7 +196,7 @@ fn gmpStrval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 
 fn gmpIntval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1) return NativeResult.scalar(.{ .int = 0 });
-    const src = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const src = try mpzArg(ctx, "gmp_intval", args, 0, "num");
     defer zphp_mpz_destroy(src);
     return NativeResult.scalar(.{ .int = zphp_mpz_get_si(src) });
 }
@@ -221,20 +204,18 @@ fn gmpIntval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 const Binop = *const fn (r: *ZphpMpz, a: *const ZphpMpz, b: *const ZphpMpz) callconv(.c) void;
 const Unop = *const fn (r: *ZphpMpz, a: *const ZphpMpz) callconv(.c) void;
 
-fn binOpCall(ctx: *NativeContext, args: []const Value, op: Binop) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.null);
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.null);
+fn binOpCall(ctx: *NativeContext, args: []const Value, op: Binop, func: []const u8) RuntimeError!NativeResult {
+    const a = try mpzArg(ctx, func, args, 0, "num1");
     defer zphp_mpz_destroy(a);
-    const b = (try coerceArgToMpz(ctx, args[1])) orelse return NativeResult.scalar(.null);
+    const b = try mpzArg(ctx, func, args, 1, "num2");
     defer zphp_mpz_destroy(b);
     const obj = try createGmpObj(ctx);
     op(getMpz(obj).?, a, b);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn unOpCall(ctx: *NativeContext, args: []const Value, op: Unop) RuntimeError!NativeResult {
-    if (args.len < 1) return NativeResult.scalar(.null);
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.null);
+fn unOpCall(ctx: *NativeContext, args: []const Value, op: Unop, func: []const u8) RuntimeError!NativeResult {
+    const a = try mpzArg(ctx, func, args, 0, "num");
     defer zphp_mpz_destroy(a);
     const obj = try createGmpObj(ctx);
     op(getMpz(obj).?, a);
@@ -299,60 +280,63 @@ fn gmpPowmSec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
 }
 
 fn gmpAdd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_add);
+    return binOpCall(ctx, args, zphp_mpz_add, "gmp_add");
 }
 fn gmpSub(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_sub);
+    return binOpCall(ctx, args, zphp_mpz_sub, "gmp_sub");
 }
 fn gmpMul(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_mul);
+    return binOpCall(ctx, args, zphp_mpz_mul, "gmp_mul");
 }
 fn gmpAnd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_and);
+    return binOpCall(ctx, args, zphp_mpz_and, "gmp_and");
 }
 fn gmpOr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_ior);
+    return binOpCall(ctx, args, zphp_mpz_ior, "gmp_or");
 }
 fn gmpXor(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_xor);
+    return binOpCall(ctx, args, zphp_mpz_xor, "gmp_xor");
 }
 fn gmpGcd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_gcd);
+    return binOpCall(ctx, args, zphp_mpz_gcd, "gmp_gcd");
 }
 fn gmpLcm(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_lcm);
+    return binOpCall(ctx, args, zphp_mpz_lcm, "gmp_lcm");
 }
 fn gmpDivQ(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_tdiv_q);
+    return binOpCall(ctx, args, zphp_mpz_tdiv_q, "gmp_div_q");
 }
 fn gmpDivR(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_tdiv_r);
+    return binOpCall(ctx, args, zphp_mpz_tdiv_r, "gmp_div_r");
+}
+fn gmpDiv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return binOpCall(ctx, args, zphp_mpz_tdiv_q, "gmp_div");
 }
 fn gmpMod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return binOpCall(ctx, args, zphp_mpz_mod);
+    return binOpCall(ctx, args, zphp_mpz_mod, "gmp_mod");
 }
 
 fn gmpNeg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return unOpCall(ctx, args, zphp_mpz_neg);
+    return unOpCall(ctx, args, zphp_mpz_neg, "gmp_neg");
 }
 fn gmpAbs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return unOpCall(ctx, args, zphp_mpz_abs);
+    return unOpCall(ctx, args, zphp_mpz_abs, "gmp_abs");
 }
 fn gmpCom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return unOpCall(ctx, args, zphp_mpz_com);
+    return unOpCall(ctx, args, zphp_mpz_com, "gmp_com");
 }
 fn gmpSqrt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return unOpCall(ctx, args, zphp_mpz_sqrt);
+    return unOpCall(ctx, args, zphp_mpz_sqrt, "gmp_sqrt");
 }
 fn gmpNextprime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return unOpCall(ctx, args, zphp_mpz_nextprime);
+    return unOpCall(ctx, args, zphp_mpz_nextprime, "gmp_nextprime");
 }
 
 fn gmpCmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.null);
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.null);
+    const a = try mpzArg(ctx, "gmp_cmp", args, 0, "num1");
     defer zphp_mpz_destroy(a);
-    const b = (try coerceArgToMpz(ctx, args[1])) orelse return NativeResult.scalar(.null);
+    const b = try mpzArg(ctx, "gmp_cmp", args, 1, "num2");
     defer zphp_mpz_destroy(b);
     const r = zphp_mpz_cmp(a, b);
     return NativeResult.scalar(.{ .int = if (r > 0) 1 else if (r < 0) -1 else 0 });
@@ -360,7 +344,7 @@ fn gmpCmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 
 fn gmpSign(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1) return NativeResult.scalar(.{ .int = 0 });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const a = try mpzArg(ctx, "gmp_sign", args, 0, "num");
     defer zphp_mpz_destroy(a);
     const r = zphp_mpz_sgn(a);
     return NativeResult.scalar(.{ .int = if (r > 0) 1 else if (r < 0) -1 else 0 });
@@ -392,9 +376,9 @@ fn gmpPowm(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 
 fn gmpInvert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .bool = false });
+    const a = try mpzArg(ctx, "gmp_invert", args, 0, "num1");
     defer zphp_mpz_destroy(a);
-    const m = (try coerceArgToMpz(ctx, args[1])) orelse return NativeResult.scalar(.{ .bool = false });
+    const m = try mpzArg(ctx, "gmp_invert", args, 1, "num2");
     defer zphp_mpz_destroy(m);
     const obj = try createGmpObj(ctx);
     if (zphp_mpz_invert(getMpz(obj).?, a, m) == 0) return NativeResult.scalar(.{ .bool = false });
@@ -404,7 +388,7 @@ fn gmpInvert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 fn gmpProbPrime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1) return NativeResult.scalar(.{ .int = 0 });
     const reps: c_int = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 10;
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const a = try mpzArg(ctx, "gmp_prob_prime", args, 0, "num");
     defer zphp_mpz_destroy(a);
     return NativeResult.scalar(.{ .int = @intCast(zphp_mpz_probab_prime_p(a, reps)) });
 }
@@ -431,21 +415,21 @@ fn gmpClrbit(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 
 fn gmpTestbit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .bool = false });
+    const a = try mpzArg(ctx, "gmp_testbit", args, 0, "num");
     defer zphp_mpz_destroy(a);
     return NativeResult.scalar(.{ .bool = zphp_mpz_testbit(a, @intCast(args[1].int)) != 0 });
 }
 
 fn gmpPopcount(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1) return NativeResult.scalar(.{ .int = 0 });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const a = try mpzArg(ctx, "gmp_popcount", args, 0, "num");
     defer zphp_mpz_destroy(a);
     return NativeResult.scalar(.{ .int = @intCast(zphp_mpz_popcount(a)) });
 }
 
 fn gmpScan0(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[1] != .int) return NativeResult.scalar(.{ .int = -1 });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = -1 });
+    const a = try mpzArg(ctx, "gmp_scan0", args, 0, "num1");
     defer zphp_mpz_destroy(a);
     const r = zphp_mpz_scan0(a, @intCast(@max(args[1].int, 0)));
     // GMP returns ULONG_MAX when no zero bit is found; map to -1 like PHP
@@ -455,7 +439,7 @@ fn gmpScan0(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 
 fn gmpScan1(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[1] != .int) return NativeResult.scalar(.{ .int = -1 });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = -1 });
+    const a = try mpzArg(ctx, "gmp_scan1", args, 0, "num1");
     defer zphp_mpz_destroy(a);
     const r = zphp_mpz_scan1(a, @intCast(@max(args[1].int, 0)));
     if (r == std.math.maxInt(c_ulong)) return NativeResult.scalar(.{ .int = -1 });
@@ -464,9 +448,9 @@ fn gmpScan1(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 
 fn gmpHamdist(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const a = try mpzArg(ctx, "gmp_hamdist", args, 0, "num1");
     defer zphp_mpz_destroy(a);
-    const b = (try coerceArgToMpz(ctx, args[1])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const b = try mpzArg(ctx, "gmp_hamdist", args, 1, "num2");
     defer zphp_mpz_destroy(b);
     const xored = zphp_mpz_create() orelse return error.OutOfMemory;
     defer zphp_mpz_destroy(xored);
@@ -476,25 +460,25 @@ fn gmpHamdist(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
 
 fn gmpLegendre(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const a = try mpzArg(ctx, "gmp_legendre", args, 0, "num1");
     defer zphp_mpz_destroy(a);
-    const p = (try coerceArgToMpz(ctx, args[1])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const p = try mpzArg(ctx, "gmp_legendre", args, 1, "num2");
     defer zphp_mpz_destroy(p);
     return NativeResult.scalar(.{ .int = @intCast(zphp_mpz_legendre(a, p)) });
 }
 
 fn gmpJacobi(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const a = try mpzArg(ctx, "gmp_jacobi", args, 0, "num1");
     defer zphp_mpz_destroy(a);
-    const b = (try coerceArgToMpz(ctx, args[1])) orelse return NativeResult.scalar(.{ .int = 0 });
+    const b = try mpzArg(ctx, "gmp_jacobi", args, 1, "num2");
     defer zphp_mpz_destroy(b);
     return NativeResult.scalar(.{ .int = @intCast(zphp_mpz_jacobi(a, b)) });
 }
 
 fn gmpPerfectSquare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
-    const a = (try coerceArgToMpz(ctx, args[0])) orelse return NativeResult.scalar(.{ .bool = false });
+    const a = try mpzArg(ctx, "gmp_perfect_square", args, 0, "num");
     defer zphp_mpz_destroy(a);
     return NativeResult.scalar(.{ .bool = zphp_mpz_perfect_square_p(a) != 0 });
 }
@@ -521,7 +505,7 @@ pub const entries = .{
     .{ "gmp_mul", gmpMul },
     .{ "gmp_div_q", gmpDivQ },
     .{ "gmp_div_r", gmpDivR },
-    .{ "gmp_div", gmpDivQ },
+    .{ "gmp_div", gmpDiv },
     .{ "gmp_mod", gmpMod },
     .{ "gmp_pow", gmpPow },
     .{ "gmp_powm", gmpPowm },
@@ -608,23 +592,12 @@ fn gmpToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 // new GMP(int|string $num = 0, int $base = 0), the object gmp_init returns
 fn gmpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = thisObject(ctx) orelse return NativeResult.scalar(.null);
+    const base: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+    try verifyBase(ctx, "GMP::__construct", base);
     const p = zphp_mpz_create() orelse return error.OutOfMemory;
-    var ok = true;
-    if (args.len > 0) switch (args[0]) {
-        .int => |i| _ = zphp_mpz_set_si(p, i),
-        .string => |str| {
-            const base: c_int = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 0;
-            const z = try dupZ(ctx, str.bytes());
-            defer ctx.allocator.free(z);
-            ok = zphp_mpz_set_str(p, z.ptr, base) == 0;
-        },
-        else => ok = false,
-    };
-    if (!ok) {
-        zphp_mpz_destroy(p);
-        return throwOperand(ctx, "ValueError", "GMP::__construct(): Argument #1 ($num) is not an integer string", .{});
-    }
-    if (getMpz(obj)) |old| zphp_mpz_destroy(old);
+    errdefer zphp_mpz_destroy(p);
+    try initializeNumber(ctx, p, if (args.len > 0) args[0] else Value{ .int = 0 }, base, "GMP::__construct");
+    if (getMpz(obj)) |old_p| zphp_mpz_destroy(old_p);
     setMpz(obj, p);
     return NativeResult.scalar(.null);
 }
@@ -701,6 +674,17 @@ fn gmpCast(obj: *PhpObject, target: @import("../runtime/value.zig").NumericCast)
     };
 }
 
+// zend_parse_arg_long_weak for a float: a fractional one is deprecated
+fn weakFloat(ctx: *NativeContext, f: f64) RuntimeError!i64 {
+    if (std.math.isFinite(f) and @floor(f) != f) {
+        var buf: [64]u8 = undefined;
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{@import("formatted_print.zig").gcvt(f, -1, '.', 'E', &buf)});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.raiseError(8192, msg);
+    }
+    return Value.toInt(.{ .float = f });
+}
+
 // a fresh mpz holding the operand; the caller destroys it
 fn operandMpz(ctx: *NativeContext, v: Value) RuntimeError!*ZphpMpz {
     const p = zphp_mpz_create() orelse return error.OutOfMemory;
@@ -708,13 +692,8 @@ fn operandMpz(ctx: *NativeContext, v: Value) RuntimeError!*ZphpMpz {
     switch (v) {
         .int => |i| _ = zphp_mpz_set_si(p, i),
         .bool => |b| _ = zphp_mpz_set_si(p, @intFromBool(b)),
-        .float => |f| _ = zphp_mpz_set_si(p, Value.toInt(.{ .float = f })),
-        .string => |str| {
-            if (std.mem.indexOfScalar(u8, str.bytes(), 0) != null) return throwOperand(ctx, "ValueError", "Number is not an integer string", .{});
-            const z = try dupZ(ctx, str.bytes());
-            defer ctx.allocator.free(z);
-            if (zphp_mpz_set_str(p, z.ptr, 0) != 0) return throwOperand(ctx, "ValueError", "Number is not an integer string", .{});
-        },
+        .float => |f| _ = zphp_mpz_set_si(p, try weakFloat(ctx, f)),
+        .string => |str| try convertString(ctx, p, str.bytes(), 0, "", 0, ""),
         .object => |o| {
             const src = if (std.mem.eql(u8, o.class_name, "GMP")) getMpz(o) else null;
             zphp_mpz_set(p, src orelse return throwOperand(ctx, "TypeError", "Number must be of type GMP|string|int, {s} given", .{o.class_name}));
@@ -727,12 +706,6 @@ fn operandMpz(ctx: *NativeContext, v: Value) RuntimeError!*ZphpMpz {
 // a shift count or exponent: an unsigned long. a GMP must fit one (php 8.6
 // no longer truncates it); a float that isn't integral is deprecated
 fn operandCount(ctx: *NativeContext, v: Value, comptime what: []const u8) RuntimeError!c_ulong {
-    if (v == .float and std.math.isFinite(v.float) and @floor(v.float) != v.float) {
-        var buf: [64]u8 = undefined;
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{@import("formatted_print.zig").gcvt(v.float, -1, '.', 'E', &buf)});
-        defer ctx.allocator.free(msg);
-        try ctx.vm.raiseError(8192, msg);
-    }
     const p = try operandMpz(ctx, v);
     defer zphp_mpz_destroy(p);
     if (zphp_mpz_fits_ulong_p(p) == 0) return throwOperand(ctx, "ValueError", what ++ " must be between 0 and {d}", .{ulong_max});
