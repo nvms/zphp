@@ -43,7 +43,7 @@ errors=""
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
     php_out="$(bounded "$PHP" -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" && php_exit=0 || php_exit=$?
-    zphp_out="$(bounded "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
+    zphp_out="$(bounded "$ZPHP" -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
 
     if [ "$php_exit" -eq 0 ] && [ "$zphp_exit" -eq 0 ] && [ "$php_out" = "$zphp_out" ]; then
         passed=$((passed + 1))

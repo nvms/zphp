@@ -45,7 +45,7 @@ for f in "$SCRIPT_DIR"/harness/test-*.php; do
         TIMEOUT_CMD="gtimeout 300"
     fi
     zphp_start=$SECONDS
-    zphp_out="$($TIMEOUT_CMD "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
+    zphp_out="$($TIMEOUT_CMD "$ZPHP" -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
     zphp_secs=$((SECONDS - zphp_start))
 
     if [ "$php_exit" -eq 0 ] && [ "$zphp_exit" -eq 0 ] && [ "$php_out" = "$zphp_out" ]; then
