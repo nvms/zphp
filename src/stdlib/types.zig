@@ -186,6 +186,10 @@ fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         try ctx.vm.setPendingException("ValueError", "define(): Argument #1 ($constant_name) cannot be a class constant");
         return error.RuntimeError;
     }
+    if (args.len == 3 and args[2].isTruthy()) {
+        try ctx.vm.raiseError(VM.E_WARNING, "define(): Argument #3 ($case_insensitive) is ignored since declaration of case-insensitive constants is no longer supported, this will be an error in PHP 9.0");
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
     if (ctx.vm.php_constants.contains(args[0].string.bytes())) {
         _ = try ctx.vm.defineConstant(args[0].string.bytes(), args[1]);
         return NativeResult.scalar(.{ .bool = false });
