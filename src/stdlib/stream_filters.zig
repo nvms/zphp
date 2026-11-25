@@ -116,10 +116,16 @@ pub const Chain = struct {
     owner: ?*PhpObject = null,
 };
 
+// php_stream_filter_seekable_t: whether a stream with the filter may seek
+// (always; only to its start; never; or when the filter's seek allows it)
+pub const Seekable = enum { always, start, never, check };
+
 pub const Filter = struct {
     allocator: Allocator,
     name: []u8,
     impl: Impl,
+    read_seekable: Seekable = .always,
+    write_seekable: Seekable = .always,
     chain: ?*Chain = null,
     prev: ?*Filter = null,
     next: ?*Filter = null,
@@ -315,17 +321,178 @@ fn createWith(ctx: *NativeContext, factory: Factory, name: []const u8, params: ?
             if (std.mem.eql(u8, b, "string.tolower")) return try newFilter(ctx, name, .tolower);
             if (std.mem.eql(u8, b, "consumed")) {
                 if (!std.ascii.eqlIgnoreCase(name, "consumed")) return null;
-                return try newFilter(ctx, name, .{ .consumed = .{} });
+                const f = try newFilter(ctx, name, .{ .consumed = .{} });
+                f.read_seekable = .start;
+                return f;
             }
             if (std.mem.eql(u8, b, "dechunk")) {
                 if (!std.ascii.eqlIgnoreCase(name, "dechunk")) return null;
-                return try newFilter(ctx, name, .{ .dechunk = .{} });
+                const f = try newFilter(ctx, name, .{ .dechunk = .{} });
+                f.read_seekable = .start;
+                return f;
             }
             if (std.mem.eql(u8, b, "convert.*")) return createConvert(ctx, name, params);
             if (std.mem.eql(u8, b, "zlib.*")) return createZlib(ctx, name, params);
             return null;
         },
     }
+}
+
+// --- seeking -----------------------------------------------------------------
+
+// php_stream_filter_parse_write_seek_mode: the "write_seek_mode" parameter
+// (preserve, reset or strict); null after the warning for anything else
+fn parseWriteSeekMode(ctx: *NativeContext, params: ?Value) RuntimeError!?Seekable {
+    const p = params orelse return .always;
+    if (p != .array) return .always;
+    const k: PhpArray.Key = .{ .string = Value.String.borrowed("write_seek_mode") };
+    if (!p.array.contains(k)) return .always;
+    const v = p.array.get(k);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    try v.format(&buf, ctx.allocator);
+    if (std.mem.eql(u8, buf.items, "preserve")) return .always;
+    if (std.mem.eql(u8, buf.items, "reset")) return .start;
+    if (std.mem.eql(u8, buf.items, "strict")) return .never;
+    try fs.warnDocref(ctx, "\"write_seek_mode\" filter parameter must be one of \"preserve\", \"reset\", or \"strict\"", .{});
+    return null;
+}
+
+// the filter's fops->label, which php's seek warnings name
+fn label(f: *const Filter) []const u8 {
+    return switch (f.impl) {
+        .rot13 => "string.rot13",
+        .toupper => "string.toupper",
+        .tolower => "string.tolower",
+        .convert => "convert.*",
+        .consumed => "consumed",
+        .dechunk => "dechunk",
+        .zlib_inflate => "zlib.inflate",
+        .zlib_deflate => "zlib.deflate",
+        .user => "user-filter",
+    };
+}
+
+fn seekableIn(f: *const Filter, chain: *const Chain) Seekable {
+    return if (chain.read) f.read_seekable else f.write_seekable;
+}
+
+// php_stream_are_filters_seekable: false after the warning for a filter
+// that refuses this seek
+pub fn chainSeekable(ctx: *NativeContext, chain: *const Chain, is_start: bool) RuntimeError!bool {
+    var it = chain.head;
+    while (it) |f| : (it = f.next) {
+        const seekable = seekableIn(f, chain);
+        if (seekable == .never) {
+            try fs.warnDocref(ctx, "Stream filter {s} is never seekable", .{label(f)});
+            return false;
+        }
+        if (!is_start and seekable == .start) {
+            try fs.warnDocref(ctx, "Stream filter {s} is seekable only to start position", .{label(f)});
+            return false;
+        }
+    }
+    return true;
+}
+
+// php_stream_filters_seek_all: after the stream moved, each filter that
+// resets on a seek (to the start, or when it checks) is told, write chain
+// first; false after the warning for one that failed
+pub fn seekChains(ctx: *NativeContext, stream_obj: *PhpObject, write: *const Chain, read: *const Chain, is_start: bool, offset: i64, whence: u2) RuntimeError!bool {
+    for ([_]*const Chain{ write, read }) |chain| {
+        var it = chain.head;
+        while (it) |f| : (it = f.next) {
+            const seekable = seekableIn(f, chain);
+            if (!((seekable == .start and is_start) or seekable == .check)) continue;
+            if (!try seekFilter(ctx, stream_obj, f, chain, offset, whence)) {
+                try fs.warnDocref(ctx, "Stream filter seeking for {s} failed", .{label(f)});
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// a filter's fops->seek: the stateful filters start over
+fn seekFilter(ctx: *NativeContext, stream_obj: *PhpObject, f: *Filter, chain: *const Chain, offset: i64, whence: u2) RuntimeError!bool {
+    switch (f.impl) {
+        .convert => |c| {
+            c.stub_len = 0;
+            switch (c.mode) {
+                .b64_encode => {
+                    c.erem_len = 0;
+                    c.line_ccnt = c.line_len;
+                },
+                .b64_decode => {
+                    c.urem = 0;
+                    c.urem_nbits = 0;
+                    c.ustat = 0;
+                    c.eos = false;
+                },
+                .qp_encode => {
+                    c.line_ccnt = c.line_len;
+                    c.lb_ptr = 0;
+                    c.lb_cnt = 0;
+                },
+                .qp_decode => {
+                    c.scan_stat = 0;
+                    c.next_char = 0;
+                    c.lb_ptr = 0;
+                    c.lb_cnt = 0;
+                },
+            }
+        },
+        .consumed => |*c| c.* = .{},
+        .dechunk => |*d| {
+            d.state = .size_start;
+            d.chunk_size = 0;
+        },
+        .zlib_inflate => |z| {
+            const status = if (z.finished)
+                zlib.inflateInit2_(&z.strm, z.window, zlib.zlibVersion(), @sizeOf(zlib.z_stream))
+            else
+                zlib.inflateReset(&z.strm);
+            if (status != zlib.Z_OK) {
+                try fs.warnDocref(ctx, "zlib.inflate: failed to {s} inflation state", .{if (z.finished) "reinitialize" else "reset"});
+                return false;
+            }
+            resetZlibBuffers(z);
+            z.finished = false;
+        },
+        .zlib_deflate => |z| {
+            if (zlib.deflateReset(&z.strm) != zlib.Z_OK) {
+                try fs.warnDocref(ctx, "zlib.deflate: failed to reset deflation state", .{});
+                return false;
+            }
+            resetZlibBuffers(z);
+            z.finished = true;
+        },
+        .user => |obj| return userFilterSeek(ctx, stream_obj, obj, chain, offset, whence),
+        .rot13, .toupper, .tolower => {},
+    }
+    return true;
+}
+
+fn resetZlibBuffers(z: *ZlibData) void {
+    z.strm.next_in = &z.inbuf;
+    z.strm.avail_in = 0;
+    z.strm.next_out = &z.outbuf;
+    z.strm.avail_out = z.outbuf.len;
+}
+
+// userfilter_seek: the object's seek($offset, $whence, $chain), true when
+// its class has none
+fn userFilterSeek(ctx: *NativeContext, stream_obj: *PhpObject, obj: *PhpObject, chain: *const Chain, offset: i64, whence: u2) RuntimeError!bool {
+    if (!ctx.vm.hasMethod(obj.class_name, "seek")) return true;
+    const has_stream = obj.properties.contains("stream") or ctx.vm.classDeclaresProperty(obj.class_name, "stream");
+    if (has_stream) {
+        const stream_value: Value = if (streams.at_shutdown or value_mod.resourceClosed(stream_obj)) .null else .{ .resource = stream_obj };
+        if (!try assignStreamProperty(ctx, obj, stream_value)) return false;
+    }
+    const result = try ctx.vm.callMethod(obj, "seek", &.{ .{ .int = offset }, .{ .int = whence }, .{ .int = if (chain.read) STREAM_FILTER_READ else STREAM_FILTER_WRITE } });
+    defer ctx.vm.releaseValue(result);
+    if (has_stream) _ = try assignStreamProperty(ctx, obj, .null);
+    return result.isTruthy();
 }
 
 // --- chains on a stream ------------------------------------------------------
@@ -1025,6 +1192,7 @@ fn createConvert(ctx: *NativeContext, name: []const u8, params: ?Value) RuntimeE
         return null;
     };
     const dot = std.mem.indexOfScalar(u8, name, '.') orelse return null;
+    const write_seekable = (try parseWriteSeekMode(ctx, params)) orelse return null;
     const kind = name[dot + 1 ..];
     const mode: Convert.Mode = if (std.ascii.eqlIgnoreCase(kind, "base64-encode"))
         .b64_encode
@@ -1068,7 +1236,10 @@ fn createConvert(ctx: *NativeContext, name: []const u8, params: ?Value) RuntimeE
         },
         .b64_decode => {},
     }
-    return try newFilter(ctx, name, .{ .convert = c });
+    const f = try newFilter(ctx, name, .{ .convert = c });
+    f.read_seekable = .start;
+    f.write_seekable = write_seekable;
+    return f;
 }
 
 // strfilter_convert_append_bucket: converts one input (null to flush) into
@@ -1333,6 +1504,8 @@ const ZlibData = struct {
     inbuf: [0x8000]u8 = undefined,
     outbuf: [0x8000]u8 = undefined,
     finished: bool = false,
+    // inflate's window bits, for a seek that starts over
+    window: c_int = -MAX_WBITS,
 };
 
 const MAX_WBITS = 15;
@@ -1342,6 +1515,7 @@ fn createZlib(ctx: *NativeContext, name: []const u8, params: ?Value) RuntimeErro
         try fs.deprecatedDocref(ctx, "Passing an object for filter parameters for {s} is deprecated, call get_object_vars() first instead", .{name});
         if (ctx.vm.pending_exception != null) return null;
     };
+    const write_seekable = (try parseWriteSeekMode(ctx, params)) orelse return null;
     const z = try ctx.allocator.create(ZlibData);
     z.* = .{ .strm = std.mem.zeroes(zlib.z_stream) };
     z.strm.avail_out = z.outbuf.len;
@@ -1361,6 +1535,7 @@ fn createZlib(ctx: *NativeContext, name: []const u8, params: ?Value) RuntimeErro
                 } else window = @intCast(tmp);
             }
         };
+        z.window = window;
         status = zlib.inflateInit2_(&z.strm, window, zlib.zlibVersion(), @sizeOf(zlib.z_stream));
     } else if (std.ascii.eqlIgnoreCase(name, "zlib.deflate")) {
         deflating = true;
@@ -1395,7 +1570,10 @@ fn createZlib(ctx: *NativeContext, name: []const u8, params: ?Value) RuntimeErro
         ctx.allocator.destroy(z);
         return null;
     }
-    return try newFilter(ctx, name, if (deflating) .{ .zlib_deflate = z } else .{ .zlib_inflate = z });
+    const f = try newFilter(ctx, name, if (deflating) .{ .zlib_deflate = z } else .{ .zlib_inflate = z });
+    f.read_seekable = .start;
+    f.write_seekable = write_seekable;
+    return f;
 }
 
 fn hashGet(v: Value, key: []const u8) ?Value {
@@ -1551,7 +1729,10 @@ fn createUserFilter(ctx: *NativeContext, name: []const u8, class_arg: []const u8
         if (ret) |r| if (r == .bool and !r.bool) return null;
     }
     keep = true;
-    return try newFilter(ctx, name, .{ .user = obj });
+    const f = try newFilter(ctx, name, .{ .user = obj });
+    f.read_seekable = .check;
+    f.write_seekable = .check;
+    return f;
 }
 
 fn writeFilterProperty(ctx: *NativeContext, obj: *PhpObject, comptime name: []const u8, v: Value) RuntimeError!void {
@@ -1936,6 +2117,10 @@ fn filterMethod(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     return NativeResult.scalar(.{ .int = 0 });
 }
 
+fn seekMethod(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
+}
+
 fn onCreateMethod(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -1950,10 +2135,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try def.properties.append(a, .{ .name = "params", .default = .{ .string = Value.String.borrowed("") }, .has_default = true, .type_str = "mixed" });
     try def.properties.append(a, .{ .name = "stream", .default = .null, .has_default = true });
     try def.methods.put(a, "filter", .{ .name = "filter", .arity = 4 });
+    try def.methods.put(a, "seek", .{ .name = "seek", .arity = 3 });
     try def.methods.put(a, "onCreate", .{ .name = "onCreate", .arity = 0 });
     try def.methods.put(a, "onClose", .{ .name = "onClose", .arity = 0 });
     try vm.classes.put(a, "php_user_filter", def);
     try vm.native_fns.put(a, "php_user_filter::filter", filterMethod);
+    try vm.native_fns.put(a, "php_user_filter::seek", seekMethod);
     try vm.native_fns.put(a, "php_user_filter::onCreate", onCreateMethod);
     try vm.native_fns.put(a, "php_user_filter::onClose", onCloseMethod);
 

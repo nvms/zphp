@@ -752,6 +752,14 @@ pub fn seek(ctx: *NativeContext, obj: *PhpObject, offset_arg: i64, whence_arg: u
     const s = try of(ctx, obj);
     var offset = offset_arg;
     var whence = whence_arg;
+    // the filters decide whether the stream may move, and start over when it
+    // does
+    const is_start = whence == 0 and offset == 0;
+    if (s.writefilters.head != null) {
+        _ = try flush(ctx, obj, false);
+        if (!try filters.chainSeekable(ctx, &s.writefilters, is_start)) return -1;
+    }
+    if (s.readfilters.head != null and !try filters.chainSeekable(ctx, &s.readfilters, is_start)) return -1;
     if (!s.no_buffer) {
         switch (whence) {
             1 => if (offset > 0 and offset <= @as(i64, @intCast(s.writepos - s.readpos))) {
@@ -759,20 +767,19 @@ pub fn seek(ctx: *NativeContext, obj: *PhpObject, offset_arg: i64, whence_arg: u
                 s.position += offset;
                 s.eof = false;
                 s.fatal_error = false;
-                return 0;
+                return if (try filters.seekChains(ctx, obj, &s.writefilters, &s.readfilters, is_start, offset, whence)) 0 else -1;
             },
             0 => if (offset > s.position and offset <= s.position + @as(i64, @intCast(s.writepos - s.readpos))) {
                 s.readpos += @intCast(offset - s.position);
                 s.position = offset;
                 s.eof = false;
                 s.fatal_error = false;
-                return 0;
+                return if (try filters.seekChains(ctx, obj, &s.writefilters, &s.readfilters, is_start, offset, whence)) 0 else -1;
             },
             else => {},
         }
     }
     if (hasSeek(obj) and !s.no_seek) {
-        if (s.writefilters.head != null) _ = try flush(ctx, obj, false);
         switch (whence) {
             1 => {
                 offset = if (offset > std.math.maxInt(i64) - s.position) std.math.maxInt(i64) else s.position + offset;
@@ -792,8 +799,8 @@ pub fn seek(ctx: *NativeContext, obj: *PhpObject, offset_arg: i64, whence_arg: u
         }
         s.readpos = 0;
         s.writepos = 0;
-        if (result) |p| return if (p < 0) -1 else 0;
-        return -1;
+        const ret: i32 = if (result) |p| (if (p < 0) -1 else 0) else -1;
+        return if (try filters.seekChains(ctx, obj, &s.writefilters, &s.readfilters, is_start, offset, whence)) ret else -1;
     }
     return emulateSeek(ctx, obj, s, offset, whence);
 }

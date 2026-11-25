@@ -3721,6 +3721,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "php_user_filter::filter", Signature{ .params = &[_]Param{ .{ .name = "in" }, .{ .name = "out" }, .{ .name = "consumed", .by_ref = true }, .{ .name = "closing", .type = "bool" } }, .tentative_returns = "int" } },
     .{ "php_user_filter::onClose", Signature{ .params = &[_]Param{}, .tentative_returns = "void" } },
     .{ "php_user_filter::onCreate", Signature{ .params = &[_]Param{}, .tentative_returns = "bool" } },
+    .{ "php_user_filter::seek", Signature{ .params = &[_]Param{ .{ .name = "offset", .type = "int" }, .{ .name = "whence", .type = "int" }, .{ .name = "chain", .type = "int" } }, .returns = "bool" } },
     .{ "phpcredits", Signature{ .params = &[_]Param{ .{ .name = "flags", .default = .{ .int = 4294967295 }, .type = "int", .default_constant = "CREDITS_ALL" } }, .returns = "true" } },
     .{ "phpinfo", Signature{ .params = &[_]Param{ .{ .name = "flags", .default = .{ .int = 4294967295 }, .type = "int", .default_constant = "INFO_ALL" } }, .returns = "true" } },
     .{ "phpversion", Signature{ .params = &[_]Param{ .{ .name = "extension", .default = .null, .type = "?string" } }, .returns = "string|false" } },
