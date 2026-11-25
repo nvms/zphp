@@ -2975,7 +2975,12 @@ fn native_gzfile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
 fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const result = try openWithWrapper(ctx, args);
-    if (result.value == .resource) try attachContext(ctx, result.value.resource, if (args.len > 3) args[3] else null);
+    if (result.value == .resource) {
+        try attachContext(ctx, result.value.resource, if (args.len > 3) args[3] else null);
+        // a file:// url opened as a plain file keeps its spelling as the uri
+        if (args[0] == .string and fileUrl(args[0].string.bytes()) == .local)
+            try result.value.resource.setCopiedString(ctx.allocator, "__path", args[0].string.bytes());
+    }
     return result;
 }
 
@@ -3932,7 +3937,7 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
         } else if (std.mem.eql(u8, scheme, "phar")) {
             wrapper_type = "phar stream";
             stream_type = "phar stream";
-        } else if (!std.mem.eql(u8, scheme, "file")) {
+        } else if (!std.ascii.eqlIgnoreCase(scheme, "file")) {
             wrapper_type = scheme;
             stream_type = scheme;
         }
