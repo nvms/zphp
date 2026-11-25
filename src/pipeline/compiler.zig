@@ -1581,11 +1581,16 @@ pub const Compiler = struct {
     }
 
     pub fn compileVariableVariable(self: *Compiler, node: Ast.Node) Error!void {
-        const inner = self.ast.nodes[node.data.lhs];
+        const start = self.chunk.offset();
         try self.compileNode(node.data.lhs);
-        if (inner.tag == .variable) {
-            // $$var - the inner variable's value is a string with the $ prefix, strip it
-            // get_var_var expects the name with $ prefix (matching PHP convention)
+        // zend_compile_simple_var_no_cv: a read of a name known while
+        // compiling (`${'name'}`, `${__FUNCTION__}`) deprecates
+        // $http_response_header as a plain read does
+        if (!self.quiet_reads and self.chunk.offset() == start + bytecode.op_bytes + 2 and bytecode.opIs(self.chunk.code.items, start, .constant)) {
+            const idx = (@as(u16, self.chunk.code.items[start + bytecode.op_bytes]) << 8) | self.chunk.code.items[start + bytecode.op_bytes + 1];
+            const name = self.chunk.constants.items[idx];
+            if (name == .string and std.mem.eql(u8, name.string.bytes(), "http_response_header"))
+                try self.warn(node.main_token, 8192, "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead", .{});
         }
         try self.emitOp(.get_var_var);
     }
