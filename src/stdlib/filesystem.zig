@@ -3094,6 +3094,7 @@ fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         ds.meta = .{ .array = meta };
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         try obj.setCopiedString(ctx.allocator, "__mode", mode);
+        try encloseTempInner(ctx, obj);
         return NativeResult.borrowed(.{ .resource = obj });
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
@@ -3279,6 +3280,13 @@ fn openPlainStream(ctx: *NativeContext, path: []const u8, mode: []const u8) Runt
         const memory_mode: streams.Memory.Mode = if (std.mem.indexOfScalar(u8, mode, 'a') != null) .append else if (std.mem.indexOfAny(u8, mode, "w+") != null) .default else .readonly;
         const ms = try streams.attach(ctx, obj, .{ .memory = memory_mode, .greedy = true, .no_buffer = true });
         ms.mem.?.temp = std.ascii.startsWithIgnoreCase(path, "php://temp");
+        if (ms.mem.?.temp and std.ascii.startsWithIgnoreCase(path["php://temp".len..], "/maxmemory:")) {
+            // ZEND_STRTOL: the leading digits
+            const digits = path["php://temp/maxmemory:".len..];
+            var end: usize = 0;
+            while (end < digits.len and std.ascii.isDigit(digits[end])) end += 1;
+            ms.mem.?.temp_max = std.fmt.parseInt(usize, digits[0..end], 10) catch if (end == 0) 0 else std.math.maxInt(usize);
+        }
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         const shown_mode: []const u8 = switch (memory_mode) {
             .append => "a+b",
@@ -3287,6 +3295,7 @@ fn openPlainStream(ctx: *NativeContext, path: []const u8, mode: []const u8) Runt
         };
         try obj.setCopiedString(ctx.allocator, "__mode", shown_mode);
         try obj.setCopiedString(ctx.allocator, "__path", path);
+        if (ms.mem.?.temp) try encloseTempInner(ctx, obj);
         return NativeResult.borrowed(.{ .resource = obj });
     }
     const file = openWithMode(path, mode) catch |err| {
@@ -3404,15 +3413,16 @@ pub fn openWithMode(spelled: []const u8, mode: []const u8) !std.Io.File {
 
 fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "fclose" });
-    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return NativeResult.scalar(.{ .bool = false });
-    // PHP_STREAM_FLAG_NO_FCLOSE: a stream an object owns (SplFileObject's),
-    // or one a filter or user stream method is working on
+    // PHP_STREAM_FLAG_NO_FCLOSE: a stream an object owns (SplFileObject's,
+    // a directory iterator's), a temp stream's inner one, or one a filter or
+    // user stream method is working on
     const no_fclose = obj.get("__no_fclose");
     const busy = if (streams.get(obj)) |s| s.busy > 0 else false;
     if ((no_fclose == .bool and no_fclose.bool) or busy) {
         try warn(ctx, "fclose(): cannot close the provided stream, as it must not be manually closed", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
+    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = try closeStream(ctx, obj) });
 }
 
@@ -3437,7 +3447,26 @@ pub fn closeStream(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
     return ok;
 }
 
+// _php_stream_temp_create_ex: a php://temp stream (data: is one too) keeps
+// its bytes in an inner php://memory stream, a resource of its own that
+// get_resources() lists after the outer one and fclose() refuses
+// (php_stream_encloses sets PHP_STREAM_FLAG_NO_FCLOSE). zphp's temp stream
+// holds the bytes itself; the inner resource stands for php's, takes its id,
+// and closes with the outer stream
+fn encloseTempInner(ctx: *NativeContext, outer: *PhpObject) RuntimeError!void {
+    const inner = try ctx.createResource("FileHandle");
+    try outer.set(ctx.allocator, "__inner", .{ .resource = inner });
+    _ = try streams.attach(ctx, inner, .{ .memory = .default, .greedy = true, .no_buffer = true });
+    try inner.set(ctx.allocator, "__open", .{ .bool = true });
+    try inner.set(ctx.allocator, "__no_fclose", .{ .bool = true });
+    try inner.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("w+b") });
+    try inner.set(ctx.allocator, "__path", .{ .string = Value.String.borrowed("php://memory") });
+    try inner.set(ctx.allocator, "__enclosed", .{ .bool = true });
+}
+
 fn closeHandle(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
+    const inner = obj.get("__inner");
+    if (inner == .resource) inner.resource.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
     if (fileHandleWrapper(obj)) |wrapper| {
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         if (streams.get(obj)) |s| s.in_free = true;
@@ -3967,7 +3996,9 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
         stream_type = if (sock_type == .string) sock_type.string.bytes() else "generic_socket";
         if (path_val != .string or !std.mem.startsWith(u8, uri, "http")) wrapper_type = null;
     }
-    if (is_pipe or popen_mode == .string) wrapper_type = null;
+    // a temp stream's inner memory stream is made without a wrapper or a url
+    const enclosed = obj.get("__enclosed") == .bool;
+    if (is_pipe or enclosed or popen_mode == .string) wrapper_type = null;
     const blocking = obj.get("__blocking");
     const result = try ctx.createArray();
     const key = struct {
@@ -4001,7 +4032,7 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
         else => false,
     };
     try result.set(ctx.allocator, key("seekable"), .{ .bool = seekable and popen_mode != .string });
-    if (!is_pipe and popen_mode != .string and (!is_socket or uri.len > 0)) try result.setCopiedString(ctx.allocator, key("uri"), uri);
+    if (!is_pipe and !enclosed and popen_mode != .string and (!is_socket or uri.len > 0)) try result.setCopiedString(ctx.allocator, key("uri"), uri);
     return NativeResult.borrowed(.{ .array = result });
 }
 

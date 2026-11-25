@@ -77,6 +77,8 @@ const F = struct {
     const dtypes = "__fs_dtypes";
     const rpos = "__fs_rpos";
     const dirp = "__fs_dirp";
+    // the resource standing for php's directory stream
+    const dir_stream = "__fs_dir_stream";
     const index = "__fs_index";
     const d_name = "__fs_d_name";
     const d_type = "__fs_d_type";
@@ -585,6 +587,14 @@ fn dirOpenPath(ctx: *NativeContext, obj: *PhpObject, path: []const u8, label: []
     try obj.set(ctx.allocator, F.dtypes, .{ .array = dtypes });
     try setInt(ctx, obj, F.rpos, 0);
     try setBool(ctx, obj, F.dirp, opened);
+    if (opened) {
+        // php_stream_opendir registers the directory stream as a resource
+        // (get_resources() lists it, it takes an id) that fclose() refuses
+        const res = try ctx.createResource("DirectoryHandle");
+        try obj.set(ctx.allocator, F.dir_stream, .{ .resource = res });
+        try res.set(ctx.allocator, "__open", .{ .bool = true });
+        try res.set(ctx.allocator, "__no_fclose", .{ .bool = true });
+    }
     if (path.len > 1 and isSlash(path[path.len - 1])) {
         try setStr(ctx, obj, F.path, path[0 .. path.len - 1]);
     } else {

@@ -37,6 +37,11 @@ pub const Memory = struct {
     // php://temp reads its inner memory stream greedily, so a read that
     // comes up short has reached the end
     temp: bool = false,
+    // php://temp moves its bytes to a temporary file (a stream of its own,
+    // which takes a resource id) once a write would reach temp_max bytes;
+    // zphp keeps them in memory and only takes the id
+    temp_max: usize = 2 * 1024 * 1024,
+    spilled: bool = false,
 
     pub const Mode = enum { default, readonly, append };
 };
@@ -311,6 +316,14 @@ pub fn rawWrite(ctx: *NativeContext, obj: *PhpObject, s: *Stream, data: []const 
         .user => |w| return user_streams.write(ctx, obj, s, w, data),
         .memory => |m| {
             if (m.mode == .readonly) return -1;
+            // php_stream_temp_write: the inner memory stream is replaced by
+            // a temporary file stream
+            if (m.temp and !m.spilled and data.len > 0 and m.data.items.len + data.len >= m.temp_max) {
+                m.spilled = true;
+                ctx.vm.skipResourceId();
+                const inner = obj.get("__inner");
+                if (inner == .resource) try inner.resource.set(ctx.allocator, "__open", .{ .bool = false });
+            }
             if (m.mode == .append) m.fpos = m.data.items.len;
             const end = m.fpos + data.len;
             if (end > m.data.items.len) {
