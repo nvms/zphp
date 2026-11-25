@@ -1983,7 +1983,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
             const class_node = self.ast.nodes[callee.data.lhs];
             const var_name = self.ast.tokenSlice(callee.main_token);
             if (class_node.tag == .variable) {
-                try self.compileNode(callee.data.lhs);
+                try compileClassRef(self, callee.data.lhs);
             } else {
                 const class_name = try resolveNodeClassName(self, class_node);
                 const cn_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
@@ -2041,7 +2041,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
         const class_node = self.ast.nodes[callee.data.lhs];
         const var_name = self.ast.tokenSlice(callee.main_token);
         if (class_node.tag == .variable) {
-            try self.compileNode(callee.data.lhs);
+            try compileClassRef(self, callee.data.lhs);
             try self.emitGetVar(var_name);
             var guards = try compileArgs(self, args);
             self.current_source_offset = call_offset;
@@ -3410,7 +3410,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     const static_prop = class_node.tag == .static_prop_access and class_node.main_token != 0 and
         std.mem.startsWith(u8, self.ast.tokenSlice(class_node.main_token), "$");
     if (class_node.tag == .variable or static_prop) {
-        try self.compileNode(class_lhs_idx);
+        try compileClassRef(self, class_lhs_idx);
         const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
         if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
         var guards = try compileArgs(self, args);
@@ -3437,7 +3437,8 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
                 local_jumps.deinit(self.allocator);
             };
             try self.compileNode(class_lhs_idx);
-            try self.emitOp(.get_obj_class);
+            try self.emitOp(.class_ref_check);
+            try self.emitByte(1);
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
             if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
             var guards = try compileArgs(self, args);
@@ -3449,7 +3450,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
         // `A::NAME::m()`, `('A')::m()`: its value names the class. a name in
         // parentheses, `(NAME)::m()`, is a constant
         .identifier, .qualified_name => if (class_lhs_idx != node.data.lhs) {
-            try self.compileNode(class_lhs_idx);
+            try compileClassRef(self, class_lhs_idx);
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
             if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
             var guards = try compileArgs(self, args);
@@ -3458,7 +3459,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
             return;
         },
         else => {
-            try self.compileNode(class_lhs_idx);
+            try compileClassRef(self, class_lhs_idx);
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
             if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
             var guards = try compileArgs(self, args);
@@ -3492,6 +3493,14 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+// a class expression's value, refused right away unless it can name a class
+// (php fetches the class before the method name and the arguments)
+fn compileClassRef(self: *Compiler, node_idx: u32) Error!void {
+    try self.compileNode(node_idx);
+    try self.emitOp(.class_ref_check);
+    try self.emitByte(0);
+}
+
 // a static call on a class only known at run time, its arguments in an array:
 // the class value is on the stack, the method name a constant
 fn emitDynStaticSpread(self: *Compiler, method_idx: u16, args: []const u32) Error!void {
@@ -3509,7 +3518,7 @@ pub fn compileDynamicStaticCall(self: *Compiler, node: Ast.Node) Error!void {
 
     if (hasSplatOrNamed(self.ast, args)) {
         if (class_node.tag == .variable) {
-            try self.compileNode(node.data.lhs);
+            try compileClassRef(self, node.data.lhs);
         } else {
             const class_name = try resolveNodeClassName(self, class_node);
             try self.emitOp(.constant);
@@ -3522,7 +3531,7 @@ pub fn compileDynamicStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (class_node.tag == .variable) {
-        try self.compileNode(node.data.lhs);
+        try compileClassRef(self, node.data.lhs);
         try self.compileNode(method_expr);
         var guards = try compileArgs(self, args);
         try emitCallOp(self, &guards, .static_call_dyn_both, .{ .argc = @intCast(args.len) });
@@ -3852,7 +3861,7 @@ pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileNewExprDynamic(self: *Compiler, node: Ast.Node) Error!void {
-    try self.compileNode(node.data.lhs);
+    try compileClassRef(self, node.data.lhs);
     const args = self.ast.extraSlice(node.data.rhs);
     if (hasSplatOrNamed(self.ast, args)) {
         var guards = try emitSpreadArgs(self, args);

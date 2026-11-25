@@ -11553,6 +11553,31 @@ pub const VM = struct {
                     try self.statics_bound.put(self.allocator, try self.internName(self.staticStorageKey(&key_buf, var_name)), {});
                 },
 
+                .class_ref_check => {
+                    const to_name = self.readByte() == 1;
+                    const class_ref = self.stack[self.sp - 1];
+                    switch (class_ref) {
+                        .string => {},
+                        .object, .generator, .fiber => if (to_name) {
+                            const name: []const u8 = switch (class_ref) {
+                                .object => |o| o.class_name,
+                                .generator => "Generator",
+                                else => "Fiber",
+                            };
+                            // as get_obj_class: the value goes without a
+                            // release, the stack holding no reference of
+                            // its own to a call's result
+                            _ = self.pop();
+                            self.push(.{ .string = Value.String.borrowed(name) });
+                        },
+                        else => {
+                            self.dropN(1);
+                            if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
+                            return error.RuntimeError;
+                        },
+                    }
+                },
+
                 .require => {
                     const kind: IncludeKind = @enumFromInt(self.readByte());
                     const path_val = self.pop();

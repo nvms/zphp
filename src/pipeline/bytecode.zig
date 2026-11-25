@@ -658,6 +658,12 @@ pub const OpCode = enum(u16) {
     jump_if_static_bound,
     // u16 variable name: marks the static variable bound (ZEND_BIND_STATIC)
     static_bind,
+    // the class expression on top of the stack must be a string or an
+    // object, checked as php fetches the class (ZEND_FETCH_CLASS,
+    // INIT_STATIC_METHOD_CALL), before the method name and the arguments.
+    // u8: 1 replaces an object with its class name, letting the object go
+    // as php frees the temporary op1 once it has the class
+    class_ref_check,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -665,7 +671,7 @@ pub const OpCode = enum(u16) {
             .static_bind => 4,
             .arg_variable => 7,
             .arg_unpack => 6,
-            .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread => 3,
+            .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread, .class_ref_check => 3,
             .tick => 4,
             .jump_if_class_declared, .bind_const_attributes => 6,
             .parent_hook_call => 8,
