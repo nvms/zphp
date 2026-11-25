@@ -649,7 +649,9 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
 
     signal_socket = try platform.socketPair();
     defer closeWakePair(signal_socket);
-    try platform.installShutdownHandler(requestShutdown);
+    // php's built-in web server (`-S`) leaves SIGTERM and SIGINT at their
+    // default, so a signal ends it as one; zphp serve shuts down gracefully
+    if (config.cli_server_host == null) try platform.installShutdownHandler(requestShutdown);
 
     var tls_ctx: ?*tls.SSL_CTX = null;
     var tls_cert_z: ?[:0]u8 = null;
