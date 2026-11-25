@@ -2926,6 +2926,12 @@ fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
         return error.RuntimeError;
     }
     switch (msg_type) {
+        1 => {
+            // _php_error_log: mailed to the destination, which must be given
+            if (args.len < 3 or args[2] != .string) return NativeResult.scalar(.{ .bool = false });
+            const headers: ?[]const u8 = if (args.len >= 4 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes() else null;
+            return NativeResult.scalar(.{ .bool = try @import("mail.zig").phpMail(ctx, args[2].string.bytes(), "PHP error_log message", message, headers, null) });
+        },
         2 => {
             try ctx.vm.setPendingException("ValueError", "TCP/IP option is not available for error logging");
             return error.RuntimeError;

@@ -246,7 +246,7 @@ fn escapeShellCmd(ctx: *NativeContext, s: []const u8) RuntimeError![]u8 {
     return ctx.allocator.dupe(u8, if (r == .string) r.string.bytes() else "");
 }
 
-fn phpMail(ctx: *NativeContext, to: []const u8, subject: []const u8, message_full: []const u8, headers: ?[]const u8, extra_cmd: ?[]const u8) RuntimeError!bool {
+pub fn phpMail(ctx: *NativeContext, to: []const u8, subject: []const u8, message_full: []const u8, headers: ?[]const u8, extra_cmd: ?[]const u8) RuntimeError!bool {
     const a = ctx.allocator;
     const message = message_full[0 .. std.mem.indexOfScalar(u8, message_full, 0) orelse message_full.len];
     var hdr: ?[]const u8 = headers;

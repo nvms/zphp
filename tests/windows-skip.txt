@@ -79,3 +79,4 @@ proc_signal_status.php: posix signals; windows has no signal status
 cli_server_routing.php: starts php's built-in server as a background process and probes it over tcp; the windows build of zphp -S is unverified
 socket_read_buffered_no_wait.php: uses a unix socket pair, which php's windows build doesn't create
 stream_socket_client_no_connect.php: php's windows build has no unix transport ("Unable to find the socket transport")
+error_log_mail.php: the message is piped to cat through the shell, which cmd.exe lacks
