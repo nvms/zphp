@@ -415,6 +415,9 @@ fn native_ob_start(ctx: *NativeContext, args: []const Value) RuntimeError!Native
                 defer reason.deinit(vm.allocator);
                 try callables.writeReason(failure, &reason, vm.allocator);
                 try warning(vm, "ob_start(): {s}", .{reason.items});
+                // php_output_handler_start checks the lock before the
+                // missing handler
+                if (vm.ob_running != null) return lockFatal(vm, "ob_start");
                 try notice(vm, "ob_start(): Failed to create buffer", .{});
                 return NativeResult.scalar(.{ .bool = false });
             },

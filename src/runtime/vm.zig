@@ -34491,7 +34491,9 @@ pub const VM = struct {
         const outer_log = self.release_log;
         if (self.release_depth < max_release_depth) self.release_log = &dropped;
         defer self.release_log = outer_log;
-        if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) destruct: {
+        // a fatal error marks every object destructed (php_error_cb): what
+        // the unwinding frames release goes without its destructor
+        if (obj.ownsDestructor() and !obj.destructor_called and !self.uncatchable_fatal and self.hasMethod(obj.class_name, "__destruct")) destruct: {
             if (self.gc_dtors_in_fiber) {
                 if (self.callDestructorInGcFiber(obj)) break :destruct;
             }
