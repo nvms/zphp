@@ -354,6 +354,8 @@ pub fn flush(ctx: *NativeContext, w: *PhpObject) RuntimeError!bool {
 
 pub fn close(ctx: *NativeContext, stream_obj: *PhpObject, w: *PhpObject) RuntimeError!void {
     _ = stream_obj;
+    // zend_call_function calls nothing while an exception is pending
+    if (ctx.vm.pending_exception != null) return;
     _ = try callIfExists(ctx, w, "stream_close", &.{});
 }
 
