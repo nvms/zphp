@@ -3324,6 +3324,8 @@ pub fn closeStream(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
     streams.beforeClose(ctx, obj) catch |err| {
         failed = err;
     };
+    // watchers leave the poll backends while the descriptor is still open
+    if (streams.get(obj)) |s| if (s.poll_watchers.items.len > 0) @import("io_poll.zig").streamClosing(ctx.vm, obj);
     const ok = closeHandle(ctx, obj) catch |err| blk: {
         failed = failed orelse err;
         break :blk false;

@@ -74,3 +74,4 @@ proc_open_env_values.php: the windows proc_open (proc_win.zig) builds its enviro
 popen_stream_meta_data.php: the test pipes to cat, which windows lacks
 socket_client_error_outputs.php: zphp doesn't word the windows resolver's reason for a failed lookup yet
 gmp_php86_ranges.php: php's windows builds use MPIR, which has no gmp_prevprime() or gmp_powm_sec()
+io_poll.php: php picks WSAPoll there, so the backend names and what each backend reports differ, and the runner's php cannot make the unix socket pairs the test polls

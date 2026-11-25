@@ -2682,6 +2682,7 @@ pub const VM = struct {
         try @import("../stdlib/select.zig").register(vm, allocator);
         try @import("../stdlib/bcmath.zig").register(vm, allocator);
         try @import("../stdlib/time_duration.zig").register(vm, allocator);
+        try @import("../stdlib/io_poll.zig").register(vm, allocator);
         try @import("../stdlib/gd.zig").register(vm, allocator);
         try @import("../stdlib/soap.zig").register(vm, allocator);
         try @import("../stdlib/mysqli.zig").register(vm, allocator);
@@ -3688,6 +3689,7 @@ pub const VM = struct {
         // reads class_name from each object and those names may live in self.strings
         // (e.g. when created by unserialize via ctx.createString)
         @import("../stdlib/curl.zig").cleanupResources(self.objects);
+        @import("../stdlib/io_poll.zig").cleanupResources(self.objects);
         @import("../stdlib/filesystem.zig").cleanupHandles(self.objects);
         @import("../stdlib/dom.zig").cleanupResources(self.objects);
         @import("../stdlib/simplexml.zig").cleanupResources(self.objects);
@@ -22366,6 +22368,9 @@ pub const VM = struct {
             }
             if (std.ascii.eqlIgnoreCase(iface, "DateTimeInterface") and !self.extendsClass(def, "DateTime") and !self.extendsClass(def, "DateTimeImmutable"))
                 return self.traitRuleFatal("DateTimeInterface can't be implemented by user classes", .{});
+            // php 8.6's Io\Poll\Handle: only internal handle classes
+            if (std.ascii.eqlIgnoreCase(iface, "Io\\Poll\\Handle"))
+                return self.traitRuleFatal("Io\\Poll\\Handle cannot be implemented by user classes", .{});
         }
     }
 

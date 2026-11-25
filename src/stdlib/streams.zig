@@ -77,6 +77,9 @@ pub const Stream = struct {
     // a read may wait (a pipe, a socket, a terminal): php's cli has written
     // every echo by then, so zphp flushes its output first
     may_block: bool = false,
+    // the Io\Poll\Watchers registered with this stream (io_poll.zig), told
+    // when it closes
+    poll_watchers: std.ArrayListUnmanaged(usize) = .empty,
 
     pub fn buffered(self: *const Stream) usize {
         return self.writepos - self.readpos;
@@ -167,6 +170,7 @@ pub fn memoryOf(obj: *PhpObject) ?*Memory {
 // frees the native state when the resource object goes away
 pub fn release(obj: *PhpObject) void {
     const s = get(obj) orelse return;
+    @import("io_poll.zig").streamReleased(s);
     filters.releaseChain(&s.readfilters);
     filters.releaseChain(&s.writefilters);
     s.deinit();
@@ -853,6 +857,7 @@ pub fn removeFilters(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
 // handle (a user stream's stream_close) and removes its filters
 pub fn destroyed(vm: *VM, obj: *PhpObject) void {
     const s = get(obj) orelse return;
+    if (s.poll_watchers.items.len > 0) @import("io_poll.zig").streamClosing(vm, obj);
     if (s.in_free) return;
     if (value_mod.resourceClosed(obj)) return;
     var ctx = vm.makeContext(null);

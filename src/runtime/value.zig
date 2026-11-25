@@ -1205,6 +1205,9 @@ pub const NativeHandle = struct {
         hash_context,
         // a DeflateContext's or InflateContext's z_stream (zlib_context.zig)
         zlib_context,
+        // an Io\Poll\Context's and an Io\Poll\Watcher's state (io_poll.zig)
+        poll_context,
+        poll_watcher,
         _,
     };
 
