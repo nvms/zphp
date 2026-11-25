@@ -11518,7 +11518,14 @@ pub const VM = struct {
                             continue;
                         };
 
-                        if (kind.once() and self.ic.?.included.contains(path)) {
+                        // a file read through php://filter is included under
+                        // its opened path, the name include_once compares
+                        const included_key: []const u8 = if (std.ascii.startsWithIgnoreCase(path, "php://filter/")) blk: {
+                            const opened = @import("../stdlib/filesystem.zig").includeOpenedPath(self.allocator, path) orelse break :blk path;
+                            defer self.allocator.free(opened);
+                            break :blk try self.internName(opened);
+                        } else path;
+                        if (kind.once() and self.ic.?.included.contains(included_key)) {
                             self.push(.{ .bool = true });
                         } else {
                             const from_cache = self.serve_mode and self.serve_compile_cache.contains(path);
@@ -11542,7 +11549,7 @@ pub const VM = struct {
                                     try self.serve_cache_keys.append(self.allocator, duped);
                                     try self.serve_compile_cache.put(self.allocator, duped, r);
                                 }
-                                try self.ic.?.included.put(self.allocator, path, {});
+                                try self.ic.?.included.put(self.allocator, included_key, {});
                                 if (!from_cache) {
                                     try self.compile_results.append(self.allocator, r);
                                 }
