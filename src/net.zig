@@ -48,8 +48,11 @@ pub const Address = extern union {
 
     pub fn initUnix(path: []const u8) !Address {
         var sa: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
-        // the path keeps a terminating nul for every platform's sake
-        if (path.len + 1 > sa.path.len) return error.NameTooLong;
+        // the path keeps a terminating nul for every platform's sake, except
+        // a name in linux's abstract namespace (leading nul), which can fill
+        // sun_path
+        const room = if (path.len > 0 and path[0] == 0) sa.path.len else sa.path.len - 1;
+        if (path.len > room) return error.NameTooLong;
         @memset(&sa.path, 0);
         @memcpy(sa.path[0..path.len], path);
         return .{ .un = sa };
