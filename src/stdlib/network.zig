@@ -472,6 +472,7 @@ fn native_stream_context_get_default(ctx: *NativeContext, args: []const Value) R
 fn native_stream_context_set_default(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .array) return throwContext(ctx, "stream_context_set_default(): Argument #1 ($options) must be of type array, {s} given", .{if (args.len > 0) args[0].valueName() else "null"});
     const context = try defaultContext(ctx);
+    if (@import("stream_errors.zig").optionsHaveErrorSettings(args[0].array)) return throwValue(ctx, "Stream error handling options cannot be set on the default context");
     try mergeContextOptions(ctx, context, args[0].array);
     return NativeResult.borrowed(.{ .resource = context });
 }

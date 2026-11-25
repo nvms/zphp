@@ -829,11 +829,23 @@ fn collectProperties(ctx: *NativeContext, class_name: []const u8, out: *std.Arra
         };
         return;
     }
-    var is_own = true;
-    var current: ?[]const u8 = class_name;
-    var depth: usize = 0;
-    while (current) |name| : (depth += 1) {
-        if (depth > 256) break;
+    // a user class lists its own properties before its parents'; php
+    // registers an internal class's inherited properties before the ones it
+    // declares, so its internal ancestors list root first (as getProperties)
+    var chain: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer chain.deinit(ctx.allocator);
+    var walk: ?[]const u8 = class_name;
+    while (walk) |name| {
+        if (chain.items.len > 256) break;
+        const cls = ctx.vm.classes.getPtr(name) orelse break;
+        try chain.append(ctx.allocator, name);
+        walk = cls.parent;
+    }
+    var user_part: usize = 0;
+    while (user_part < chain.items.len and !ctx.vm.classes.getPtr(chain.items[user_part]).?.is_internal) user_part += 1;
+    std.mem.reverse([]const u8, chain.items[user_part..]);
+    for (chain.items) |name| {
+        const is_own = std.mem.eql(u8, name, class_name);
         const cls = ctx.vm.classes.getPtr(name) orelse break;
         for (cls.properties.items) |prop| {
             if (!is_own and prop.visibility == .private) continue;
@@ -848,8 +860,6 @@ fn collectProperties(ctx: *NativeContext, class_name: []const u8, out: *std.Arra
             if (hasProp(out.items, sp_name)) continue;
             try out.append(ctx.allocator, .{ .name = sp_name, .declaring = name, .def = def, .is_static = true });
         }
-        current = cls.parent;
-        is_own = false;
     }
 }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+const stream_errors = @import("stream_errors.zig");
 
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
@@ -60,8 +61,9 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("syslog.zig").entries,
         @import("highlight.zig").entries,
         @import("image.zig").entries,
+        @import("stream_errors.zig").natives,
     };
-    @setEvalBranchQuota(10000);
+    @setEvalBranchQuota(10000000);
     inline for (modules) |entries| {
         inline for (entries) |f| {
             const info = @typeInfo(@TypeOf(f[1]));
@@ -69,7 +71,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
             if (fn_info.return_type.? != RuntimeError!NativeResult) {
                 @compileError("native function must return RuntimeError!NativeResult: " ++ f[0]);
             }
-            try map.put(allocator, f[0], f[1]);
+            try map.put(allocator, f[0], comptime stream_errors.wrap(f[0], f[1]));
         }
     }
 }

@@ -2544,7 +2544,7 @@ fn rcMarkLazyObjectAsInitialized(ctx: *NativeContext, args: []const Value) Runti
 
 // the internal final classes php leaves to the standard object handlers
 fn plainFinalClass(name: []const u8) bool {
-    for ([_][]const u8{ "AllowDynamicProperties", "Attribute", "DelayedTargetValidation", "Deprecated", "Directory", "NoDiscard", "Override", "ReturnTypeWillChange", "SensitiveParameter", "SensitiveParameterValue", "StreamBucket", "Dom\\NamespaceInfo", "Uri\\WhatWg\\UrlValidationError" }) |plain| {
+    for ([_][]const u8{ "AllowDynamicProperties", "Attribute", "DelayedTargetValidation", "Deprecated", "Directory", "NoDiscard", "Override", "ReturnTypeWillChange", "SensitiveParameter", "SensitiveParameterValue", "StreamBucket", "StreamError", "Dom\\NamespaceInfo", "Uri\\WhatWg\\UrlValidationError" }) |plain| {
         if (std.ascii.eqlIgnoreCase(name, plain)) return true;
     }
     return false;

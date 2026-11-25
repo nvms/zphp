@@ -610,6 +610,12 @@ pub fn warnDocrefParam(ctx: *NativeContext, param: []const u8, comptime fmt: []c
 fn docref(ctx: *NativeContext, level: i64, comptime fmt: []const u8, args: anytype) RuntimeError!void {
     const body = try std.fmt.allocPrint(ctx.allocator, fmt, args);
     defer ctx.allocator.free(body);
+    return docrefBody(ctx, level, body);
+}
+
+// php_error_docref(NULL, level, "%s", body): the body after the running
+// function's name
+pub fn docrefBody(ctx: *NativeContext, level: i64, body: []const u8) RuntimeError!void {
     var name = ctx.call_name orelse docref_fallback;
     if (ctx.vm.pending_exception != null and current_include != null and ctx.call_name != null and std.mem.eql(u8, ctx.call_name.?, current_include.?)) name = "main";
     // with no function running php names the origin itself ("Unknown: ...")

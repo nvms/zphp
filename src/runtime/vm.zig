@@ -991,6 +991,9 @@ pub const VM = struct {
     // php 8.6's DATEG(duration_cache): the last non-negative Time\Duration a
     // factory made, held with a reference until the request ends
     duration_cache: ?*PhpObject = null,
+    // php 8.6's FG(stream_error_state): the running stream operations and
+    // the errors stream_last_errors() returns, until the request ends
+    stream_errors: @import("../stdlib/stream_errors.zig").State = .{},
     // php 8.6's stateless closures (EG(lambda_cache)), by the compiled
     // closure, each held with one reference until the request ends
     lambda_cache: std.StringHashMapUnmanaged(struct { scope: ?[]const u8, closure: *PhpObject }) = .{},
@@ -2683,6 +2686,7 @@ pub const VM = struct {
         try @import("../stdlib/bcmath.zig").register(vm, allocator);
         try @import("../stdlib/time_duration.zig").register(vm, allocator);
         try @import("../stdlib/io_poll.zig").register(vm, allocator);
+        try @import("../stdlib/stream_errors.zig").register(vm, allocator);
         try @import("../stdlib/gd.zig").register(vm, allocator);
         try @import("../stdlib/soap.zig").register(vm, allocator);
         try @import("../stdlib/mysqli.zig").register(vm, allocator);
@@ -3854,6 +3858,7 @@ pub const VM = struct {
         self.sensitive_params.deinit(self.allocator);
         self.fcc_cache.deinit(self.allocator);
         self.lambda_cache.deinit(self.allocator);
+        self.stream_errors.deinit(self);
         if (self.unwind_marker) |marker| {
             self.allocator.destroy(marker);
             self.unwind_marker = null;
@@ -4125,6 +4130,7 @@ pub const VM = struct {
         self.lambda_cache.clearRetainingCapacity();
         if (self.duration_cache) |cached| self.releaseValue(.{ .object = cached });
         self.duration_cache = null;
+        self.stream_errors.reset(self);
         self.iap_positions.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();
         if (self.ic) |ic| {
