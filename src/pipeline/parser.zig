@@ -1403,9 +1403,9 @@ const Parser = struct {
         if (self.peek() == .dollar or self.peek() == .variable or self.peek() == .l_paren) {
             var class_expr: u32 = undefined;
             if (self.peek() == .l_paren) {
-                _ = self.advance();
-                class_expr = try self.parseExpression();
-                _ = try self.expect(.r_paren);
+                // kept as a group: `new (NAME)` names a constant, which an
+                // assert() message prints in its parentheses
+                class_expr = try self.parseGroupedExpr();
             } else {
                 class_expr = try self.parsePrimaryExpr();
             }

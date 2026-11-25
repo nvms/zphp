@@ -175,6 +175,9 @@ const Exporter = struct {
             .string_literal => if (try e.literalString(n)) |s| {
                 defer e.allocator.free(s);
                 if (validVarName(s)) return e.str(s);
+                try e.str("{'");
+                try e.singleQuoted(s);
+                return e.str("'}");
             },
             else => {},
         }
@@ -209,6 +212,36 @@ const Exporter = struct {
             .qualified_name => return e.qualified(n),
             else => return e.expr(i, 0, indent),
         }
+    }
+
+    // zend_ast_export_ns_name_or_expression: a name or a variable prints
+    // bare, any other expression in parentheses (php 8.6), so `(NAME)::m()`
+    // keeps the parentheses that make NAME a constant
+    fn nsNameOrExpr(e: *Exporter, i: u32, indent: u32) Error!void {
+        var inner = i;
+        while (e.node(inner).tag == .grouped_expr) inner = e.node(inner).data.lhs;
+        const n = e.node(inner);
+        switch (n.tag) {
+            .identifier, .qualified_name => if (inner == i) return e.nsName(i, indent),
+            .variable, .variable_variable => return e.expr(inner, 0, indent),
+            .string_literal => if (try e.literalString(n)) |s| {
+                defer e.allocator.free(s);
+                return e.str(s);
+            },
+            else => {},
+        }
+        try e.char('(');
+        try e.expr(inner, 0, indent);
+        try e.char(')');
+    }
+
+    fn isParentHookCall(e: *Exporter, n: Node) bool {
+        const class = e.node(n.data.lhs);
+        if (class.tag != .static_prop_access) return false;
+        const owner = e.node(class.data.lhs);
+        if (owner.tag != .identifier or !std.ascii.eqlIgnoreCase(e.tok(owner.main_token), "parent")) return false;
+        const name_text = e.tok(n.main_token);
+        return std.ascii.eqlIgnoreCase(name_text, "get") or std.ascii.eqlIgnoreCase(name_text, "set");
     }
 
     fn qualified(e: *Exporter, n: Node) Error!void {
@@ -270,7 +303,7 @@ const Exporter = struct {
             .kw_instanceof => {
                 try e.expr(n.data.lhs, 0, indent);
                 try e.str(" instanceof ");
-                return e.nsName(n.data.rhs, indent);
+                return e.nsNameOrExpr(n.data.rhs, indent);
             },
             else => return e.binary(n, e.tok(n.main_token), priority, 0, 0, 0, indent),
         }
@@ -352,8 +385,11 @@ const Exporter = struct {
             try e.char('(');
             try e.closure(callee, n.data.lhs, indent, false);
             try e.char(')');
+        } else if (callee.tag == .property_access or callee.tag == .nullsafe_property_access or callee.tag == .static_prop_access) {
+            // `$x->{expr}()` and `A::$m()` are method calls; `($x->p)()` is grouped
+            try e.expr(n.data.lhs, 0, indent);
         } else {
-            try e.nsName(n.data.lhs, indent);
+            try e.nsNameOrExpr(n.data.lhs, indent);
         }
         try e.char('(');
         try e.list(arg_list, 0, indent);
@@ -451,11 +487,11 @@ const Exporter = struct {
                         try e.str(e.tok(target.main_token));
                     },
                     .static_call => {
-                        try e.nsName(target.data.lhs, indent);
+                        try e.nsNameOrExpr(target.data.lhs, indent);
                         try e.str("::");
                         try e.str(e.tok(target.main_token));
                     },
-                    else => try e.nsName(n.data.lhs, indent),
+                    else => try e.nsNameOrExpr(n.data.lhs, indent),
                 }
                 try e.str("(...)");
             },
@@ -483,7 +519,9 @@ const Exporter = struct {
                 try e.char(')');
             },
             .static_call => {
-                try e.nsName(n.data.lhs, indent);
+                // parent::$prop::get() is a parent hook call, printed bare
+                // (zend_ast_is_parent_hook_call)
+                if (e.isParentHookCall(n)) try e.expr(n.data.lhs, 0, indent) else try e.nsNameOrExpr(n.data.lhs, indent);
                 try e.str("::");
                 try e.str(e.tok(n.main_token));
                 try e.char('(');
@@ -492,7 +530,7 @@ const Exporter = struct {
             },
             .dynamic_static_call => {
                 const items = e.ast.extraSlice(n.data.rhs);
-                try e.nsName(n.data.lhs, indent);
+                try e.nsNameOrExpr(n.data.lhs, indent);
                 try e.str("::");
                 // main_token is the `$` of `A::${expr}()`, 0 for `A::{expr}()`
                 if (n.main_token != 0) {
@@ -506,7 +544,7 @@ const Exporter = struct {
                 try e.char(')');
             },
             .static_prop_access => {
-                try e.nsName(n.data.lhs, indent);
+                try e.nsNameOrExpr(n.data.lhs, indent);
                 if (n.main_token == 0) {
                     try e.str("::$");
                     try e.varName(n.data.rhs, indent);
@@ -519,7 +557,7 @@ const Exporter = struct {
                 }
             },
             .dynamic_class_const => {
-                try e.nsName(n.data.lhs, indent);
+                try e.nsNameOrExpr(n.data.lhs, indent);
                 try e.str("::");
                 try e.name(n.data.rhs, indent);
             },
@@ -541,7 +579,7 @@ const Exporter = struct {
             },
             .new_expr_dynamic => {
                 try e.str("new ");
-                try e.nsName(n.data.lhs, indent);
+                try e.nsNameOrExpr(n.data.lhs, indent);
                 try e.char('(');
                 try e.args(n.data.rhs, indent);
                 try e.char(')');
@@ -1053,28 +1091,20 @@ const Exporter = struct {
             try parts.append(e.allocator, .{ .text = text });
         }
 
-        for (parts.items, 0..) |part, idx| {
-            // a variable named by a literal prints bare unless what follows
-            // would read as part of it
-            const next_needs_braces = idx + 1 < parts.items.len and switch (parts.items[idx + 1]) {
-                .text => |text| text.len > 0 and (text[0] == '[' or isVarChar(text[0])),
-                else => false,
-            };
+        // php 8.6 prints every embedded expression in braces
+        for (parts.items) |part| {
             switch (part) {
                 .text => |text| try e.qstr(quote, text),
                 .simple => |var_name| {
-                    if (next_needs_braces) try e.char('{');
-                    try e.char('$');
+                    try e.str("{$");
                     try e.str(var_name);
-                    if (next_needs_braces) try e.char('}');
+                    try e.char('}');
                 },
                 .node => |pn| {
                     var sub = Exporter{ .ast = pn.ast, .out = e.out, .allocator = e.allocator };
-                    const n = pn.ast.nodes[pn.idx];
-                    const bare = n.tag == .variable_variable and pn.ast.nodes[n.data.lhs].tag == .string_literal and !next_needs_braces;
-                    if (!bare) try e.char('{');
+                    try e.char('{');
                     try sub.expr(pn.idx, 0, indent);
-                    if (!bare) try e.char('}');
+                    try e.char('}');
                 },
             }
         }
