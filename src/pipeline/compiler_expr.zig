@@ -268,6 +268,39 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 return;
             }
             if (target_lhs.tag == .array_access) {
+                // zend_delayed_compile_dim: the keys and the value run
+                // before the variable is fetched for the write, so a key or
+                // value that reassigns it writes into its new array
+                const base_node = self.ast.nodes[target_lhs.data.lhs];
+                if (base_node.tag == .variable and target_lhs.data.rhs != 0 and target.data.rhs != 0 and
+                    (!pureOperand(self, target_lhs.data.rhs) or !pureOperand(self, target.data.rhs) or !pureOperand(self, node.data.rhs)))
+                {
+                    // a key that is a plain variable is read as its fetch
+                    // runs, after the value
+                    const outer_late = self.ast.nodes[target_lhs.data.rhs].tag == .variable;
+                    const inner_late = self.ast.nodes[target.data.rhs].tag == .variable;
+                    if (!outer_late) try self.compileNode(target_lhs.data.rhs);
+                    if (!inner_late) try self.compileNode(target.data.rhs);
+                    try self.compileNode(node.data.rhs);
+                    try compileVivifyChain(self, target_lhs.data.lhs);
+                    if (outer_late) try self.compileNode(target_lhs.data.rhs);
+                    if (inner_late) try self.compileNode(target.data.rhs);
+                    // to [base, outer key, inner key, value]
+                    const burys: []const u8 = if (outer_late and inner_late)
+                        &.{ 3, 3, 3 } // [v, base, k1, k2]
+                    else if (outer_late)
+                        &.{ 3, 3 } // [k2, v, base, k1]
+                    else if (inner_late)
+                        &.{ 2, 3 } // [k1, v, base, k2]
+                    else
+                        &.{3}; // [k1, k2, v, base]
+                    for (burys) |depth| {
+                        try self.emitOp(.bury);
+                        try self.emitByte(depth);
+                    }
+                    try self.emitOp(.array_set_chain);
+                    return;
+                }
                 try compileVivifyChain(self, target_lhs.data.lhs); // push base
                 try self.compileNode(target_lhs.data.rhs); // push outer key
                 try self.compileNode(target.data.rhs); // push inner key
@@ -3491,6 +3524,15 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
         self.current_source_offset = self.ast.tokens[node.main_token].start;
         try emitCallOp(self, &guards, .static_call, .{ .a = class_idx, .b = method_idx, .argc = @intCast(args.len) });
     }
+}
+
+// an operand whose evaluation can't change a variable: a literal, a
+// variable read, a constant
+fn pureOperand(self: *Compiler, idx: u32) bool {
+    return switch (self.ast.nodes[idx].tag) {
+        .integer_literal, .float_literal, .string_literal, .true_literal, .false_literal, .null_literal, .variable, .identifier => true,
+        else => false,
+    };
 }
 
 // a class expression's value, refused right away unless it can name a class
