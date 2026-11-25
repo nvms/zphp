@@ -14,6 +14,7 @@ const NativeContext = vm_mod.NativeContext;
 const streams = @import("streams.zig");
 const fs = @import("filesystem.zig");
 const filters = @import("stream_filters.zig");
+const se = @import("stream_errors.zig");
 
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -31,7 +32,13 @@ threadlocal var current_filename: ?[]const u8 = null;
 pub threadlocal var in_user_include: bool = false;
 
 pub fn logError(ctx: *NativeContext, options: i64, comptime fmt: []const u8, args: anytype) RuntimeError!void {
-    if (options & REPORT_ERRORS != 0) return fs.warnDocref(ctx, fmt, args);
+    return logErrorAt(ctx, options, .{ .code = .Generic }, fmt, args);
+}
+
+// php_stream_wrapper_log_error: reported now when the opener reports errors,
+// else kept for php_stream_display_wrapper_errors (which drops the code)
+pub fn logErrorAt(ctx: *NativeContext, options: i64, site: se.Site, comptime fmt: []const u8, args: anytype) RuntimeError!void {
+    if (options & REPORT_ERRORS != 0) return se.raise(ctx, site, fmt, args);
     const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
     error_log_allocator = ctx.allocator;
     try error_log.append(ctx.allocator, msg);
@@ -39,7 +46,7 @@ pub fn logError(ctx: *NativeContext, options: i64, comptime fmt: []const u8, arg
 
 // php_stream_display_wrapper_errors: "func(path): caption: what the wrapper
 // logged" (or the given fallback), unless an exception is in flight
-pub fn displayErrors(ctx: *NativeContext, path: []const u8, caption: []const u8, fallback: []const u8) RuntimeError!void {
+pub fn displayErrors(ctx: *NativeContext, path: []const u8, caption: []const u8, fallback: []const u8, wrapper: []const u8) RuntimeError!void {
     defer tidyErrors();
     if (ctx.vm.pending_exception != null) return;
     var msg: std.ArrayListUnmanaged(u8) = .empty;
@@ -50,7 +57,8 @@ pub fn displayErrors(ctx: *NativeContext, path: []const u8, caption: []const u8,
         if (i > 0) try msg.append(ctx.allocator, '\n');
         try msg.appendSlice(ctx.allocator, e);
     }
-    try fs.warnDocrefParam(ctx, path, "{s}: {s}", .{ caption, msg.items });
+    _ = path;
+    try se.warn(ctx, .OpenFailed, wrapper, "{s}: {s}", .{ caption, msg.items });
 }
 
 pub fn tidyErrors() void {
@@ -111,7 +119,7 @@ pub const Opened = struct { stream: *PhpObject, opened_path: ?[]u8 = null };
 // null with the reason in the error log
 pub fn open(ctx: *NativeContext, class: []const u8, path: []const u8, mode: []const u8, options: i64, context: ?*PhpObject) RuntimeError!?Opened {
     if (current_filename) |cur| if (std.mem.eql(u8, cur, path)) {
-        try logError(ctx, options, "infinite recursion prevented", .{});
+        try logErrorAt(ctx, options, .{ .code = .RecursionDetected, .wrapper = se.user_space, .context = context }, "infinite recursion prevented", .{});
         return null;
     };
     current_filename = path;
@@ -122,7 +130,7 @@ pub fn open(ctx: *NativeContext, class: []const u8, path: []const u8, mode: []co
     const has = ctx.vm.hasMethod(obj.class_name, "stream_open") or ctx.vm.hasMethod(obj.class_name, "__call");
     if (!has) {
         for (args[0..2]) |a| ctx.vm.releaseValue(a);
-        try logError(ctx, options, "\"{s}::stream_open\" is not implemented", .{className(ctx, obj)});
+        try logErrorAt(ctx, options, .{ .code = .NotImplemented, .wrapper = se.user_space, .context = context }, "\"{s}::stream_open\" is not implemented", .{className(ctx, obj)});
         return null;
     }
     const ret = if (ctx.vm.hasMethod(obj.class_name, "stream_open"))
@@ -131,7 +139,7 @@ pub fn open(ctx: *NativeContext, class: []const u8, path: []const u8, mode: []co
         (try callIfExists(ctx, obj, "stream_open", args[0..3])).?;
     defer for (args) |a| ctx.vm.releaseValue(a);
     if (!ret.isTruthy()) {
-        try logError(ctx, options, "\"{s}::stream_open\" call failed", .{className(ctx, obj)});
+        try logErrorAt(ctx, options, .{ .code = .UserspaceCallFailed, .wrapper = se.user_space, .context = context }, "\"{s}::stream_open\" call failed", .{className(ctx, obj)});
         return null;
     }
     const fh = try ctx.createResource("FileHandle");
@@ -147,7 +155,7 @@ pub fn open(ctx: *NativeContext, class: []const u8, path: []const u8, mode: []co
 
 pub fn opendir(ctx: *NativeContext, class: []const u8, path: []const u8, options: i64, context: ?*PhpObject) RuntimeError!?*PhpObject {
     if (current_filename) |cur| if (std.mem.eql(u8, cur, path)) {
-        try logError(ctx, options, "infinite recursion prevented", .{});
+        try logErrorAt(ctx, options, .{ .code = .RecursionDetected, .wrapper = se.user_space, .context = context }, "infinite recursion prevented", .{});
         return null;
     };
     current_filename = path;
@@ -157,11 +165,11 @@ pub fn opendir(ctx: *NativeContext, class: []const u8, path: []const u8, options
     const p = try str(ctx, path);
     defer ctx.vm.releaseValue(p);
     const ret = (try callIfExists(ctx, obj, "dir_opendir", &.{ p, .{ .int = options } })) orelse {
-        try logError(ctx, options, "\"{s}::dir_opendir\" is not implemented", .{className(ctx, obj)});
+        try logErrorAt(ctx, options, .{ .code = .NotImplemented, .wrapper = se.user_space, .context = context }, "\"{s}::dir_opendir\" is not implemented", .{className(ctx, obj)});
         return null;
     };
     if (!ret.isTruthy()) {
-        try logError(ctx, options, "\"{s}::dir_opendir\" call failed", .{className(ctx, obj)});
+        try logErrorAt(ctx, options, .{ .code = .UserspaceCallFailed, .wrapper = se.user_space, .context = context }, "\"{s}::dir_opendir\" call failed", .{className(ctx, obj)});
         return null;
     }
     const dh = try ctx.createResource("DirectoryHandle");
@@ -174,7 +182,7 @@ pub fn opendir(ctx: *NativeContext, class: []const u8, path: []const u8, options
 // the next entry dir_readdir names, owned by the caller; null at the end
 pub fn readdir(ctx: *NativeContext, w: *PhpObject) RuntimeError!?Value.String {
     const ret = (try callIfExists(ctx, w, "dir_readdir", &.{})) orelse {
-        try fs.warnDocref(ctx, "{s}::dir_readdir is not implemented!", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::dir_readdir is not implemented!", .{className(ctx, w)});
         return null;
     };
     if (ret == .bool) return null;
@@ -200,7 +208,7 @@ pub fn unlink(ctx: *NativeContext, class: []const u8, url: []const u8, context: 
     const u = try str(ctx, url);
     defer ctx.vm.releaseValue(u);
     const ret = try callIfExists(ctx, obj, "unlink", &.{u});
-    if (ret == null) try fs.warnDocref(ctx, "{s}::unlink is not implemented!", .{className(ctx, obj)});
+    if (ret == null) try se.warn(ctx, .NotImplemented, se.user_space, "{s}::unlink is not implemented!", .{className(ctx, obj)});
     return boolResult(ret);
 }
 
@@ -212,7 +220,7 @@ pub fn rename(ctx: *NativeContext, class: []const u8, from: []const u8, to: []co
     const b = try str(ctx, to);
     defer ctx.vm.releaseValue(b);
     const ret = try callIfExists(ctx, obj, "rename", &.{ a, b });
-    if (ret == null) try fs.warnDocref(ctx, "{s}::rename is not implemented!", .{className(ctx, obj)});
+    if (ret == null) try se.warn(ctx, .NotImplemented, se.user_space, "{s}::rename is not implemented!", .{className(ctx, obj)});
     return boolResult(ret);
 }
 
@@ -222,7 +230,7 @@ pub fn mkdir(ctx: *NativeContext, class: []const u8, url: []const u8, mode: i64,
     const u = try str(ctx, url);
     defer ctx.vm.releaseValue(u);
     const ret = try callIfExists(ctx, obj, "mkdir", &.{ u, .{ .int = mode }, .{ .int = options } });
-    if (ret == null) try fs.warnDocref(ctx, "{s}::mkdir is not implemented!", .{className(ctx, obj)});
+    if (ret == null) try se.warn(ctx, .NotImplemented, se.user_space, "{s}::mkdir is not implemented!", .{className(ctx, obj)});
     return boolResult(ret);
 }
 
@@ -232,7 +240,7 @@ pub fn rmdir(ctx: *NativeContext, class: []const u8, url: []const u8, options: i
     const u = try str(ctx, url);
     defer ctx.vm.releaseValue(u);
     const ret = try callIfExists(ctx, obj, "rmdir", &.{ u, .{ .int = options } });
-    if (ret == null) try fs.warnDocref(ctx, "{s}::rmdir is not implemented!", .{className(ctx, obj)});
+    if (ret == null) try se.warn(ctx, .NotImplemented, se.user_space, "{s}::rmdir is not implemented!", .{className(ctx, obj)});
     return boolResult(ret);
 }
 
@@ -251,7 +259,7 @@ pub fn metadata(ctx: *NativeContext, class: []const u8, url: []const u8, option:
     const u = try str(ctx, url);
     defer ctx.vm.releaseValue(u);
     const ret = try callIfExists(ctx, obj, "stream_metadata", &.{ u, .{ .int = option }, value });
-    if (ret == null) try fs.warnDocref(ctx, "{s}::stream_metadata is not implemented!", .{className(ctx, obj)});
+    if (ret == null) try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_metadata is not implemented!", .{className(ctx, obj)});
     return boolResult(ret);
 }
 
@@ -262,7 +270,7 @@ pub fn urlStat(ctx: *NativeContext, class: []const u8, url: []const u8, flags: i
     const u = try str(ctx, url);
     defer ctx.vm.releaseValue(u);
     const ret = (try callIfExists(ctx, obj, "url_stat", &.{ u, .{ .int = flags } })) orelse {
-        try fs.warnDocref(ctx, "{s}::url_stat is not implemented!", .{className(ctx, obj)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::url_stat is not implemented!", .{className(ctx, obj)});
         return null;
     };
     if (ret == .array) return ret.array;
@@ -276,7 +284,7 @@ pub fn read(ctx: *NativeContext, stream_obj: *PhpObject, s: *streams.Stream, w: 
     s.busy += 1;
     defer s.busy -= 1;
     const ret = (try callIfExists(ctx, w, "stream_read", &.{.{ .int = @intCast(dest.len) }})) orelse {
-        try fs.warnDocref(ctx, "{s}::stream_read is not implemented!", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_read is not implemented!", .{className(ctx, w)});
         return -1;
     };
     if (ret == .bool and !ret.bool) return -1;
@@ -287,14 +295,14 @@ pub fn read(ctx: *NativeContext, stream_obj: *PhpObject, s: *streams.Stream, w: 
         didread = bytes.len;
         if (didread > 0) {
             if (didread > dest.len) {
-                try fs.warnDocref(ctx, "{s}::stream_read - read {d} bytes more data than requested ({d} read, {d} max) - excess data will be lost", .{ className(ctx, w), didread - dest.len, didread, dest.len });
+                try se.warnNt(ctx, .UserspaceInvalidReturn, se.user_space, "{s}::stream_read - read {d} bytes more data than requested ({d} read, {d} max) - excess data will be lost", .{ className(ctx, w), didread - dest.len, didread, dest.len });
                 didread = dest.len;
             }
             @memcpy(dest[0..didread], bytes[0..didread]);
         }
     }
     const eof_ret = (try callIfExists(ctx, w, "stream_eof", &.{})) orelse {
-        try fs.warnDocref(ctx, "{s}::stream_eof is not implemented! Assuming EOF", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_eof is not implemented! Assuming EOF", .{className(ctx, w)});
         s.eof = true;
         return -1;
     };
@@ -309,13 +317,13 @@ pub fn write(ctx: *NativeContext, stream_obj: *PhpObject, s: *streams.Stream, w:
     const arg = try str(ctx, data);
     defer ctx.vm.releaseValue(arg);
     const ret = (try callIfExists(ctx, w, "stream_write", &.{arg})) orelse {
-        try fs.warnDocref(ctx, "{s}::stream_write is not implemented!", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_write is not implemented!", .{className(ctx, w)});
         return -1;
     };
     if (ret == .bool and !ret.bool) return -1;
     var didwrite = Value.toInt(ret);
     if (didwrite > 0 and didwrite > data.len) {
-        try fs.warnDocref(ctx, "{s}::stream_write wrote {d} bytes more data than requested ({d} written, {d} max)", .{ className(ctx, w), didwrite - @as(i64, @intCast(data.len)), didwrite, data.len });
+        try se.warnNt(ctx, .UserspaceInvalidReturn, se.user_space, "{s}::stream_write wrote {d} bytes more data than requested ({d} written, {d} max)", .{ className(ctx, w), didwrite - @as(i64, @intCast(data.len)), didwrite, data.len });
         didwrite = @intCast(data.len);
     }
     return @intCast(didwrite);
@@ -331,7 +339,7 @@ pub fn seek(ctx: *NativeContext, stream_obj: *PhpObject, s: *streams.Stream, w: 
     };
     if (!ret.isTruthy()) return null;
     const pos = (try callIfExists(ctx, w, "stream_tell", &.{})) orelse {
-        try fs.warnDocref(ctx, "{s}::stream_tell is not implemented!", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_tell is not implemented!", .{className(ctx, w)});
         return null;
     };
     if (pos != .int) return null;
@@ -353,17 +361,17 @@ pub fn checkLiveness(ctx: *NativeContext, stream_obj: *PhpObject, s: *streams.St
     _ = stream_obj;
     _ = s;
     const ret = (try callIfExists(ctx, w, "stream_eof", &.{})) orelse {
-        try fs.warnDocref(ctx, "{s}::stream_eof is not implemented! Assuming EOF", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_eof is not implemented! Assuming EOF", .{className(ctx, w)});
         return true;
     };
     if (ret == .bool) return ret.bool;
-    try fs.warnDocref(ctx, "{s}::stream_eof value must be of type bool, {s} given", .{ className(ctx, w), ret.valueName() });
+    try se.warn(ctx, .UserspaceInvalidReturn, se.user_space, "{s}::stream_eof value must be of type bool, {s} given", .{ className(ctx, w), ret.valueName() });
     return true;
 }
 
 pub fn stat(ctx: *NativeContext, w: *PhpObject) RuntimeError!?*PhpArray {
     const ret = (try callIfExists(ctx, w, "stream_stat", &.{})) orelse {
-        try fs.warnDocref(ctx, "{s}::stream_stat is not implemented!", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_stat is not implemented!", .{className(ctx, w)});
         return null;
     };
     if (ret == .array) return ret.array;
@@ -384,7 +392,7 @@ pub fn lock(ctx: *NativeContext, w: *PhpObject, operation: i64) RuntimeError!Opt
     }
     const ret = (try callIfExists(ctx, w, "stream_lock", &.{.{ .int = op }})) orelse {
         if (operation == 0) return .ok;
-        try fs.warnDocref(ctx, "{s}::stream_lock is not implemented!", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_lock is not implemented!", .{className(ctx, w)});
         return .err;
     };
     if (ret == .bool) return if (ret.bool) .ok else .err;
@@ -397,11 +405,11 @@ pub fn truncateSupported(ctx: *NativeContext, w: *PhpObject) bool {
 
 pub fn truncate(ctx: *NativeContext, w: *PhpObject, size: i64) RuntimeError!OptionResult {
     const ret = (try callIfExists(ctx, w, "stream_truncate", &.{.{ .int = size }})) orelse {
-        try fs.warnDocref(ctx, "{s}::stream_truncate is not implemented!", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_truncate is not implemented!", .{className(ctx, w)});
         return .err;
     };
     if (ret == .bool) return if (ret.bool) .ok else .err;
-    try fs.warnDocref(ctx, "{s}::stream_truncate value must be of type bool, {s} given", .{ className(ctx, w), ret.valueName() });
+    try se.warn(ctx, .UserspaceInvalidReturn, se.user_space, "{s}::stream_truncate value must be of type bool, {s} given", .{ className(ctx, w), ret.valueName() });
     return .err;
 }
 
@@ -412,7 +420,7 @@ pub const OPTION_READ_TIMEOUT: i64 = 4;
 
 pub fn setOption(ctx: *NativeContext, w: *PhpObject, option: i64, value: i64, extra: Value) RuntimeError!OptionResult {
     const ret = (try callIfExists(ctx, w, "stream_set_option", &.{ .{ .int = option }, .{ .int = value }, extra })) orelse {
-        try fs.warnDocref(ctx, "{s}::stream_set_option is not implemented!", .{className(ctx, w)});
+        try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_set_option is not implemented!", .{className(ctx, w)});
         return .err;
     };
     return if (ret.isTruthy()) .ok else .err;
@@ -430,16 +438,16 @@ pub fn cast(ctx: *NativeContext, stream_obj: *PhpObject, w: *PhpObject, castas: 
         st.busy -= 1;
     };
     const ret = (try callIfExists(ctx, w, "stream_cast", &.{.{ .int = castas }})) orelse {
-        if (report) try fs.warnDocref(ctx, "{s}::stream_cast is not implemented!", .{className(ctx, w)});
+        if (report) try se.warn(ctx, .NotImplemented, se.user_space, "{s}::stream_cast is not implemented!", .{className(ctx, w)});
         return null;
     };
     if (!ret.isTruthy()) return null;
     if (ret != .resource or !std.mem.eql(u8, ret.resource.class_name, "FileHandle") or value_mod.resourceClosed(ret.resource)) {
-        if (report) try fs.warnDocref(ctx, "{s}::stream_cast must return a stream resource", .{className(ctx, w)});
+        if (report) try se.warn(ctx, .UserspaceInvalidReturn, se.user_space, "{s}::stream_cast must return a stream resource", .{className(ctx, w)});
         return null;
     }
     if (ret.resource == stream_obj) {
-        if (report) try fs.warnDocref(ctx, "{s}::stream_cast must not return itself", .{className(ctx, w)});
+        if (report) try se.warn(ctx, .UserspaceInvalidReturn, se.user_space, "{s}::stream_cast must not return itself", .{className(ctx, w)});
         return null;
     }
     return ret.resource;

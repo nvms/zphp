@@ -135,6 +135,48 @@ pub const user_space = "user-space";
 pub const php_wrapper = "PHP";
 pub const no_wrapper = ":na";
 
+// the label of the wrapper php picks for url
+pub fn wrapperOf(vm: *VM, url: []const u8) []const u8 {
+    if (@import("filesystem.zig").userWrapperFor(vm, url) != null) return user_space;
+    if (std.mem.startsWith(u8, url, "data:")) return "RFC2397";
+    const colon = std.mem.indexOf(u8, url, "://") orelse return plainfile;
+    return wrapperOfScheme(url[0..colon]);
+}
+
+// the label of php's own wrapper for scheme
+pub fn wrapperOfScheme(scheme: []const u8) []const u8 {
+    const known = .{
+        .{ "php", php_wrapper },        .{ "http", "http" },  .{ "https", "https" }, .{ "ftp", "ftp" },
+        .{ "ftps", "ftp" },             .{ "data", "RFC2397" }, .{ "compress.zlib", "ZLIB" }, .{ "phar", "phar" },
+        .{ "glob", "glob" },            .{ "file", plainfile },
+    };
+    inline for (known) |k| if (std.ascii.eqlIgnoreCase(scheme, k[0])) return k[1];
+    return plainfile;
+}
+
+// the label of the wrapper a stream was opened through, or "stream" for
+// one opened through none (php_stream_error)
+pub fn streamLabel(vm: *VM, stream: *PhpObject) []const u8 {
+    if (@import("filesystem.zig").fileHandleWrapper(stream) != null) return user_space;
+    const path = stream.get("__path");
+    if (path != .string) {
+        // the std streams and php://output, which php's php:// wrapper opens
+        const fd = stream.get("__fd");
+        if (fd == .int and fd.int >= 0 and fd.int <= 2 and stream.get("__proc_ptr") == .null) return php_wrapper;
+        return "stream";
+    }
+    _ = vm;
+    if (std.mem.startsWith(u8, path.string.bytes(), "data:")) return "RFC2397";
+    const url = path.string.bytes();
+    const colon = std.mem.indexOf(u8, url, "://") orelse return plainfile;
+    const scheme = url[0..colon];
+    if (std.ascii.eqlIgnoreCase(scheme, "php")) return php_wrapper;
+    if (std.ascii.eqlIgnoreCase(scheme, "http") or std.ascii.eqlIgnoreCase(scheme, "https")) return "http";
+    if (std.ascii.eqlIgnoreCase(scheme, "compress.zlib")) return "ZLIB";
+    if (std.ascii.eqlIgnoreCase(scheme, "phar")) return "phar";
+    return plainfile;
+}
+
 // --- the state an operation collects into -----------------------------------
 
 // PHP_STREAM_ERROR_MAX_DEPTH
@@ -146,6 +188,8 @@ pub const Entry = struct {
     wrapper: []const u8,
     severity: i64,
     terminating: bool,
+    // the function the warning names, when it isn't the running one
+    func: ?[]const u8 = null,
 
     fn free(self: Entry, a: Allocator) void {
         a.free(self.message);
@@ -158,6 +202,8 @@ const Op = struct {
     context: ?*PhpObject,
     collecting: bool,
     entries: std.ArrayListUnmanaged(Entry) = .empty,
+    // the quiet count of the code that began it, back when it ends
+    saved_quiet: u32 = 0,
 };
 
 // FG(stream_error_state): the running operations, innermost last, and the
@@ -169,6 +215,10 @@ pub const State = struct {
     floor: usize = 0,
     // operations the depth limit turned down, each ending without a trace
     refused: u32 = 0,
+    // set while an opener runs without REPORT_ERRORS: the stream errors it
+    // raises are dropped. an operation run meanwhile (a user wrapper's own
+    // fopen) reports its own
+    quiet: u32 = 0,
     stored: std.ArrayListUnmanaged(Entry) = .empty,
 
     fn freeEntries(list: *std.ArrayListUnmanaged(Entry), a: Allocator) void {
@@ -188,6 +238,7 @@ pub const State = struct {
         freeEntries(&self.stored, a);
         self.floor = 0;
         self.refused = 0;
+        self.quiet = 0;
     }
 
     pub fn deinit(self: *State, vm: *VM) void {
@@ -281,10 +332,11 @@ pub fn begin(ctx: *NativeContext, context: ?*PhpObject) RuntimeError!void {
     const reporting = context orelse vm.default_stream_context;
     const collects = hasErrorOptions(reporting);
     if (collects) VM.objRetain(reporting.?);
-    state.ops.append(vm.allocator, .{ .context = if (collects) reporting else null, .collecting = collects }) catch |err| {
+    state.ops.append(vm.allocator, .{ .context = if (collects) reporting else null, .collecting = collects, .saved_quiet = state.quiet }) catch |err| {
         if (collects) vm.releaseValue(.{ .resource = reporting.? });
         return err;
     };
+    state.quiet = 0;
 }
 
 fn currentOp(state: *State) ?*Op {
@@ -303,6 +355,7 @@ pub fn end(ctx: *NativeContext) RuntimeError!void {
     }
     if (currentOp(state) == null) return;
     var op = state.ops.pop().?;
+    state.quiet = op.saved_quiet;
     defer op.entries.deinit(vm.allocator);
     defer if (op.context) |c| vm.releaseValue(.{ .resource = c });
     if (!op.collecting or op.entries.items.len == 0) {
@@ -321,6 +374,7 @@ pub fn abort(vm: *VM) void {
     }
     if (currentOp(state) == null) return;
     var op = state.ops.pop().?;
+    state.quiet = op.saved_quiet;
     State.freeEntries(&op.entries, vm.allocator);
     op.entries.deinit(vm.allocator);
     if (op.context) |c| vm.releaseValue(.{ .resource = c });
@@ -343,7 +397,7 @@ fn report(ctx: *NativeContext, context: ?*PhpObject, entries: *std.ArrayListUnma
         defer state.floor = saved_floor;
         switch (mode) {
             .err => for (entries.items) |e| {
-                @import("filesystem.zig").docrefBody(ctx, e.severity, e.message) catch |err| {
+                emit(ctx, e.func, e.severity, e.message) catch |err| {
                     failure = err;
                     break;
                 };
@@ -454,7 +508,17 @@ pub const Site = struct {
     severity: i64 = E_WARNING,
     // the context an error raised outside any operation reports with
     context: ?*PhpObject = null,
+    // the function the warning names, when it isn't the running one
+    func: ?[]const u8 = null,
 };
+
+// php_error_docref(docref, severity, "%s", message)
+fn emit(ctx: *NativeContext, func: ?[]const u8, severity: i64, message: []const u8) RuntimeError!void {
+    const name = func orelse return @import("filesystem.zig").docrefBody(ctx, severity, message);
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): {s}", .{ name, message });
+    defer ctx.allocator.free(msg);
+    return ctx.vm.raiseError(severity, msg);
+}
 
 // php_stream_wrapper_error and friends: the error goes to the running
 // operation, which reports it now or when it ends; outside any operation it
@@ -471,17 +535,21 @@ pub fn raiseBody(ctx: *NativeContext, site: Site, body: []const u8) RuntimeError
 fn raiseOwned(ctx: *NativeContext, site: Site, body: []u8) RuntimeError!void {
     const vm = ctx.vm;
     const state = &vm.stream_errors;
+    if (state.quiet > 0) {
+        vm.allocator.free(body);
+        return;
+    }
     if (currentOp(state)) |op| {
         if (op.collecting) {
             return add(vm, op, site, body);
         }
         defer vm.allocator.free(body);
-        return @import("filesystem.zig").docrefBody(ctx, site.severity, body);
+        return emit(ctx, site.func, site.severity, body);
     }
     const reporting = site.context orelse vm.default_stream_context;
     if (!hasErrorOptions(reporting)) {
         defer vm.allocator.free(body);
-        return @import("filesystem.zig").docrefBody(ctx, site.severity, body);
+        return emit(ctx, site.func, site.severity, body);
     }
     begin(ctx, reporting) catch |err| {
         vm.allocator.free(body);
@@ -492,10 +560,18 @@ fn raiseOwned(ctx: *NativeContext, site: Site, body: []u8) RuntimeError!void {
 }
 
 fn add(vm: *VM, op: *Op, site: Site, body: []u8) RuntimeError!void {
-    op.entries.append(vm.allocator, .{ .message = body, .code = site.code, .wrapper = site.wrapper, .severity = site.severity, .terminating = site.terminating }) catch |err| {
+    op.entries.append(vm.allocator, .{ .message = body, .code = site.code, .wrapper = site.wrapper, .severity = site.severity, .terminating = site.terminating, .func = site.func }) catch |err| {
         vm.allocator.free(body);
         return err;
     };
+}
+
+// f(args) with the stream errors it raises dropped, as an opener called
+// without REPORT_ERRORS drops them
+pub fn quietly(vm: *VM, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    vm.stream_errors.quiet += 1;
+    defer vm.stream_errors.quiet -= 1;
+    return @call(.auto, f, args);
 }
 
 // whether errors raised now are held for the end of an operation, so a site

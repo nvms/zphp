@@ -230,20 +230,20 @@ pub fn selectDescriptor(ctx: *NativeContext, obj: *PhpObject, report: bool) Runt
     if (!std.mem.eql(u8, obj.class_name, "FileHandle") or value_mod.resourceClosed(obj)) return null;
     const st = streams.get(obj);
     if (st) |s_| if (s_.readfilters.head != null or s_.writefilters.head != null) {
-        try filesystem.warnDocref(ctx, "Cannot cast a filtered stream on this system", .{});
+        try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot cast a filtered stream on this system", .{});
         return null;
     };
     if (filesystem.fileHandleWrapper(obj)) |w| {
         if (try user_streams.cast(ctx, obj, w, user_streams.CAST_FOR_SELECT, true)) |inner| {
             if (try selectDescriptor(ctx, inner, report)) |fd| return fd;
         }
-        try filesystem.warnDocref(ctx, "Cannot represent a stream of type user-space as a select()able descriptor", .{});
+        try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot represent a stream of type user-space as a select()able descriptor", .{});
         return null;
     }
     if (streams.memoryOf(obj) != null) {
         const path = obj.get("__path");
         const label: []const u8 = if (path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://temp")) "TEMP" else if (path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://memory")) "MEMORY" else "RFC2397";
-        try filesystem.warnDocref(ctx, "Cannot represent a stream of type {s} as a select()able descriptor", .{label});
+        try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot represent a stream of type {s} as a select()able descriptor", .{label});
         return null;
     }
     return objectFd(obj);

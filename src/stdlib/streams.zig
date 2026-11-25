@@ -5,6 +5,7 @@
 // wrapper object. reads fill the read buffer a chunk at a time through the
 // read filters; writes pass through the write filters to the raw write
 const std = @import("std");
+const se = @import("stream_errors.zig");
 const Allocator = std.mem.Allocator;
 const platform = @import("../platform.zig");
 const value_mod = @import("../runtime/value.zig");
@@ -722,7 +723,7 @@ pub fn write(ctx: *NativeContext, obj: *PhpObject, data: []const u8) RuntimeErro
     if (data.len == 0) return 0;
     const s = try of(ctx, obj);
     if (s.no_write_op or backend(obj) == .none) {
-        try fs.noticeDocref(ctx, "Stream is not writable", .{});
+        try se.notice(ctx, .NotWritable, se.streamLabel(ctx.vm, obj), "Stream is not writable", .{});
         return -1;
     }
     const bytes = if (s.writefilters.head != null)
@@ -810,7 +811,7 @@ fn emulateSeek(ctx: *NativeContext, obj: *PhpObject, s: *Stream, offset_arg: i64
         s.fatal_error = false;
         return 0;
     }
-    try fs.warnDocref(ctx, "Stream does not support seeking", .{});
+    try se.warn(ctx, .SeekNotSupported, se.streamLabel(ctx.vm, obj), "Stream does not support seeking", .{});
     return -1;
 }
 

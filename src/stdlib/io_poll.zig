@@ -592,13 +592,13 @@ fn pollDescriptor(ctx: *NativeContext, obj: *PhpObject) RuntimeError!?i64 {
         if (try user_streams.cast(ctx, obj, w, user_streams.CAST_FOR_SELECT, true)) |inner| {
             if (try pollDescriptor(ctx, inner)) |fd| return fd;
         }
-        try fs.warnDocref(ctx, "Cannot represent a stream of type user-space as a pollable descriptor", .{});
+        try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot represent a stream of type user-space as a pollable descriptor", .{});
         return null;
     }
     if (streams.memoryOf(obj) != null) {
         const path = obj.get("__path");
         const label: []const u8 = if (path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://temp")) "TEMP" else if (path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://memory")) "MEMORY" else "RFC2397";
-        try fs.warnDocref(ctx, "Cannot represent a stream of type {s} as a pollable descriptor", .{label});
+        try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot represent a stream of type {s} as a pollable descriptor", .{label});
         return null;
     }
     const fdv = obj.get("__fd");

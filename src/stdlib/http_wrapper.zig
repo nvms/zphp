@@ -216,13 +216,13 @@ pub fn open(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i6
 fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64, context: ?*PhpObject, redirect_max_arg: i64, flags: u8, headers: *PhpArray) RuntimeError!?*PhpObject {
     var redirect_max = redirect_max_arg;
     if (redirect_max < 1) {
-        try user_streams.logError(ctx, options, "Redirection limit reached, aborting", .{});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .RedirectLimit, .wrapper = "http" }, "Redirection limit reached, aborting", .{});
         return null;
     }
     const a = ctx.allocator;
     var resource = parseUrl(path) orelse return null;
     if (std.mem.indexOfAny(u8, mode, "awx+") != null) {
-        try user_streams.logError(ctx, options, "HTTP wrapper does not support writeable connections", .{});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .ModeNotSupported, .wrapper = "http" }, "HTTP wrapper does not support writeable connections", .{});
         return null;
     }
     const header_init = flags & FLAG_HEADER_INIT != 0;
@@ -246,7 +246,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         transport = transport_buf.items;
     }
     if (request_fulluri and std.mem.indexOfAny(u8, path, "\r\n") != null) {
-        try user_streams.logError(ctx, options, "HTTP wrapper full URI path does not allow CR or LF characters", .{});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidUrl, .wrapper = "http" }, "HTTP wrapper full URI path does not allow CR or LF characters", .{});
         return null;
     }
     var timeout_s: f64 = network.defaultSocketTimeoutSeconds(ctx);
@@ -254,13 +254,13 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         const d = Value.toFloat(t);
         const timeoutmax: f64 = @as(f64, @floatFromInt(std.math.maxInt(u64))) / 1000000.0;
         if (d > timeoutmax) {
-            try user_streams.logError(ctx, options, "timeout must be lower than {d}", .{@as(u64, @intFromFloat(timeoutmax))});
+            try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidParam, .wrapper = "http" }, "timeout must be lower than {d}", .{@as(u64, @intFromFloat(timeoutmax))});
             return null;
         }
         timeout_s = d;
     }
     if (use_ssl) {
-        try user_streams.logError(ctx, options, "Unable to find the socket transport \"ssl\" - did you forget to enable it when you configured PHP?", .{});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "Unable to find the socket transport \"ssl\" - did you forget to enable it when you configured PHP?", .{});
         return null;
     }
     const stream = (try network.connectTransport(ctx, transport, timeout_s, options)) orelse return null;
@@ -449,10 +449,10 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         try headers.appendCopiedString(a, shown);
         status_line = shown;
     } else {
-        try user_streams.logError(ctx, options, "HTTP request failed!", .{});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "HTTP request failed!", .{});
         return null;
     } else {
-        try user_streams.logError(ctx, options, "HTTP request failed!", .{});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "HTTP request failed!", .{});
         return null;
     }
     // the full raw status line, newline and all, is what php's failure names
@@ -468,7 +468,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         var last_line = false;
         if (line[0] == '\r') {
             if (line.len < 2 or line[1] != '\n') {
-                try user_streams.logError(ctx, options, "HTTP invalid header name (cannot start with CR character)!", .{});
+                try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidResponse, .wrapper = "http" }, "HTTP invalid header name (cannot start with CR character)!", .{});
                 return null;
             }
             last_line = true;
@@ -491,7 +491,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
             if (!ok) return null;
         } else if (!last_line) {
             if (line[0] == ' ' or line[0] == '\t') {
-                try user_streams.logError(ctx, options, "HTTP invalid response format (folding header at the start)!", .{});
+                try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidResponse, .wrapper = "http" }, "HTTP invalid response format (folding header at the start)!", .{});
                 return null;
             }
         }
@@ -514,7 +514,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         _ = try fs.closeStream(ctx, stream);
         keep_stream = true; // closed already
         const loc = info.location orelse {
-            try user_streams.logError(ctx, options, "HTTP request failed! {s}", .{raw_status});
+            try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "HTTP request failed! {s}", .{raw_status});
             return null;
         };
         var new_path: std.ArrayListUnmanaged(u8) = .empty;
@@ -541,7 +541,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
             }
         } else try new_path.appendSlice(a, loc);
         const new_resource = parseUrl(new_path.items) orelse {
-            try user_streams.logError(ctx, options, "Invalid redirect URL! {s}", .{new_path.items});
+            try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidUrl, .wrapper = "http" }, "Invalid redirect URL! {s}", .{new_path.items});
             return null;
         };
         const default_port: u16 = if (use_ssl) 443 else 80;
@@ -553,7 +553,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
                 const decoded = try fs.urlDecode(a, part);
                 defer a.free(decoded);
                 for (decoded) |c| if (std.ascii.isControl(c)) {
-                    try user_streams.logError(ctx, options, "Invalid redirect URL! {s}", .{new_path.items});
+                    try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidUrl, .wrapper = "http" }, "Invalid redirect URL! {s}", .{new_path.items});
                     return null;
                 };
             }
@@ -607,12 +607,12 @@ fn statusCode(line: []const u8) i64 {
 fn parseHeader(ctx: *NativeContext, line: []const u8, options: i64, context: ?*PhpObject, response_code: i64, headers: *PhpArray, info: *HeaderInfo) RuntimeError!bool {
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse {
         info.err = true;
-        try user_streams.logError(ctx, options, "HTTP invalid response format (no colon in header line)!", .{});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidResponse, .wrapper = "http" }, "HTTP invalid response format (no colon in header line)!", .{});
         return false;
     };
     for (line[@min(1, line.len)..colon]) |c| if (c == ' ' or c == '\t') {
         info.err = true;
-        try user_streams.logError(ctx, options, "HTTP invalid response format (space in header name)!", .{});
+        try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidResponse, .wrapper = "http" }, "HTTP invalid response format (space in header name)!", .{});
         return false;
     };
     var value = line[colon + 1 ..];
@@ -627,7 +627,7 @@ fn parseHeader(ctx: *NativeContext, line: []const u8, options: i64, context: ?*P
         }
         if (value.len > HEADER_MAX_LOCATION_SIZE) {
             info.err = true;
-            try user_streams.logError(ctx, options, "HTTP Location header size is over the limit of {d} bytes", .{HEADER_MAX_LOCATION_SIZE});
+            try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidResponse, .wrapper = "http" }, "HTTP Location header size is over the limit of {d} bytes", .{HEADER_MAX_LOCATION_SIZE});
             return false;
         }
         if (info.location) |l| ctx.allocator.free(l);
