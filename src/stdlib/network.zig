@@ -1040,6 +1040,8 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
         error.ParseIpv6Address => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse IPv6 address \"{s}\"", .{rest}),
         error.ParsePort => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse port of address \"{s}\"", .{rest}),
         error.NulInHostname => owned = try ctx.allocator.dupe(u8, "The hostname must not contain null bytes"),
+        error.SoRcvbufRange => owned = try std.fmt.allocPrint(ctx.allocator, "so_rcvbuf context option must be between 1 and {d}", .{std.math.maxInt(c_int)}),
+        error.SoSndbufRange => owned = try std.fmt.allocPrint(ctx.allocator, "so_sndbuf context option must be between 1 and {d}", .{std.math.maxInt(c_int)}),
         error.UnsupportedTransport => owned = try std.fmt.allocPrint(ctx.allocator, "Unable to find the socket transport \"{s}\" - did you forget to enable it when you configured PHP?", .{target[0 .. std.mem.indexOf(u8, target, "://") orelse 0]}),
         else => {},
     }
@@ -1139,7 +1141,7 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     try finiteTimeout(ctx, args, 3, "stream_socket_client(): Argument #4 ($timeout)");
     const flags: i64 = if (args.len > 4) Value.toInt(args[4]) else 4;
-    _ = try streamContext(ctx, if (args.len > 5) args[5] else null);
+    const context = try streamContext(ctx, if (args.len > 5) args[5] else null);
     // without STREAM_CLIENT_CONNECT php makes the transport's stream and
     // never parses the address or connects: a socket stream with no socket
     if ((flags & 4) == 0) unconnected: {
@@ -1167,6 +1169,11 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
         try filesystem.attachContext(ctx, obj, if (args.len > 5) args[5] else null);
         return NativeResult.borrowed(.{ .resource = obj });
     }
+    // php_tcp_sockop_connect reads the buffer sizes before it connects
+    const scheme, _ = splitScheme(args[0].string.bytes());
+    if (!std.ascii.eqlIgnoreCase(scheme, "unix") and !std.ascii.eqlIgnoreCase(scheme, "udg")) {
+        _ = socketOptions(context) catch |err| return failConnect(ctx, args, 1, "stream_socket_client", args[0].string.bytes(), err);
+    }
     const result = try connectStream(ctx, args, 1, args[0].string.bytes(), if (args.len > 3) args[3] else null, (flags & 2) != 0, "stream_socket_client");
     // the socket keeps the context it was made with (php_stream_xport_create)
     if (result.value == .resource) try filesystem.attachContext(ctx, result.value.resource, if (args.len > 5) args[5] else null);
@@ -1193,7 +1200,9 @@ fn native_stream_socket_server(ctx: *NativeContext, args: []const Value) Runtime
     const flags: i64 = if (args.len > 3) Value.toInt(args[3]) else 12;
     const context = try streamContext(ctx, if (args.len > 4) args[4] else null);
     const endpoint = try fitUnixPath(ctx, parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, 1, "stream_socket_server", target, err), "stream_socket_server");
-    const sock = listenSocket(endpoint, flags, contextBacklog(context)) catch |err| return failConnect(ctx, args, 1, "stream_socket_server", target, err);
+    // unix sockets bind before the socket options are read
+    const opts: SockOpts = if (endpoint == .unix or endpoint == .udg) .{} else socketOptions(context) catch |err| return failConnect(ctx, args, 1, "stream_socket_server", target, err);
+    const sock = listenSocket(endpoint, flags, contextBacklog(context), opts) catch |err| return failConnect(ctx, args, 1, "stream_socket_server", target, err);
     try reportSocketError(ctx, args, 1, null);
     const obj = try endpointStream(ctx, sock, endpoint, true, target);
     try obj.set(ctx.allocator, "__server", .{ .bool = true });
@@ -1204,13 +1213,21 @@ fn native_stream_socket_server(ctx: *NativeContext, args: []const Value) Runtime
 // why the last unix bind failed, for error.UnixBindFailed's text
 threadlocal var unix_bind_error: anyerror = error.Unexpected;
 
-fn listenSocket(endpoint: Endpoint, flags: i64, backlog: u31) !std.posix.socket_t {
+fn listenSocket(endpoint: Endpoint, flags: i64, backlog: u31, opts: SockOpts) !std.posix.socket_t {
     const addr = try endpointAddress(endpoint);
     const sock = try endpointSocket(endpoint, addr);
     errdefer platform.closeSocket(platform.socketToInt(sock));
-    // php sets it on every platform; on windows that lets a second server
-    // take a port that is already bound, which php allows there too
-    if (endpoint == .tcp or endpoint == .udp) try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+    // php sets it on every platform unless the context turns it off; on
+    // windows that lets a second server take a port that is already bound,
+    // which php allows there too
+    if (endpoint == .tcp or endpoint == .udp) {
+        if (opts.reuseaddr) try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+        if (comptime @hasDecl(std.posix.SO, "REUSEPORT")) {
+            if (opts.reuseport) try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, &std.mem.toBytes(@as(c_int, 1)));
+        }
+        if (opts.rcvbuf) |n| try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &std.mem.toBytes(n));
+        if (opts.sndbuf) |n| try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &std.mem.toBytes(n));
+    }
     if ((flags & 4) != 0) sys.bind(sock, &addr.any, addr.getOsSockLen()) catch |err| {
         // php 8.6's unix bind records the system's text for the failure,
         // though no code
@@ -1226,6 +1243,45 @@ fn listenSocket(endpoint: Endpoint, flags: i64, backlog: u31) !std.posix.socket_
         try sys.listen(sock, backlog);
     }
     return sock;
+}
+
+// the socket context options a bind or connect applies (xp_socket.c)
+const SockOpts = struct {
+    // on unless the option turns it off
+    reuseaddr: bool = true,
+    reuseport: bool = false,
+    rcvbuf: ?c_int = null,
+    sndbuf: ?c_int = null,
+};
+
+fn socketOption(context: ?*PhpObject, name: []const u8) ?Value {
+    const c = context orelse return null;
+    const options = c.get("options");
+    if (options != .array) return null;
+    const socket_opts = options.array.get(.{ .string = Value.String.borrowed("socket") });
+    if (socket_opts != .array) return null;
+    const key: PhpArray.Key = .{ .string = Value.String.borrowed(name) };
+    if (!socket_opts.array.contains(key)) return null;
+    return socket_opts.array.get(key);
+}
+
+// php_sockop_parse_buffer_sizes and the bind flags: a buffer size out of
+// range fails the operation with php's text
+fn socketOptions(context: ?*PhpObject) error{ SoRcvbufRange, SoSndbufRange }!SockOpts {
+    var opts: SockOpts = .{};
+    if (socketOption(context, "so_rcvbuf")) |v| {
+        const n = Value.toInt(v);
+        if (n < 1 or n > std.math.maxInt(c_int)) return error.SoRcvbufRange;
+        opts.rcvbuf = @intCast(n);
+    }
+    if (socketOption(context, "so_sndbuf")) |v| {
+        const n = Value.toInt(v);
+        if (n < 1 or n > std.math.maxInt(c_int)) return error.SoSndbufRange;
+        opts.sndbuf = @intCast(n);
+    }
+    if (socketOption(context, "so_reuseport")) |v| opts.reuseport = v.isTruthy();
+    if (socketOption(context, "so_reuseaddr")) |v| opts.reuseaddr = v.isTruthy();
+    return opts;
 }
 
 // the context's socket.backlog option, php's default otherwise
