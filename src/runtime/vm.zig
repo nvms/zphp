@@ -18788,6 +18788,9 @@ pub const VM = struct {
     fn callUserErrorHandler(self: *VM, level: i64, msg: []const u8, at: SourcePosition) RuntimeError!bool {
         const handler = self.user_error_handler orelse return false;
         if ((self.user_error_handler_mask & level) == 0) return false;
+        // zend_call_function calls nothing while an exception is pending,
+        // and zend_error then drops the error: the handler had it
+        if (self.pending_exception != null) return true;
         const message = Value{ .string = try Value.String.create(self.allocator, msg) };
         defer message.string.release();
         // errors raised inside the handler take the default path

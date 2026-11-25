@@ -951,7 +951,7 @@ fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
         if (vm.pending_exception != null and try handleOrReport(allocator, vm)) failed = true;
     };
     // and the streams still open are closed, flushing their write filters
-    @import("stdlib/streams.zig").closeAllAtShutdown(vm);
+    if (@import("stdlib/streams.zig").closeAllAtShutdown(vm) and try handleOrReport(allocator, vm)) failed = true;
     return failed;
 }
 

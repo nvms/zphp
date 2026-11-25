@@ -872,14 +872,17 @@ pub fn destroyed(vm: *VM, obj: *PhpObject) void {
 }
 
 // php_request_shutdown closes the resources still open, last made first,
-// after the destructors and the output buffers
-pub fn closeAllAtShutdown(vm: *VM) void {
+// after the destructors and the output buffers. a throwable a filter's
+// callback leaves (no php code is running to catch it) is php's fatal
+// uncaught exception, which ends the closing: true when one is left pending
+// for the caller to report
+pub fn closeAllAtShutdown(vm: *VM) bool {
     var open: std.ArrayListUnmanaged(*PhpObject) = .empty;
     defer open.deinit(vm.allocator);
     for (vm.objects.items) |obj| {
         if (!obj.resource or obj.pooled or obj.native.kind != .stream) continue;
         if (value_mod.resourceClosed(obj)) continue;
-        open.append(vm.allocator, obj) catch return;
+        open.append(vm.allocator, obj) catch return false;
     }
     std.mem.sort(*PhpObject, open.items, {}, struct {
         fn gt(_: void, a: *PhpObject, b: *PhpObject) bool {
@@ -893,8 +896,17 @@ pub fn closeAllAtShutdown(vm: *VM) void {
         fs.docref_fallback = saved;
         at_shutdown = false;
     }
+    // the engine closes them: a callback a filter runs is called by no user
+    // frame, and what it raises names no file
+    var engine = vm.engineCall();
+    vm.native_call = &engine;
+    defer vm.native_call = engine.outer;
+    const outer_finished = vm.finished_frames;
+    vm.finished_frames = vm.frame_count;
+    defer vm.finished_frames = outer_finished;
     for (open.items) |obj| {
         destroyed(vm, obj);
-        vm.discardPending();
+        if (vm.pending_exception != null) return true;
     }
+    return false;
 }

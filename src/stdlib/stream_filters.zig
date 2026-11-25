@@ -1537,12 +1537,93 @@ fn createUserFilter(ctx: *NativeContext, name: []const u8, class_arg: []const u8
     obj.retain();
     var keep = false;
     defer if (!keep) ctx.vm.releaseValue(.{ .object = obj });
-    try obj.setCopiedString(ctx.allocator, "filtername", name);
-    try obj.set(ctx.allocator, "params", params orelse .null);
-    const ret = try callIfExists(ctx, obj, "onCreate", &.{});
-    if (ret) |r| if (r == .bool and !r.bool) return null;
+    // add_property_string / add_property_zval: writes from outside the
+    // class, so its visibility, types and dynamic property rules apply; the
+    // second runs with the first one's exception pending and chains its own
+    const name_value = try Value.String.create(ctx.allocator, name);
+    defer name_value.release();
+    try writeFilterProperty(ctx, obj, "filtername", .{ .string = name_value });
+    try writeFilterProperty(ctx, obj, "params", params orelse .null);
+    // the filter is made even then (onCreate isn't called), and runs when the
+    // stream is written or closed
+    if (ctx.vm.pending_exception == null) {
+        const ret = try callIfExists(ctx, obj, "onCreate", &.{});
+        if (ret) |r| if (r == .bool and !r.bool) return null;
+    }
     keep = true;
     return try newFilter(ctx, name, .{ .user = obj });
+}
+
+fn writeFilterProperty(ctx: *NativeContext, obj: *PhpObject, comptime name: []const u8, v: Value) RuntimeError!void {
+    const vm = ctx.vm;
+    // the earlier exception stays pending while this write runs (an error
+    // handler isn't called then, a type error isn't raised)
+    const previous = vm.pending_exception;
+    if (previous) |p| VM.stackRetain(p);
+    defer if (previous) |p| vm.stackRelease(p);
+    writeFilterPropertyChecked(ctx, obj, name, v) catch |err| {
+        if (err != error.RuntimeError or vm.pending_exception == null) return err;
+    };
+    const p = previous orelse return;
+    const current = vm.pending_exception orelse return;
+    if (current == .object and !(p == .object and p.object == current.object)) try chainPrevious(ctx, current.object, p);
+}
+
+// zend_exception_set_previous: the exception at the end of exc's chain gets
+// prev as its previous
+fn chainPrevious(ctx: *NativeContext, exc: *PhpObject, prev: Value) RuntimeError!void {
+    var last = exc;
+    while (true) {
+        const next = last.get("previous");
+        if (next != .object) break;
+        last = next.object;
+    }
+    try last.set(ctx.allocator, "previous", prev);
+}
+
+fn writeFilterPropertyChecked(ctx: *NativeContext, obj: *PhpObject, comptime name: []const u8, v: Value) RuntimeError!void {
+    const vm = ctx.vm;
+    const vr = vm.findPropertyVisibility(obj.class_name, name);
+    if (vr.declared) {
+        if (vr.visibility != .public) return throwFmt(ctx, "Error", "Cannot access {s} property {s}::$" ++ name, .{ @tagName(vr.visibility), vm.declaredClassName(obj.class_name) });
+        // zend_verify_property_type_error raises nothing over a pending
+        // exception; the value isn't stored
+        if (vm.pending_exception != null and vr.type_str.len > 0 and v != .null and
+            try vm.propertyTypeAccepts(v, vr.type_str, vr.defining_class, false) == null) return;
+        if (!try assignTypedProperty(ctx, obj, name, v)) return error.RuntimeError;
+        return;
+    }
+    switch (vm.dynamicPropertyRule(obj)) {
+        .allowed => {},
+        .deprecated => {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::$" ++ name ++ " is deprecated", .{vm.declaredClassName(obj.class_name)});
+            defer ctx.allocator.free(msg);
+            try vm.raiseError(8192, msg);
+        },
+        .forbidden => return throwFmt(ctx, "Error", "Cannot create dynamic property {s}::$" ++ name, .{vm.declaredClassName(obj.class_name)}),
+    }
+    try obj.set(ctx.allocator, name, v);
+}
+
+fn throwFmt(ctx: *NativeContext, class_name: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException(class_name, msg);
+    return error.RuntimeError;
+}
+
+// zend_is_callable_ex's reason the filter's filter() can't be called from
+// outside its class, or null when it can
+fn filterUncallable(ctx: *NativeContext, obj: *PhpObject) RuntimeError!?[]u8 {
+    const vm = ctx.vm;
+    const class = vm.declaredClassName(obj.class_name);
+    if (!vm.hasMethod(obj.class_name, "filter")) {
+        if (vm.hasMethod(obj.class_name, "__call")) return null;
+        return try std.fmt.allocPrint(ctx.allocator, "Invalid callback {s}::filter, class {s} does not have a method \"filter\"", .{ class, class });
+    }
+    const vis = vm.findMethodVisibility(obj.class_name, "filter");
+    if (vis.visibility == .public or vm.hasMethod(obj.class_name, "__call")) return null;
+    return try std.fmt.allocPrint(ctx.allocator, "Invalid callback {s}::filter, cannot access {s} method {s}::filter()", .{ class, @tagName(vis.visibility), vm.declaredClassName(vis.defining_class) });
 }
 
 fn userFilter(ctx: *NativeContext, stream_obj: *PhpObject, f: *Filter, obj: *PhpObject, in: *Brigade, out: *Brigade, consumed: ?*usize, flags: Flags) RuntimeError!Status {
@@ -1569,8 +1650,28 @@ fn userFilter(ctx: *NativeContext, stream_obj: *PhpObject, f: *Filter, obj: *Php
     }
     var args = [_]Value{ .{ .resource = in_res }, .{ .resource = out_res }, if (consumed) |p| .{ .int = @intCast(p.*) } else .null, .{ .bool = flags == .flush_close } };
     var ret: Status = .err_fatal;
+    if (try filterUncallable(ctx, obj)) |msg| {
+        defer ctx.allocator.free(msg);
+        // zend_throw_error: with no php code running (the stream closed at
+        // shutdown) the error is fatal at once
+        if (streams.at_shutdown) {
+            try ctx.vm.raiseErrorAt(1, msg, .{ .file = "Unknown", .line = 0 });
+        } else {
+            try ctx.vm.setPendingException("Error", msg);
+        }
+        if (in.head != null) try fs.warnDocref(ctx, "Unprocessed filter buckets remaining on input brigade", .{});
+        if (has_stream) _ = try assignStreamProperty(ctx, obj, .null);
+        return .err_fatal;
+    }
     const result = try ctx.vm.callMethodRef(obj, "filter", &args);
-    ret = switch (Value.toInt(result)) {
+    // convert_to_long: an object converts with a warning
+    const code: i64 = if (result == .object) blk: {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Object of class {s} could not be converted to int", .{ctx.vm.declaredClassName(result.object.class_name)});
+        defer ctx.allocator.free(msg);
+        if (streams.at_shutdown) try ctx.vm.raiseErrorAt(2, msg, .{ .file = "Unknown", .line = 0 }) else try ctx.vm.raiseError(2, msg);
+        break :blk 1;
+    } else Value.toInt(result);
+    ret = switch (code) {
         0 => .err_fatal,
         1 => .feed_me,
         2 => .pass_on,
@@ -1791,6 +1892,9 @@ fn applyFilter(ctx: *NativeContext, args: []const Value, comptime func: []const 
     // the stream holds the resource as long as the filter lives
     res.retain();
     f.resource = res;
+    // a user filter whose properties refused their values is appended with
+    // the exception pending
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
     return NativeResult.borrowed(.{ .resource = res });
 }
 
