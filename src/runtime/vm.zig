@@ -27435,9 +27435,9 @@ pub const VM = struct {
                 try std.fmt.allocPrint(self.allocator, "Cannot unset {s}::${s}", .{ self.declaredClassName(obj.class_name), name })
             else
                 try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property DatePeriod::${s}", .{name});
-        } else if (action == .write and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef and !obj.isUnset(name) and !(self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name))) {
-            // zend_std_write_property: an initialized readonly property is
-            // refused before its set visibility is
+        } else if (action == .write and vr.is_readonly and self.propVisible(vr, name, vr.visibility) and obj.rawForScope(name, vr.defining_class) != .undef and !obj.isUnset(name) and !(self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name))) {
+            // zend_std_write_property: an initialized readonly property the
+            // scope can see is refused before its set visibility is
             msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ class_names.display(vr.defining_class), name });
         } else if (action == .unset and vr.is_readonly and self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name)) {
             // __clone may unset a readonly property once
