@@ -26924,6 +26924,12 @@ pub const VM = struct {
         return self.isInstanceOf(scope, target) or self.isInstanceOf(target, scope);
     }
 
+    // zend_check_method_accessible: a protected method is visible from a
+    // class related to the one that first declared it
+    pub fn methodVisible(self: *VM, defining: []const u8, method: []const u8, vis: ClassDef.Visibility) bool {
+        return vis == .public or self.checkVisibility(defining, vis) or self.protectedRootVisible(defining, method, vis);
+    }
+
     fn protectedRootVisible(self: *VM, defining: []const u8, method: []const u8, vis: ClassDef.Visibility) bool {
         if (vis != .protected) return false;
         var root = defining;

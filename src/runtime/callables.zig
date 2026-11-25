@@ -157,7 +157,7 @@ fn resolveMethod(vm: *VM, site: *Site, method: []const u8, origin: ?[]const u8) 
         found = m;
         // an inaccessible method gives way to the magic method that would
         // take the call
-        if (m.visibility != .public and !vm.checkVisibility(m.class, m.visibility)) {
+        if (!vm.methodVisible(m.class, m.name, m.visibility)) {
             const magic: []const u8 = if (site.object != null) "__call" else "__callStatic";
             if (vm.hasMethod(calling, magic)) via_handler = true;
         }
@@ -188,7 +188,7 @@ fn resolveMethod(vm: *VM, site: *Site, method: []const u8, origin: ?[]const u8) 
         .{ .static_method = .{ .registered = m.registered, .called_class = if (site.object) |obj| obj.class_name else site.called orelse calling } }
     else
         .{ .method = .{ .object = site.object.?, .name = m.name, .registered = if (std.mem.eql(u8, calling, site.object.?.class_name)) null else m.registered } };
-    if (m.visibility != .public and !vm.checkVisibility(m.class, m.visibility)) {
+    if (!vm.methodVisible(m.class, m.name, m.visibility)) {
         return .{ .failure = .{ .inaccessible = .{ .visibility = m.visibility, .class = vm.declaredClassName(calling), .method = m.name, .scope = scope, .direct = callee } } };
     }
     return .{ .callee = callee };
@@ -319,7 +319,7 @@ pub fn resolveDynamic(vm: *VM, callable: Value) RuntimeError!Resolution {
 fn staticCallee(vm: *VM, class: []const u8, method: []const u8) RuntimeError!Resolution {
     const scope = vm.currentDefiningClass();
     if (try findMethod(vm, class, method)) |m| {
-        if (m.visibility == .public or vm.checkVisibility(m.class, m.visibility)) {
+        if (vm.methodVisible(m.class, m.name, m.visibility)) {
             if (m.is_static == false) return .{ .failure = .{ .non_static = .{ .class = vm.declaredClassName(m.class), .method = m.name } } };
             return .{ .callee = .{ .static_method = .{ .registered = m.registered, .called_class = class } } };
         }
@@ -357,7 +357,7 @@ fn instanceCallee(vm: *VM, obj: *PhpObject, method: []const u8) RuntimeError!Res
         return .{ .callee = .{ .method = .{ .object = obj, .name = registered[sep + 2 ..], .registered = registered } } };
     };
     if (try findMethod(vm, obj.class_name, method)) |m| {
-        if (m.visibility == .public or vm.checkVisibility(m.class, m.visibility)) {
+        if (vm.methodVisible(m.class, m.name, m.visibility)) {
             if (m.is_static == true) return .{ .callee = .{ .static_method = .{ .registered = m.registered, .called_class = obj.class_name } } };
             return .{ .callee = .{ .method = .{ .object = obj, .name = m.name } } };
         }
