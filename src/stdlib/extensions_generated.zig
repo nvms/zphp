@@ -658,6 +658,7 @@ pub const functions = Map.initComptime(.{
     .{ "libxml_disable_entity_loader", "libxml" },
     .{ "libxml_get_errors", "libxml" },
     .{ "libxml_get_last_error", "libxml" },
+    .{ "libxml_get_external_entity_loader", "libxml" },
     .{ "libxml_set_external_entity_loader", "libxml" },
     .{ "libxml_use_internal_errors", "libxml" },
     .{ "link", "standard" },

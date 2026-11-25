@@ -2063,6 +2063,7 @@ pub const libxml_entries = .{
     .{ "libxml_get_last_error", libxmlGetLastError },
     .{ "libxml_disable_entity_loader", libxmlDisableEntityLoader },
     .{ "libxml_set_external_entity_loader", libxmlSetExternalEntityLoader },
+    .{ "libxml_get_external_entity_loader", libxmlGetExternalEntityLoader },
 };
 
 fn libxmlUseInternalErrors(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2119,8 +2120,18 @@ fn libxmlDisableEntityLoader(_: *NativeContext, args: []const Value) RuntimeErro
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn libxmlSetExternalEntityLoader(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+// the loader is kept for libxml_get_external_entity_loader(); zphp's parsing
+// doesn't call it
+fn libxmlSetExternalEntityLoader(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const loader: Value = if (args.len > 0) args[0] else .null;
+    VM.retainValue(loader);
+    ctx.vm.releaseValue(ctx.vm.libxml_entity_loader);
+    ctx.vm.libxml_entity_loader = loader;
     return NativeResult.scalar(.{ .bool = true });
+}
+
+fn libxmlGetExternalEntityLoader(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.share(ctx.vm.libxml_entity_loader);
 }
 
 // the request-end sweep: wrappers still alive let go of their trees

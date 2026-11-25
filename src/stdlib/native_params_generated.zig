@@ -3468,6 +3468,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "libxml_disable_entity_loader", Signature{ .params = &[_]Param{ .{ .name = "disable", .default = .{ .bool = true }, .type = "bool" } }, .returns = "bool" } },
     .{ "libxml_get_errors", Signature{ .params = &[_]Param{}, .returns = "array" } },
     .{ "libxml_get_last_error", Signature{ .params = &[_]Param{}, .returns = "LibXMLError|false" } },
+    .{ "libxml_get_external_entity_loader", Signature{ .params = &[_]Param{}, .returns = "?callable" } },
     .{ "libxml_set_external_entity_loader", Signature{ .params = &[_]Param{ .{ .name = "resolver_function", .type = "?callable" } }, .returns = "true" } },
     .{ "libxml_use_internal_errors", Signature{ .params = &[_]Param{ .{ .name = "use_errors", .default = .null, .type = "?bool" } }, .returns = "bool" } },
     .{ "link", Signature{ .params = &[_]Param{ .{ .name = "target", .type = "string" }, .{ .name = "link", .type = "string" } }, .returns = "bool" } },

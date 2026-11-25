@@ -1098,6 +1098,9 @@ pub const VM = struct {
     // here; on object destruct we walk this list to remove entries whose key
     // is the just-destructed object (weak semantics)
     weakmaps: std.ArrayListUnmanaged(*PhpObject) = .empty,
+    // the callable libxml_set_external_entity_loader() set, for
+    // libxml_get_external_entity_loader(); held, released by reset()
+    libxml_entity_loader: Value = .null,
     // each object's WeakReference, which php creates once per target
     weak_references: std.AutoHashMapUnmanaged(*PhpObject, *PhpObject) = .{},
     // cycle collector candidate roots whose refcount decremented without
@@ -4186,6 +4189,8 @@ pub const VM = struct {
         self.lambda_cache.clearRetainingCapacity();
         if (self.duration_cache) |cached| self.releaseValue(.{ .object = cached });
         self.duration_cache = null;
+        self.releaseValue(self.libxml_entity_loader);
+        self.libxml_entity_loader = .null;
         self.stream_errors.reset(self);
         self.iap_positions.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();
