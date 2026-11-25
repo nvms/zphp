@@ -314,7 +314,9 @@ fn newFilter(ctx: *NativeContext, name: []const u8, impl: Impl) RuntimeError!*Fi
 
 fn createWith(ctx: *NativeContext, factory: Factory, name: []const u8, params: ?Value) RuntimeError!?*Filter {
     switch (factory) {
-        .user => |class| return createUserFilter(ctx, name, class, params),
+        // the streams php closes at shutdown close after the user filters'
+        // RSHUTDOWN dropped their map: the factory stays, creating fails
+        .user => |class| return if (streams.at_shutdown) null else createUserFilter(ctx, name, class, params),
         .builtin => |b| {
             if (std.mem.eql(u8, b, "string.rot13")) return try newFilter(ctx, name, .rot13);
             if (std.mem.eql(u8, b, "string.toupper")) return try newFilter(ctx, name, .toupper);
