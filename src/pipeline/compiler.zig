@@ -303,7 +303,10 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     if (origin.auto_prepend.len > 0) try emitAutoRequire(&c, origin.auto_prepend);
     c.namespace = "";
     c.use_aliases.clearRetainingCapacity();
+    // a hoisted class compiles under the ticks declared before it, and the
+    // file then compiles from the top again
     try compiler_class.hoistEarlyClasses(&c, ast.extraSlice(root.data.lhs));
+    c.ticks = 0;
     c.namespace = "";
     c.use_aliases.clearRetainingCapacity();
     c.use_fn_aliases.clearRetainingCapacity();
@@ -965,7 +968,7 @@ pub const Compiler = struct {
     }
 
     // declare(ticks=N): N from a literal, as zend_compile_declare requires
-    fn declaredTicks(self: *Compiler, node: Ast.Node) Error!?u16 {
+    pub fn declaredTicks(self: *Compiler, node: Ast.Node) Error!?u16 {
         var t = node.main_token + 1;
         while (t + 2 < node.data.lhs) : (t += 1) {
             if (self.ast.tokens[t].tag != .identifier or !std.ascii.eqlIgnoreCase(self.ast.tokenSlice(t), "ticks")) continue;

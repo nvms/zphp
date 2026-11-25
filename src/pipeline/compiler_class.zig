@@ -2938,6 +2938,10 @@ pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
             .use_fn_stmt => try compiler_stmt.compileUseFn(self, node),
             .use_const_stmt => try compiler_stmt.compileUseConst(self, node),
             .block => try hoistEarlyClasses(self, self.ast.extraSlice(node.data.lhs)),
+            // declare(ticks=N); holds for the rest of the file
+            .declare_stmt => if (node.data.rhs == 0) {
+                if (try self.declaredTicks(node)) |n| self.ticks = n;
+            },
             .class_decl => if (classDeclEarlyBindable(self, node)) {
                 try notePhpBound(self, node);
                 self.current_source_offset = self.ast.tokens[node.main_token].start;
