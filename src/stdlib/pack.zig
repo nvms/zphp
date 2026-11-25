@@ -126,6 +126,28 @@ fn packValueError(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) 
     return error.RuntimeError;
 }
 
+const Endian = enum { none, little, big };
+
+// php 8.6's '<' and '>' after a format code
+fn endianModifier(c: u8) Endian {
+    return switch (c) {
+        '<' => .little,
+        '>' => .big,
+        else => .none,
+    };
+}
+
+// the modifier rules pack() and unpack() share: s S l L q Q f d take one,
+// the codes with an endianness of their own refuse it, the rest don't know it
+fn checkEndian(ctx: *NativeContext, code: u8, endian: Endian) RuntimeError!void {
+    if (endian == .none) return;
+    switch (code) {
+        's', 'S', 'l', 'L', 'q', 'Q', 'f', 'd' => {},
+        'n', 'v', 'N', 'V', 'J', 'P', 'e', 'E', 'g', 'G' => return packValueError(ctx, "Endianness modifier '{c}' cannot be applied to format code '{c}' which already has inherent endianness", .{ @as(u8, if (endian == .little) '<' else '>'), code }),
+        else => return packValueError(ctx, "Endianness modifier is not supported for format code '{c}'", .{code}),
+    }
+}
+
 // PHP_FUNCTION(pack) (ext/standard/pack.c): the format is read once into
 // codes and counts, the output sized, then written
 fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -142,6 +164,8 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     // a '*' string argument converted once, as php converts it in place
     const star_strings = try ctx.allocator.alloc(?[]const u8, format.len);
     defer ctx.allocator.free(star_strings);
+    const endians = try ctx.allocator.alloc(Endian, format.len);
+    defer ctx.allocator.free(endians);
     var formatcount: usize = 0;
     var currentarg: i64 = 0;
 
@@ -151,6 +175,11 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         i += 1;
         var arg: i64 = 1;
         star_strings[formatcount] = null;
+        var endian: Endian = .none;
+        if (i < format.len) {
+            endian = endianModifier(format[i]);
+            if (endian != .none) i += 1;
+        }
         if (i < format.len) {
             const c = format[i];
             if (c == '*') {
@@ -165,6 +194,8 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
                 i = end;
             }
         }
+        // an unknown code is its own error before the modifier's
+        if (isFormatCode(code)) try checkEndian(ctx, code, endian);
         switch (code) {
             'x', 'X', '@' => if (arg < 0) {
                 try filesystem.warnDocref(ctx, "Type {c}: '*' ignored", .{code});
@@ -191,6 +222,7 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         }
         codes[formatcount] = code;
         counts[formatcount] = arg;
+        endians[formatcount] = endian;
     }
     if (currentarg < num_args) try filesystem.warnDocref(ctx, "{d} arguments unused", .{num_args - currentarg});
 
@@ -225,7 +257,7 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     @memset(output, 0);
     outputpos = 0;
     currentarg = 0;
-    for (codes[0..formatcount], counts[0..formatcount], star_strings[0..formatcount]) |code, count, star| {
+    for (codes[0..formatcount], counts[0..formatcount], star_strings[0..formatcount], endians[0..formatcount]) |code, count, star, endian| {
         var arg = count;
         switch (code) {
             'a', 'A', 'Z' => {
@@ -281,7 +313,7 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
                     'i', 'I', 'l', 'L', 'N', 'V' => 4,
                     else => 8,
                 };
-                const big = code == 'n' or code == 'N' or code == 'J';
+                const big = code == 'n' or code == 'N' or code == 'J' or endian == .big;
                 while (arg > 0) : (arg -= 1) {
                     const v: u64 = @bitCast(try argLong(ctx, argv[@intCast(currentarg)]));
                     currentarg += 1;
@@ -297,13 +329,13 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
             'f', 'g', 'G' => while (arg > 0) : (arg -= 1) {
                 const v: f32 = @floatCast(Value.toFloat(argv[@intCast(currentarg)]));
                 currentarg += 1;
-                std.mem.writeInt(u32, output[@intCast(outputpos)..][0..4], @bitCast(v), if (code == 'G') .big else .little);
+                std.mem.writeInt(u32, output[@intCast(outputpos)..][0..4], @bitCast(v), if (code == 'G' or endian == .big) .big else .little);
                 outputpos += 4;
             },
             'd', 'e', 'E' => while (arg > 0) : (arg -= 1) {
                 const v: f64 = Value.toFloat(argv[@intCast(currentarg)]);
                 currentarg += 1;
-                std.mem.writeInt(u64, output[@intCast(outputpos)..][0..8], @bitCast(v), if (code == 'E') .big else .little);
+                std.mem.writeInt(u64, output[@intCast(outputpos)..][0..8], @bitCast(v), if (code == 'E' or endian == .big) .big else .little);
                 outputpos += 8;
             },
             'x' => {
@@ -351,6 +383,11 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         const type_code = format[0];
         format = format[1..];
         var repetitions: i64 = 1;
+        var endian: Endian = .none;
+        if (format.len > 0) {
+            endian = endianModifier(format[0]);
+            if (endian != .none) format = format[1..];
+        }
         if (format.len > 0) {
             const c = format[0];
             if (c >= '0' and c <= '9') {
@@ -373,6 +410,8 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         format = format[name_end..];
         const argb = repetitions;
 
+        if (isFormatCode(type_code)) try checkEndian(ctx, type_code, endian);
+        const ord: std.builtin.Endian = if (endian == .big) .big else .little;
         var size: i64 = 0;
         switch (type_code) {
             'X' => {
@@ -455,20 +494,24 @@ fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
                     },
                     'c' => val = .{ .int = @as(i8, @bitCast(input[pos])) },
                     'C' => val = .{ .int = input[pos] },
-                    's' => val = .{ .int = std.mem.readInt(i16, input[pos..][0..2], .little) },
-                    'S', 'v' => val = .{ .int = std.mem.readInt(u16, input[pos..][0..2], .little) },
+                    's' => val = .{ .int = std.mem.readInt(i16, input[pos..][0..2], ord) },
+                    'S' => val = .{ .int = std.mem.readInt(u16, input[pos..][0..2], ord) },
+                    'v' => val = .{ .int = std.mem.readInt(u16, input[pos..][0..2], .little) },
                     'n' => val = .{ .int = std.mem.readInt(u16, input[pos..][0..2], .big) },
-                    'i', 'l' => val = .{ .int = std.mem.readInt(i32, input[pos..][0..4], .little) },
-                    'I', 'L', 'V' => val = .{ .int = std.mem.readInt(u32, input[pos..][0..4], .little) },
+                    'i' => val = .{ .int = std.mem.readInt(i32, input[pos..][0..4], .little) },
+                    'l' => val = .{ .int = std.mem.readInt(i32, input[pos..][0..4], ord) },
+                    'I', 'V' => val = .{ .int = std.mem.readInt(u32, input[pos..][0..4], .little) },
+                    'L' => val = .{ .int = std.mem.readInt(u32, input[pos..][0..4], ord) },
                     'N' => val = .{ .int = std.mem.readInt(u32, input[pos..][0..4], .big) },
-                    'q', 'Q', 'P' => val = .{ .int = std.mem.readInt(i64, input[pos..][0..8], .little) },
+                    'q', 'Q' => val = .{ .int = std.mem.readInt(i64, input[pos..][0..8], ord) },
+                    'P' => val = .{ .int = std.mem.readInt(i64, input[pos..][0..8], .little) },
                     'J' => val = .{ .int = std.mem.readInt(i64, input[pos..][0..8], .big) },
                     'f', 'g', 'G' => {
-                        const bits = std.mem.readInt(u32, input[pos..][0..4], if (type_code == 'G') .big else .little);
+                        const bits = std.mem.readInt(u32, input[pos..][0..4], if (type_code == 'G' or endian == .big) .big else .little);
                         val = .{ .float = @as(f32, @bitCast(bits)) };
                     },
                     'd', 'e', 'E' => {
-                        const bits = std.mem.readInt(u64, input[pos..][0..8], if (type_code == 'E') .big else .little);
+                        const bits = std.mem.readInt(u64, input[pos..][0..8], if (type_code == 'E' or endian == .big) .big else .little);
                         val = .{ .float = @bitCast(bits) };
                     },
                     'x' => {},
