@@ -651,6 +651,8 @@ pub fn wrapperUrlExists(vm: *VM, url: []const u8) bool {
 // whether an include reads its file through the stream layer
 pub fn includeThroughStream(vm: *VM, path: []const u8) bool {
     if (std.ascii.startsWithIgnoreCase(path, "php://filter/")) return true;
+    // data: urls, through the RFC 2397 stream
+    if (std.mem.startsWith(u8, path, "data:") and !isWrapperUnregistered(vm, "data")) return true;
     return userWrapperFor(vm, path) != null;
 }
 
@@ -3157,6 +3159,13 @@ fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         return NativeResult.borrowed(.{ .resource = obj });
     }
     if (std.mem.startsWith(u8, path, "data:")) {
+        // php_stream_locate_url_wrapper: data: is a url wrapper, which an
+        // include may use only under allow_url_include
+        if (current_include != null and !ctx.vm.iniFlagOn("allow_url_include", "0")) {
+            try warnDocref(ctx, "data:// wrapper is disabled in the server configuration by allow_url_include=0", .{});
+            try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.no_wrapper }, "Failed to open stream: no suitable wrapper could be found", .{});
+            return NativeResult.scalar(.{ .bool = false });
+        }
         const payload = parseDataUri(ctx.allocator, path) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = "RFC2397" }, "Failed to open stream: {s}", .{ dataUriErrorText(err) });

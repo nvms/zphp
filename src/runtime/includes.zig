@@ -106,6 +106,8 @@ fn join(buf: []u8, dir: []const u8, name: []const u8) ?[]const u8 {
 }
 
 pub fn hasScheme(path: []const u8) bool {
+    // php_stream_locate_url_wrapper takes "data:" as a url without the slashes
+    if (std.mem.startsWith(u8, path, "data:")) return true;
     const end = std.mem.indexOf(u8, path, "://") orelse return false;
     // a drive letter is not a scheme
     if (end < 2) return false;
