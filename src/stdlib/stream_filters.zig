@@ -137,6 +137,10 @@ pub const Filter = struct {
                 c.deinit(self.allocator);
                 self.allocator.destroy(c);
             },
+            .iconv => |ic| {
+                ic.deinit(self.allocator);
+                self.allocator.destroy(ic);
+            },
             .zlib_inflate, .zlib_deflate => |z| {
                 if (self.impl == .zlib_deflate) _ = zlib.deflateEnd(&z.strm) else if (!z.finished) _ = zlib.inflateEnd(&z.strm);
                 self.allocator.destroy(z);
@@ -153,6 +157,7 @@ pub const Impl = union(enum) {
     toupper,
     tolower,
     convert: *Convert,
+    iconv: *Iconv,
     consumed: struct { consumed: i64 = 0, offset: ?i64 = null },
     dechunk: Dechunk,
     zlib_inflate: *ZlibData,
@@ -221,6 +226,7 @@ fn apply(ctx: *NativeContext, stream_obj: *PhpObject, f: *Filter, in: *Brigade, 
             return .pass_on;
         },
         .convert => |c| return convertFilter(ctx, c, f, in, out, consumed, flags),
+        .iconv => |ic| return iconvFilter(ctx, ic, in, out, consumed, flags),
         .consumed => |*data| {
             if (data.offset == null) data.offset = try streams.tell(ctx, stream_obj);
             var total: usize = 0;
@@ -254,7 +260,9 @@ fn apply(ctx: *NativeContext, stream_obj: *PhpObject, f: *Filter, in: *Brigade, 
 
 // --- creating filters --------------------------------------------------------
 
-const builtin_factories = [_][]const u8{ "zlib.*", "string.rot13", "string.toupper", "string.tolower", "convert.*", "consumed", "dechunk" };
+// in php's registration order: the extensions' MINITs (zlib, iconv) run
+// before standard's
+const builtin_factories = [_][]const u8{"zlib.*"} ++ (if (has_iconv) [_][]const u8{"convert.iconv.*"} else [_][]const u8{}) ++ [_][]const u8{ "string.rot13", "string.toupper", "string.tolower", "convert.*", "consumed", "dechunk" };
 
 fn builtinFactory(name: []const u8) ?[]const u8 {
     for (builtin_factories) |f| if (std.mem.eql(u8, f, name)) return f;
@@ -334,6 +342,7 @@ fn createWith(ctx: *NativeContext, factory: Factory, name: []const u8, params: ?
                 return f;
             }
             if (std.mem.eql(u8, b, "convert.*")) return createConvert(ctx, name, params);
+            if (std.mem.eql(u8, b, "convert.iconv.*")) return createIconv(ctx, name, params);
             if (std.mem.eql(u8, b, "zlib.*")) return createZlib(ctx, name, params);
             return null;
         },
@@ -367,6 +376,7 @@ fn label(f: *const Filter) []const u8 {
         .toupper => "string.toupper",
         .tolower => "string.tolower",
         .convert => "convert.*",
+        .iconv => "convert.iconv.*",
         .consumed => "consumed",
         .dechunk => "dechunk",
         .zlib_inflate => "zlib.inflate",
@@ -444,6 +454,7 @@ fn seekFilter(ctx: *NativeContext, stream_obj: *PhpObject, f: *Filter, chain: *c
                 },
             }
         },
+        .iconv => |ic| return iconvSeek(ctx, ic),
         .consumed => |*c| c.* = .{},
         .dechunk => |*d| {
             d.state = .size_start;
@@ -1371,6 +1382,221 @@ fn convertFilter(ctx: *NativeContext, c: *Convert, f: *Filter, in: *Brigade, out
     }
     if (consumed) |p| p.* = total;
     return .pass_on;
+}
+
+// --- convert.iconv.* (ext/iconv/iconv.c) ---------------------------------------
+
+// the c library's iconv(3): glibc and musl carry it in libc. elsewhere
+// (macOS keeps it in a libiconv zphp doesn't link, windows has none) the
+// factory isn't registered, as in a php built without the iconv extension
+pub const has_iconv = @import("builtin").os.tag == .linux;
+
+const libc_iconv = struct {
+    extern "c" fn iconv_open(to: [*:0]const u8, from: [*:0]const u8) usize;
+    extern "c" fn iconv(cd: usize, in: ?*[*]const u8, in_left: ?*usize, out: ?*[*]u8, out_left: ?*usize) usize;
+    extern "c" fn iconv_close(cd: usize) c_int;
+};
+const iconv_failed = std.math.maxInt(usize);
+// ICONV_CSNMAXLEN
+const iconv_charset_max = 64;
+
+const Iconv = struct {
+    cd: usize,
+    to: [:0]u8,
+    from: [:0]u8,
+    stub: [128]u8 = undefined,
+    stub_len: usize = 0,
+
+    fn deinit(self: *Iconv, a: Allocator) void {
+        _ = libc_iconv.iconv_close(self.cd);
+        a.free(self.to);
+        a.free(self.from);
+    }
+};
+
+// php_iconv_stream_filter_factory_create: "convert.iconv.FROM/TO" or
+// "convert.iconv.FROM.TO", the charsets as iconv_open takes them
+fn createIconv(ctx: *NativeContext, name: []const u8, params: ?Value) RuntimeError!?*Filter {
+    if (!has_iconv) return null;
+    const write_seekable = (try parseWriteSeekMode(ctx, params)) orelse return null;
+    const first = std.mem.indexOfScalar(u8, name, '.') orelse return null;
+    const second = std.mem.indexOfScalarPos(u8, name, first + 1, '.') orelse return null;
+    const from = name[second + 1 ..];
+    const sep = std.mem.indexOfAny(u8, from, "/.") orelse return null;
+    const to = from[sep + 1 ..];
+    // the charsets end at a NUL, as php's C strings do
+    const from_cs = cString(from[0..sep]);
+    const to_cs = cString(to);
+    if (sep >= iconv_charset_max or to.len >= iconv_charset_max) return null;
+    const a = ctx.allocator;
+    const from_z = try a.dupeSentinel(u8, from_cs, 0);
+    errdefer a.free(from_z);
+    const to_z = try a.dupeSentinel(u8, to_cs, 0);
+    errdefer a.free(to_z);
+    const cd = libc_iconv.iconv_open(to_z.ptr, from_z.ptr);
+    if (cd == iconv_failed) {
+        a.free(to_z);
+        a.free(from_z);
+        return null;
+    }
+    const ic = a.create(Iconv) catch |err| {
+        _ = libc_iconv.iconv_close(cd);
+        a.free(to_z);
+        a.free(from_z);
+        return err;
+    };
+    ic.* = .{ .cd = cd, .to = to_z, .from = from_z };
+    const f = newFilter(ctx, name, .{ .iconv = ic }) catch |err| {
+        ic.deinit(a);
+        a.destroy(ic);
+        return err;
+    };
+    f.read_seekable = .start;
+    f.write_seekable = write_seekable;
+    return f;
+}
+
+fn cString(s: []const u8) []const u8 {
+    return s[0 .. std.mem.indexOfScalar(u8, s, 0) orelse s.len];
+}
+
+fn iconvErrno() std.c.E {
+    return std.c.errno(@as(c_int, -1));
+}
+
+fn iconvWarn(ctx: *NativeContext, ic: *const Iconv, comptime what: []const u8) RuntimeError!void {
+    try fs.warnDocref(ctx, "iconv stream filter (\"{s}\"=>\"{s}\"): " ++ what, .{ ic.from, ic.to });
+}
+
+// php_iconv_stream_filter_append_bucket: converts one input (null to reset
+// the shift state at a flush) into a bucket; an incomplete sequence at the
+// end waits in the stub for the next input
+fn iconvAppend(ctx: *NativeContext, ic: *Iconv, out: *Brigade, input: ?[]const u8, consumed: *usize) RuntimeError!bool {
+    const a = ctx.allocator;
+    const initial: usize = if (input) |i| @max(i.len, 1) else 64;
+    var buf = try a.alloc(u8, initial);
+    defer a.free(buf);
+    var used: usize = 0;
+    var ps: [*]const u8 = if (input) |i| i.ptr else undefined;
+    var icnt: usize = if (input) |i| i.len else 1;
+    const buf_len: usize = if (input) |i| i.len else 0;
+
+    if (ic.stub_len > 0) {
+        var pt: [*]const u8 = &ic.stub;
+        var tcnt = ic.stub_len;
+        while (tcnt > 0) {
+            var pd: [*]u8 = buf.ptr + used;
+            var ocnt = buf.len - used;
+            const rc = libc_iconv.iconv(ic.cd, &pt, &tcnt, &pd, &ocnt);
+            used = buf.len - ocnt;
+            if (rc != iconv_failed) continue;
+            switch (iconvErrno()) {
+                .ILSEQ => {
+                    try iconvWarn(ctx, ic, "invalid multibyte sequence");
+                    return false;
+                },
+                .INVAL => {
+                    if (input == null) {
+                        try iconvWarn(ctx, ic, "invalid multibyte sequence");
+                        return false;
+                    }
+                    if (icnt == 0) {
+                        tcnt = 0;
+                        break;
+                    }
+                    if (ic.stub_len >= ic.stub.len) {
+                        try iconvWarn(ctx, ic, "insufficient buffer");
+                        return false;
+                    }
+                    ic.stub[ic.stub_len] = ps[0];
+                    ic.stub_len += 1;
+                    ps += 1;
+                    icnt -= 1;
+                    pt = &ic.stub;
+                    tcnt = ic.stub_len;
+                },
+                .@"2BIG" => buf = try a.realloc(buf, buf.len * 2),
+                else => {
+                    try iconvWarn(ctx, ic, "unknown error");
+                    return false;
+                },
+            }
+        }
+        const left = tcnt;
+        const from_off = @intFromPtr(pt) - @intFromPtr(&ic.stub);
+        std.mem.copyForwards(u8, ic.stub[0..left], ic.stub[from_off..][0..left]);
+        ic.stub_len = left;
+    }
+
+    while (icnt > 0) {
+        var pd: [*]u8 = buf.ptr + used;
+        var ocnt = buf.len - used;
+        const rc = if (input == null)
+            libc_iconv.iconv(ic.cd, null, null, &pd, &ocnt)
+        else
+            libc_iconv.iconv(ic.cd, &ps, &icnt, &pd, &ocnt);
+        used = buf.len - ocnt;
+        if (rc != iconv_failed) {
+            if (input == null) break;
+            continue;
+        }
+        switch (iconvErrno()) {
+            .ILSEQ => {
+                try iconvWarn(ctx, ic, "invalid multibyte sequence");
+                return false;
+            },
+            .INVAL => {
+                if (input == null) {
+                    try iconvWarn(ctx, ic, "unexpected octet values");
+                    return false;
+                }
+                if (icnt > ic.stub.len) {
+                    try iconvWarn(ctx, ic, "insufficient buffer");
+                    return false;
+                }
+                @memcpy(ic.stub[0..icnt], ps[0..icnt]);
+                ic.stub_len = icnt;
+                ps += icnt;
+                icnt = 0;
+            },
+            .@"2BIG" => buf = try a.realloc(buf, buf.len * 2),
+            else => {
+                try iconvWarn(ctx, ic, "unknown error");
+                return false;
+            },
+        }
+    }
+
+    if (used > 0) try out.append(try Bucket.create(a, buf[0..used]));
+    consumed.* += buf_len - (if (input == null) 0 else icnt);
+    return true;
+}
+
+fn iconvFilter(ctx: *NativeContext, ic: *Iconv, in: *Brigade, out: *Brigade, consumed: ?*usize, flags: Flags) RuntimeError!Status {
+    var total: usize = 0;
+    while (in.head) |b| {
+        b.unlink();
+        defer b.delref();
+        if (!try iconvAppend(ctx, ic, out, b.buf, &total)) return .err_fatal;
+    }
+    if (flags != .normal) {
+        if (!try iconvAppend(ctx, ic, out, null, &total)) return .err_fatal;
+    }
+    if (consumed) |p| p.* = total;
+    return .pass_on;
+}
+
+// php_iconv_stream_filter_seek: a fresh conversion state
+fn iconvSeek(ctx: *NativeContext, ic: *Iconv) RuntimeError!bool {
+    ic.stub_len = 0;
+    const cd = libc_iconv.iconv_open(ic.to.ptr, ic.from.ptr);
+    if (cd == iconv_failed) {
+        try iconvWarn(ctx, ic, "failed to reset conversion state");
+        return false;
+    }
+    _ = libc_iconv.iconv_close(ic.cd);
+    ic.cd = cd;
+    return true;
 }
 
 // --- dechunk -------------------------------------------------------------------
