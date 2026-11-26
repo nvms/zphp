@@ -4449,6 +4449,15 @@ fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const compile_name = compiledFunctionName(ctx.vm, func_name);
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    // a closure of a method has the method's attributes, which target a
+    // method (fptr->common.scope)
+    if (this.get("__from_closure") == .bool) if (std.mem.indexOf(u8, func_name, "::")) |sep| {
+        const method = func_name[sep + 2 ..];
+        if (ctx.vm.findMethodInfo(func_name[0..sep], method)) |found| {
+            const attrs = methodAttributes(ctx.vm, found.defining, method) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+            return buildAttributeArrayWithFlags(ctx, attrs, filter, 4, flags, found.defining);
+        }
+    };
     const attrs = ctx.vm.function_attributes.get(compile_name) orelse {
         // a closure of a method has the method's attributes
         if (std.mem.indexOf(u8, func_name, "::")) |sep| if (methodAttributes(ctx.vm, func_name[0..sep], func_name[sep + 2 ..])) |method_attrs|
