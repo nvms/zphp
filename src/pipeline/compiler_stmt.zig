@@ -347,6 +347,9 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         null;
     if (self.loop_depth - 1 < 32) self.loop_foreach_live[self.loop_depth - 1] = live;
     try self.emitOp(if (live != null) .iter_begin_live else if (val_by_ref) .iter_begin_ref else .iter_begin);
+    // php's FE_FETCH is emitted with FE_RESET, on the iterable's line: each
+    // step (a generator resumed, an iterator's next()) is reported there
+    const fetch_offset = self.current_source_offset;
 
     const loop_top = self.chunk.offset();
     self.loop_start = loop_top;
@@ -430,8 +433,11 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // continue lands here, before iter_advance (same pattern as for loop update)
     try self.patchContinues(&prev_continues);
 
+    const body_offset = self.current_source_offset;
+    self.current_source_offset = fetch_offset;
     try self.emitOp(.iter_advance);
     try self.emitLoop(loop_top);
+    self.current_source_offset = body_offset;
 
     self.patchJump(exit_jump);
 
