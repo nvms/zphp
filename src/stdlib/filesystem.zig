@@ -1299,7 +1299,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         return try Value.String.adopt(ctx.allocator, payload);
     }
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
-        const decoded = readZlibFile(ctx.allocator, path) catch return null;
+        const decoded = (try readZlibUrl(ctx, path, if (func != null) read_context else null)) orelse return null;
         return try Value.String.adopt(ctx.allocator, decoded);
     }
     if (std.ascii.startsWithIgnoreCase(path, "http://")) {
@@ -3074,7 +3074,8 @@ fn native_gzfile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     // gzfile($path) reads the whole gzipped file and returns an array of lines
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    const wrapped = try std.fmt.allocPrint(ctx.allocator, "compress.zlib://{s}", .{path});
+    // php_stream_gzopen takes the path with or without the prefix
+    const wrapped = try std.fmt.allocPrint(ctx.allocator, "compress.zlib://{s}", .{if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) path[ZLIB_PREFIX.len..] else path});
     defer ctx.allocator.free(wrapped);
     var fgc_args = [_]Value{.{ .string = Value.String.borrowed(wrapped) }};
     const contents_val = (try native_file_get_contents(ctx, &fgc_args)).value;
@@ -3236,11 +3237,15 @@ fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!Native
             try obj.set(ctx.allocator, "__buffer", .{ .string = Value.String.borrowed("") });
             try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
         } else {
-            const decoded = readZlibFile(ctx.allocator, path) catch {
+            const decoded = (try readZlibUrl(ctx, path, if (args.len > 3) args[3] else null)) orelse {
                 obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
                 return NativeResult.scalar(.{ .bool = false });
             };
-            try setAdoptedBuffer(ctx, obj, decoded);
+            // zlib buffers on its own: a gz stream is PHP_STREAM_FLAG_NO_BUFFER,
+            // so its reads go straight to it (and never notify completion)
+            defer ctx.allocator.free(decoded);
+            const s = try streams.attach(ctx, obj, .{ .memory = .readonly, .no_buffer = true });
+            try streams.setMemory(s, decoded);
         }
         return NativeResult.borrowed(.{ .resource = obj });
     }
@@ -4345,6 +4350,23 @@ fn gzipEncode(a: Allocator, input: []const u8) ![]u8 {
 
 // reads a `compress.zlib://` path's underlying file and inflates it. returns
 // owned bytes on success. caller registers them with vm.strings if needed
+// what a compress.zlib:// url reads, decompressed (owned), or null. a url
+// inside opens through its wrapper, as php_stream_gzopen does (with
+// STREAM_MUST_SEEK an http stream is first copied into a temporary one),
+// with the context; a plain path is read directly
+fn readZlibUrl(ctx: *NativeContext, path: []const u8, context: ?Value) RuntimeError!?[]u8 {
+    const inner = path[ZLIB_PREFIX.len..];
+    if (extractScheme(inner) == null) return readZlibFile(ctx.allocator, path) catch |err| if (err == error.OutOfMemory) error.OutOfMemory else null;
+    const opened = (try openStreamValue(ctx, inner, "rb", context)) orelse return null;
+    const fh = opened.resource;
+    fh.retain();
+    defer ctx.vm.releaseValue(opened);
+    const raw = (try streams.copyToMem(ctx, fh, null)) orelse try ctx.allocator.alloc(u8, 0);
+    defer ctx.allocator.free(raw);
+    _ = try closeStream(ctx, fh);
+    return gzipDecode(ctx.allocator, raw) catch |err| if (err == error.OutOfMemory) error.OutOfMemory else null;
+}
+
 fn readZlibFile(a: Allocator, path: []const u8) ![]u8 {
     const inner = path[ZLIB_PREFIX.len..];
     const raw = try bundle.readFileAlloc(a, inner, 1024 * 1024 * 256);

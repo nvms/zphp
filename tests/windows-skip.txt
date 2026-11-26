@@ -88,3 +88,4 @@ proc_open_pty_shared.php: pty descriptors are not available to php on windows ei
 iconv_stream_filter.php: the convert.iconv.* filter needs the c library iconv(3), which windows lacks
 ini_scan_dir.php: the test joins PHP_INI_SCAN_DIR entries with ':', which windows spells ';'
 cli_server_script_content_length.php: the test starts php -S with its output sent to /dev/null
+compress_zlib_over_http.php: the test starts php -S with its output sent to /dev/null
