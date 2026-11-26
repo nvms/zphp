@@ -21755,6 +21755,18 @@ pub const VM = struct {
             }
         }
 
+        // zend_do_link_class: the class is in the class table, unlinked,
+        // while its interfaces and parent load: visible to the variance
+        // checks of classes their loading declares, and a lookup of it
+        // finds it without autoloading
+        try self.linking.append(self.allocator, .{ .name = class_name, .def = &def });
+        const linking_index = self.linking.items.len - 1;
+        defer self.linking.shrinkRetainingCapacity(linking_index);
+        // the parent loads before the interfaces; one it can't find is
+        // reported once the class is past its own checks
+        if (def.parent) |parent_name| if (!self.classes.contains(parent_name) and self.linkingClass(parent_name) == null) {
+            self.tryAutoload(parent_name) catch |err| return self.unrecoverableLoadFailure(linking_index, err);
+        };
         const iface_count = self.readByte();
         for (0..iface_count) |_| {
             const iname_idx = self.readU16();
@@ -21858,16 +21870,10 @@ pub const VM = struct {
             }
         }
 
-        // zend_do_link_class: the class is visible, unlinked, to the
-        // variance checks of classes its parent's loading declares
-        try self.linking.append(self.allocator, .{ .name = class_name, .def = &def });
-        const linking_index = self.linking.items.len - 1;
-        defer self.linking.shrinkRetainingCapacity(linking_index);
         if (def.parent) |parent_name| {
             if (!self.classes.contains(parent_name)) {
-                // an unlinked class isn't a parent yet, and isn't autoloaded
-                const unlinked = self.linkingClass(parent_name) != null;
-                if (!unlinked) self.tryAutoload(parent_name) catch |err| return self.unrecoverableLoadFailure(linking_index, err);
+                // an unlinked class isn't a parent yet; the autoloaders ran
+                // before the interfaces loaded
                 if (!self.classes.contains(parent_name) and class_modifiers & 0x80 == 0) {
                     if (self.pending_exception != null) return self.unrecoverableLoadFailure(linking_index, error.RuntimeError);
                     const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{parent_name});
@@ -27069,6 +27075,9 @@ pub const VM = struct {
         // zend_lookup_class_ex: no name, or one with a character no class
         // name has (zend_is_valid_class_name), never reaches the autoloaders
         if (class_name.len == 0) return;
+        // a class being linked is in php's class table: the lookup ends
+        // there, without the autoloaders
+        if (self.linkingClass(class_name) != null) return;
         for (raw_class_name) |c| switch (c) {
             '0'...'9', 'a'...'z', 'A'...'Z', '_', '\\', 0x80...0xff => {},
             else => return,
