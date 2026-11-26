@@ -8192,7 +8192,7 @@ pub const VM = struct {
                     const key = self.pop();
                     var arr_val = self.pop();
                     if (static_class_idx) |class_idx| if (arr_val == .string) {
-                        const assigned = (self.assignStringOffset(arr_val.string.bytes(), key, raw_val) catch |err| {
+                        const assigned = (self.assignStringOffset(arr_val.string, key, raw_val) catch |err| {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return err;
                         }) orelse {
@@ -8216,7 +8216,8 @@ pub const VM = struct {
                         continue;
                     };
                     if (var_name_idx) |name_idx| if (arr_val == .string) {
-                        const assigned = (self.assignStringOffset(arr_val.string.bytes(), key, raw_val) catch |err| {
+                        const target = try self.separateOffsetWriteString(self.currentFrame(), self.currentChunk().constants.items[name_idx].string.bytes(), arr_val.string, key);
+                        const assigned = (self.assignStringOffset(target, key, raw_val) catch |err| {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return err;
                         }) orelse {
@@ -8337,7 +8338,8 @@ pub const VM = struct {
                         self.loadLocalSlot(frame, slot, ref_cell);
 
                     if (cur == .string) {
-                        const assigned = (self.assignStringOffset(cur.string.bytes(), key, val) catch |err| {
+                        const target = try self.separateOffsetWriteString(frame, self.slotName(frame, slot), cur.string, key);
+                        const assigned = (self.assignStringOffset(target, key, val) catch |err| {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return err;
                         }) orelse {
@@ -17273,21 +17275,45 @@ pub const VM = struct {
 
     pub const StringAssign = struct { string: Value, result: Value };
 
+    // zend_assign_to_string_offset separates the variable's string first, so
+    // the variable alone holds the one the offset's warning may see
+    // replaced. only an offset that can warn needs it
+    fn separateOffsetWriteString(self: *VM, frame: *CallFrame, name: []const u8, str: Value.String, key: Value) RuntimeError!Value.String {
+        if (key == .int) return str;
+        if (str.owner) |o| if (o.refcount == 1) return str;
+        const own = try Value.String.create(self.allocator, str.bytes());
+        try self.setVariableByName(frame, name, .{ .string = own });
+        return own;
+    }
+
     // zend_assign_to_string_offset: the string with the byte at key replaced
     // by the first byte of val (padding with spaces past the end) and the
     // one-byte string the assignment yields; null when it failed (an
-    // exception is pending or the warning left the result null)
-    pub fn assignStringOffset(self: *VM, s: []const u8, key: Value, val: Value) RuntimeError!?StringAssign {
+    // exception is pending or the warning left the result null). the string
+    // is held while an offset warning runs; one a handler released is gone,
+    // and the write with it
+    pub fn assignStringOffset(self: *VM, str: Value.String, key: Value, val: Value) RuntimeError!?StringAssign {
+        const holders: u32 = if (str.owner) |o| o.refcount else 0;
+        str.retain();
+        defer str.release();
+        const s = str.bytes();
+        const released = struct {
+            fn check(string: Value.String, before: u32) bool {
+                const o = string.owner orelse return false;
+                return o.refcount <= before;
+            }
+        }.check;
         const offset: i64 = switch (key) {
             .int => |i| i,
-            .string => |str| blk: {
-                const parsed = offsetStringKey(str.bytes());
+            .string => |key_str| blk: {
+                const parsed = offsetStringKey(key_str.bytes());
                 switch (parsed.kind) {
                     .integer => break :blk parsed.value,
                     .trailing => {
-                        const msg = try std.fmt.allocPrint(self.allocator, "Illegal string offset \"{s}\"", .{str.bytes()});
+                        const msg = try std.fmt.allocPrint(self.allocator, "Illegal string offset \"{s}\"", .{key_str.bytes()});
                         defer self.allocator.free(msg);
                         try self.emitWarning(msg);
+                        if (released(str, holders)) return null;
                         break :blk parsed.value;
                     },
                     .other => {
@@ -17298,6 +17324,7 @@ pub const VM = struct {
             },
             .null, .undef, .bool, .float => blk: {
                 try self.emitWarning("String offset cast occurred");
+                if (released(str, holders)) return null;
                 break :blk Value.toInt(key);
             },
             else => {
