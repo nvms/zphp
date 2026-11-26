@@ -9197,12 +9197,12 @@ pub const VM = struct {
                     if (op == .iter_begin_live and iterable == .array) {
                         // php's FE_RESET_RW: the loop keeps a position in the
                         // variable's array, not a reference to it, so writes in
-                        // the body don't separate it. the slot holds the array's
-                        // address only to tell it from another array later
+                        // the body don't separate it. the slot holds the serial
+                        // of the array's log only to tell it from another array
                         const arr = iterable.array;
                         const log = arr.iterLog() orelse return error.OutOfMemory;
                         log.loops += 1;
-                        self.stack[self.sp - 1] = .{ .int = @intCast(@intFromPtr(arr)) };
+                        self.stack[self.sp - 1] = .{ .int = @intCast(log.serial) };
                         self.stackRelease(iterable);
                         self.push(.{ .int = liveIterState(0, log.changes.items.len) });
                         continue;
@@ -9466,19 +9466,42 @@ pub const VM = struct {
                         self.currentFrame().ip += offset;
                     }
                 },
+                .separate_live_iterable => {
+                    const name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const top = self.stack[self.sp - 1];
+                    const stored_slot = self.stack[self.sp - 3];
+                    if (top != .array or stored_slot != .int) continue;
+                    const arr = top.array;
+                    const stored: u64 = @intCast(stored_slot.int);
+                    // the loop's own array, or a copy of it the loop follows
+                    if (arr.iter_log) |log| if (log.serial == stored or log.copied_from_serial == stored) continue;
+                    // zend_hash_iterator_pos_ex moving the loop to another
+                    // array separates it from its other holders first
+                    const frame = self.currentFrame();
+                    const cell = frame.ref_slots.get(name) orelse continue;
+                    if (cell.* != .array or cell.array != arr) continue;
+                    const fetched = &self.ic.?.stack_fetch[self.sp - 1];
+                    fetched.* = true;
+                    const sep = self.separateReferencedArray(frame, name, cell, arr) catch |err| {
+                        fetched.* = false;
+                        return err;
+                    };
+                    fetched.* = false;
+                    if (sep) |copy| self.stack[self.sp - 1] = .{ .array = copy };
+                },
                 .iter_live_end => {
                     const current = self.pop();
                     const slot = self.stack[self.sp - 2];
                     // the array the loop ended on, still the variable's: it no
                     // longer needs to log removals for this loop
-                    if (slot == .int and current == .array and @intFromPtr(current.array) == @as(usize, @intCast(slot.int))) {
-                        if (current.array.iter_log) |log| {
+                    if (slot == .int and current == .array) {
+                        if (current.array.iter_log) |log| if (log.serial == @as(u64, @intCast(slot.int))) {
                             log.loops -|= 1;
                             if (log.loops == 0) {
                                 log.destroy();
                                 current.array.iter_log = null;
                             }
-                        }
+                        };
                     }
                 },
                 .iter_advance => {
@@ -24179,13 +24202,15 @@ pub const VM = struct {
     fn liveIterStep(self: *VM, current: Value) bool {
         if (current != .array) return false;
         const arr = current.array;
-        const stored: usize = @intCast(self.stack[self.sp - 2].int);
+        const stored: u64 = @intCast(self.stack[self.sp - 2].int);
         const state: u64 = @intCast(self.stack[self.sp - 1].int);
         var next: usize = @intCast(state & 0xffffffff);
         var seen: usize = @intCast(state >> 32);
-        // an array reused at the same address has no log of its own
-        if (@intFromPtr(arr) != stored or arr.iter_log == null) {
-            const copied = if (arr.iter_log) |log| if (log.copied_from) |from| @intFromPtr(from) == stored else false else false;
+        // the loop knows its array by the serial of the array's log, which
+        // an array allocated where a freed one was doesn't have
+        const same = if (arr.iter_log) |log| log.serial == stored else false;
+        if (!same) {
+            const copied = if (arr.iter_log) |log| log.copied_from_serial == stored else false;
             const log = arr.iterLog() orelse return false;
             log.loops += 1;
             if (!copied) {
@@ -24194,7 +24219,7 @@ pub const VM = struct {
                 next = @min(arr.cursor, arr.entries.items.len);
                 seen = log.changes.items.len;
             }
-            self.stack[self.sp - 2] = .{ .int = @intCast(@intFromPtr(arr)) };
+            self.stack[self.sp - 2] = .{ .int = @intCast(log.serial) };
         }
         const log = arr.iter_log.?;
         // an entry removed before the loop's place moved the rest back,
@@ -30154,6 +30179,7 @@ pub const VM = struct {
         // the copy keeps the removals the loop hasn't seen yet
         if (src.iter_log) |log| if (log.loops > 0 or log.copied_from != null) if (copy.iterLog()) |copy_log| {
             copy_log.copied_from = src;
+            copy_log.copied_from_serial = log.serial;
             copy_log.copied_via = log.copied_from;
             copy_log.changes.appendSlice(std.heap.c_allocator, log.changes.items) catch {};
         };

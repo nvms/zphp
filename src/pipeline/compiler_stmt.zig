@@ -354,7 +354,13 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const loop_top = self.chunk.offset();
     self.loop_start = loop_top;
 
-    if (live) |src| try self.emitLiveIterable(src);
+    if (live) |src| {
+        try self.emitLiveIterable(src);
+        if (src == .temp) if (src.temp.variable != null) {
+            try self.emitOp(.separate_live_iterable);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(src.temp.name) }));
+        };
+    }
     const exit_jump = try self.emitJump(if (live != null) .iter_check_live else if (key_n == 0 and !val_by_ref) .iter_check_nokey else .iter_check);
 
     // iter_check pushed: key, value (value on top)

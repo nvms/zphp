@@ -199,6 +199,11 @@ pub const PhpArray = struct {
     php_table: u32 = 0,
 
     pub const IterLog = struct {
+        // names the array to the loops iterating it: an address can be
+        // reused by another array once this one is freed
+        serial: u64 = 0,
+        // the serial of the array this one was copied from (copied_from's)
+        copied_from_serial: u64 = 0,
         // by-reference loops that registered on the array and haven't ended
         loops: u32 = 0,
         // the array this one was copied from while a loop iterated it
@@ -259,10 +264,13 @@ pub const PhpArray = struct {
     pub fn iterLog(self: *PhpArray) ?*IterLog {
         if (self.iter_log) |log| return log;
         const log = std.heap.c_allocator.create(IterLog) catch return null;
-        log.* = .{};
+        iter_log_serial += 1;
+        log.* = .{ .serial = iter_log_serial };
         self.iter_log = log;
         return log;
     }
+
+    threadlocal var iter_log_serial: u64 = 0;
 
     pub const Entry = struct {
         key: Key,

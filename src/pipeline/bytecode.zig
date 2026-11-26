@@ -689,6 +689,10 @@ pub const OpCode = enum(u16) {
     // (FETCH_STATIC_PROP_UNSET): an object or an uninitialized property may
     // be fetched where the scope can't modify the property
     separate_static_prop_unset,
+    // u16 hidden variable: before iter_check_live, with the variable's
+    // value on top. an array the loop hasn't iterated yet is separated from
+    // its other holders (zend_hash_iterator_pos_ex), the top becoming the copy
+    separate_live_iterable,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -698,7 +702,7 @@ pub const OpCode = enum(u16) {
             .arg_unpack => 6,
             .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread, .class_ref_check, .pick, .array_add_below => 3,
             .type_assert_array => 5,
-            .tick => 4,
+            .tick, .separate_live_iterable => 4,
             .jump_if_class_declared, .bind_const_attributes => 6,
             .parent_hook_call => 8,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result, .arg_temp_container => 5,
