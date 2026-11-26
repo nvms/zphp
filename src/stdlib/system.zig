@@ -1101,7 +1101,7 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
         // a generator running as a yield from delegate is listed as called
         // from the generator waiting in it, and those waiting generators
         // follow it, as php lists them
-        const delegator = if (frame.generator) |g| g.delegator else null;
+        const delegator = vm.frameDelegator(i, layout.count > 0);
         if (vm.attributeSiteAt(i)) |site| {
             // an attribute's constructor, called from where it is written
             try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
@@ -1109,7 +1109,7 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
         } else if (called_by_native and delegator == null) {
             // [internal function]: no file or line
         } else if (delegator) |d| {
-            if (vm.generatorPosition(d)) |site| {
+            if (vm.delegatedCallSite(i, d)) |site| {
                 try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
                 try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
             }

@@ -1021,6 +1021,16 @@ pub const VM = struct {
     // a frame traces leave out: a function whose call attributes are built
     // as it is entered, which php does before the function runs
     hidden_trace_frame: usize = std.math.maxInt(usize),
+    // a generator that runs no frame of its own while the engine works for
+    // it (its delegate iterator's methods, a finished delegate's release):
+    // the frame at `delegating_depth` is called from where it waits, and
+    // traces list it and the generators waiting on it, as php's current
+    // execute_data is the generator's
+    delegating_gen: ?*Generator = null,
+    delegating_depth: usize = 0,
+    // the frame is called from the resumer's line instead (a finished
+    // delegate's frame is gone while its parent's isn't back yet)
+    delegating_at_resumer: bool = false,
     // frames below this count belong to a script that has finished (the
     // shutdown functions run): php has no executing file there
     finished_frames: usize = 0,
@@ -16660,6 +16670,23 @@ pub const VM = struct {
         return self.traceBelow(self.frame_count);
     }
 
+    // the generator frame `i` was reached through when the generator has no
+    // frame of its own (delegating_gen); frames laid out from fibers don't
+    // keep their depth
+    pub fn frameDelegator(self: *const VM, i: usize, layout_moved: bool) ?*Generator {
+        if (self.frames[i].generator) |g| return g.delegator;
+        if (layout_moved) return null;
+        if (self.delegating_gen) |g| if (i == self.delegating_depth) return g;
+        return null;
+    }
+
+    // where frame `i`, reached through `delegator`, is called from: where the
+    // delegator waits, or the resumer's line
+    pub fn delegatedCallSite(self: *VM, i: usize, delegator: *Generator) ?SourcePosition {
+        if (self.frames[i].generator == null and self.delegating_at_resumer) return if (i > 0) self.framePosition(i - 1) else null;
+        return self.generatorPosition(delegator);
+    }
+
     // the trace of the frames below `top`
     fn traceBelow(self: *VM, top_physical: usize) !*PhpArray {
         const arr = try self.allocArray();
@@ -16728,8 +16755,8 @@ pub const VM = struct {
                     if (i == 0 or i <= self.trace_floor) break;
                     continue;
                 };
-                const delegator = if (self.frames[i].generator) |g| g.delegator else null;
-                const entry = try self.newTraceEntry(f, if (delegator) |d| self.generatorPosition(d) else call_site);
+                const delegator = self.frameDelegator(i, layout.count > 0);
+                const entry = try self.newTraceEntry(f, if (delegator) |d| self.delegatedCallSite(i, d) else call_site);
                 // a closure's frame names the class of its scope, with the
                 // object it is bound to or statically
                 if (std.mem.startsWith(u8, f.name, "__closure_")) if (self.frames[i].call_name) |cn| {
@@ -20005,7 +20032,7 @@ pub const VM = struct {
                 // php's zend_generator_get_next_delegated_value
                 if (try self.nextDelegatedValue(leaf)) step = false else sent = .null;
             }
-            if (step) self.resumeGeneratorWithValue(leaf, sent) catch |err| {
+            if (step) self.resumeDelegate(leaf, sent) catch |err| {
                 if (path.items.len == 1 or self.pending_exception == null or self.exit_requested) return err;
                 // the delegate's exception leaves it and is thrown into its
                 // parent where the parent waits in yield from
@@ -20060,6 +20087,26 @@ pub const VM = struct {
         }
     }
 
+    // runs a generator of a resume path. a delegate's frame closes before
+    // its parent's comes back, and what it releases then (its locals, at
+    // its return) is called from the resumer's line with the generators
+    // waiting on it in the trace, as php's do
+    fn resumeDelegate(self: *VM, gen: *Generator, sent: Value) RuntimeError!void {
+        const parent = gen.delegator orelse return self.resumeGeneratorWithValue(gen, sent);
+        const outer_gen = self.delegating_gen;
+        const outer_depth = self.delegating_depth;
+        const outer_at_resumer = self.delegating_at_resumer;
+        self.delegating_gen = parent;
+        self.delegating_depth = self.frame_count;
+        self.delegating_at_resumer = true;
+        defer {
+            self.delegating_gen = outer_gen;
+            self.delegating_depth = outer_depth;
+            self.delegating_at_resumer = outer_at_resumer;
+        }
+        return self.resumeGeneratorWithValue(gen, sent);
+    }
+
     // php's zend_generator_get_next_delegated_value: the next value of the
     // array or iterator a generator delegates to, as its current one. false
     // when there is none, the delegation over; an exception the iterator
@@ -20081,6 +20128,17 @@ pub const VM = struct {
             },
             .iterator => |*state| iterate: {
                 const it = state.obj;
+                const outer_gen = self.delegating_gen;
+                const outer_depth = self.delegating_depth;
+                const outer_at_resumer = self.delegating_at_resumer;
+                self.delegating_gen = gen;
+                self.delegating_depth = self.frame_count;
+                self.delegating_at_resumer = false;
+                defer {
+                    self.delegating_gen = outer_gen;
+                    self.delegating_depth = outer_depth;
+                    self.delegating_at_resumer = outer_at_resumer;
+                }
                 if (state.index > 0) {
                     _ = self.callMethod(it, "next", &.{}) catch break :iterate;
                 }
