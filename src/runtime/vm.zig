@@ -30076,6 +30076,20 @@ pub const VM = struct {
     // does not own arrays and a refcount-0 array arg is never queued, so it
     // cannot be freed mid-native - retaining arrays here would instead
     // QUEUE them (releaseValue queues at 0) and free live data (Stage 2)
+    // whether an argument is one argument parsing would convert in place
+    fn writebackShown(strings: u32, numbers: u32, args: []const Value) bool {
+        for (args, 0..) |arg, i| {
+            const bit = @as(u32, 1) << @intCast(i);
+            switch (arg) {
+                .int, .float => if (strings & bit != 0) return true,
+                .bool => if ((strings | numbers) & bit != 0) return true,
+                .string => if (numbers & bit != 0) return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
     fn invokeNative(self: *VM, native: Native, ctx: *NativeContext, call: NativeInvocation) RuntimeError!Value {
         const input_args = call.args;
         // named arguments placed for this call, past its parameters
@@ -30183,6 +30197,48 @@ pub const VM = struct {
         if (native.scalars.positions != 0 and first_checked < native_args.len) if (name) |n| {
             if (separated_args) |copy| try self.coerceScalarArgs(n, label, native.scalars, copy, first_checked, copy.len, called_by_native);
         };
+        // zend_parse_arg_str_weak converts a scalar argument in place, so a
+        // trace made while the call runs shows the string it became
+        var shown_buf: [8]Value = undefined;
+        var shown_strings: u32 = 0;
+        var shown_len: usize = 0;
+        defer for (shown_buf[0..shown_len], 0..) |v, i| {
+            if (shown_strings & (@as(u32, 1) << @intCast(i)) != 0) self.stackRelease(v);
+        };
+        if (native.string_writeback | native.number_writeback != 0 and self.native_call == &record and record.args.len > 0 and
+            record.args.len <= shown_buf.len and writebackShown(native.string_writeback, native.number_writeback, record.args) and
+            (called_by_native or !self.topFrameStrict()))
+        {
+            var numbers = false;
+            for (record.args, 0..) |arg, i| {
+                shown_buf[i] = arg;
+                const bit = @as(u32, 1) << @intCast(i);
+                if (native.number_writeback & bit != 0) {
+                    const number: Value = switch (arg) {
+                        .bool => |b| .{ .int = @intFromBool(b) },
+                        .string => |s| switch (numericStr(s.bytes())) {
+                            .int => |v| .{ .int = v },
+                            .float => |v| .{ .float = v },
+                            .none => continue,
+                        },
+                        else => continue,
+                    };
+                    shown_buf[i] = number;
+                    numbers = true;
+                    continue;
+                }
+                if (native.string_writeback & bit == 0) continue;
+                const converted: Value = switch (arg) {
+                    .int, .float, .bool => if (native_args[i] == .string) native_args[i] else try self.coerceToStringValue(arg),
+                    else => continue,
+                };
+                stackRetain(converted);
+                shown_buf[i] = converted;
+                shown_strings |= bit;
+            }
+            shown_len = record.args.len;
+            if (shown_strings != 0 or numbers) record.args = shown_buf[0..shown_len];
+        }
         // an object php can't make a string of, given for a string parameter
         if (native.strings != 0) if (name) |n| for (native_args, 0..) |arg, i| {
             if (arg == .object and i < 31 and native.strings & (@as(u32, 1) << @intCast(i)) != 0) try self.refuseObjectForString(n, label, i, arg.object);

@@ -30,12 +30,18 @@ pub fn Table(comptime NativeFn: type) type {
             byref: bool,
             // the parameters php's argument parsing coerces to a scalar
             scalars: ScalarParams,
+            // bit i set: parameter i takes a string and no other scalar, so
+            // php's parsing writes a coerced scalar back into the argument
+            string_writeback: u32,
+            // bit i set: parameter i is int|float, which a numeric string or
+            // a bool becomes in place
+            number_writeback: u32,
         };
 
         map: std.StringHashMapUnmanaged(Native) = .{},
 
         pub fn put(self: *Self, allocator: Allocator, name: []const u8, call: NativeFn) !void {
-            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .arrays = arrayParams(name), .strings = stringParams(name), .no_discard = no_discard.get(name), .deprecated = deprecations.functions.get(name), .byref = byref_args.hasByRefParams(name), .scalars = scalarParams(name) });
+            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .arrays = arrayParams(name), .strings = stringParams(name), .no_discard = no_discard.get(name), .deprecated = deprecations.functions.get(name), .byref = byref_args.hasByRefParams(name), .scalars = scalarParams(name), .string_writeback = stringWritebackParams(name), .number_writeback = numberWritebackParams(name) });
         }
 
         pub fn get(self: *const Self, name: []const u8) ?Native {
@@ -119,6 +125,47 @@ pub fn stringParams(name: []const u8) u32 {
     for (signature.params, 0..) |param, i| {
         if (i >= 31 or param.variadic) break;
         if (std.mem.eql(u8, param.type, "string") or std.mem.eql(u8, param.type, "?string")) positions |= @as(u32, 1) << @intCast(i);
+    }
+    return positions;
+}
+
+// the parameters, of functions and methods, whose argument parsing converts
+// an int, float or bool argument to a string in place
+// (zend_parse_arg_str_weak), so a trace made during the call shows the
+// string: a string type, alone or with object, array, class or null types
+pub fn stringWritebackParams(name: []const u8) u32 {
+    const signature = native_params.get(name) orelse return 0;
+    var positions: u32 = 0;
+    for (signature.params, 0..) |param, i| {
+        if (i >= 31 or param.variadic) break;
+        if (param.by_ref) continue;
+        const bare = if (param.type.len > 0 and param.type[0] == '?') param.type[1..] else param.type;
+        var has_string = false;
+        var other_scalar = false;
+        var it = std.mem.splitScalar(u8, bare, '|');
+        while (it.next()) |member| {
+            if (std.mem.eql(u8, member, "string")) {
+                has_string = true;
+            } else if (std.mem.eql(u8, member, "int") or std.mem.eql(u8, member, "float") or std.mem.eql(u8, member, "bool") or
+                std.mem.eql(u8, member, "false") or std.mem.eql(u8, member, "true") or std.mem.eql(u8, member, "mixed") or
+                std.mem.eql(u8, member, "callable") or std.mem.eql(u8, member, "Stringable"))
+            {
+                other_scalar = true;
+            }
+        }
+        if (has_string and !other_scalar) positions |= @as(u32, 1) << @intCast(i);
+    }
+    return positions;
+}
+
+// the int|float parameters (Z_PARAM_NUMBER), whose parsing converts a
+// numeric string or a bool argument to a number in place
+pub fn numberWritebackParams(name: []const u8) u32 {
+    const signature = native_params.get(name) orelse return 0;
+    var positions: u32 = 0;
+    for (signature.params, 0..) |param, i| {
+        if (i >= 31 or param.variadic) break;
+        if (!param.by_ref and std.mem.eql(u8, param.type, "int|float")) positions |= @as(u32, 1) << @intCast(i);
     }
     return positions;
 }
