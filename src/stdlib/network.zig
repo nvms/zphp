@@ -1119,6 +1119,65 @@ fn endpointStream(ctx: *NativeContext, sock: std.posix.socket_t, endpoint: Endpo
     return obj;
 }
 
+// EG(persistent_list) for socket streams: pfsockopen's and
+// STREAM_CLIENT_PERSISTENT streams by their hashed id. each holds its
+// resource, so the socket outlives the variables, as a persistent stream does
+threadlocal var persistent_streams: std.StringHashMapUnmanaged(*PhpObject) = .{};
+
+// a request's objects go with it (serve resets between requests)
+pub fn resetPersistentStreams() void {
+    var it = persistent_streams.keyIterator();
+    while (it.next()) |k| std.heap.c_allocator.free(k.*);
+    persistent_streams.clearRetainingCapacity();
+}
+
+// PHP_STREAM_OPTION_CHECK_LIVENESS with a zero timeout: a peer that shut
+// down, or an error a read would report, ends the socket
+fn socketAlive(obj: *PhpObject) bool {
+    const fd = objectFd(obj) orelse return false;
+    if (fd < 0) return false;
+    const sock = platform.socketFromInt(fd) orelse return false;
+    var buf: [1]u8 = undefined;
+    // winsock has no MSG_DONTWAIT: php polls first there
+    if (platform.is_windows) {
+        var pfd = [_]sys.pollfd{.{ .fd = sock, .events = sys.POLL.IN, .revents = 0 }};
+        const ready = sys.poll(&pfd, 0) catch return true;
+        if (ready == 0) return true;
+    }
+    // MSG_PEEK is 2 in winsock
+    const flags: u32 = if (platform.is_windows) 2 else std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT;
+    const n = sys.recv(sock, &buf, flags) catch |err| return switch (err) {
+        error.WouldBlock, error.MessageTooBig => true,
+        else => false,
+    };
+    return n != 0;
+}
+
+// php_stream_from_persistent_id: the live stream an id names, after the
+// liveness check; a dead one is closed and forgotten
+fn reusePersistent(ctx: *NativeContext, id: []const u8) RuntimeError!?*PhpObject {
+    const entry = persistent_streams.fetchRemove(id) orelse return null;
+    const obj = entry.value;
+    if (!value_mod.resourceClosed(obj) and socketAlive(obj)) {
+        persistent_streams.putAssumeCapacity(entry.key, obj);
+        return obj;
+    }
+    std.heap.c_allocator.free(entry.key);
+    if (!value_mod.resourceClosed(obj)) _ = try filesystem.closeStream(ctx, obj);
+    ctx.vm.releaseValue(.{ .resource = obj });
+    return null;
+}
+
+fn keepPersistent(ctx: *NativeContext, id: []const u8, obj: *PhpObject) RuntimeError!void {
+    try obj.set(ctx.allocator, "__persistent", .{ .bool = true });
+    const owned = try std.heap.c_allocator.dupe(u8, id);
+    persistent_streams.put(std.heap.c_allocator, owned, obj) catch {
+        std.heap.c_allocator.free(owned);
+        return error.OutOfMemory;
+    };
+    obj.retain();
+}
+
 fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const host = args[0].string.bytes();
@@ -1139,11 +1198,20 @@ fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     else
         try ctx.allocator.dupe(u8, host);
     defer ctx.allocator.free(target);
-    const result = try connectStream(ctx, args, 2, target, if (args.len > 4) args[4] else null, false, "fsockopen");
-    // pfsockopen's stream is php's "persistent stream" resource
-    if (result.value == .resource and ctx.call_name != null and std.mem.eql(u8, ctx.call_name.?, "pfsockopen")) {
-        try result.value.resource.set(ctx.allocator, "__persistent", .{ .bool = true });
+    // pfsockopen's stream is php's "persistent stream" resource, reused while
+    // it lives by the next pfsockopen of the same host and port
+    const persistent = ctx.call_name != null and std.mem.eql(u8, ctx.call_name.?, "pfsockopen");
+    var id_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer id_buf.deinit(ctx.allocator);
+    if (persistent) {
+        try id_buf.print(ctx.allocator, "pfsockopen__{s}:{d}", .{ host, port });
+        if (try reusePersistent(ctx, id_buf.items)) |obj| {
+            try reportSocketError(ctx, args, 2, null);
+            return NativeResult.borrowed(.{ .resource = obj });
+        }
     }
+    const result = try connectStream(ctx, args, 2, target, if (args.len > 4) args[4] else null, false, "fsockopen");
+    if (result.value == .resource and persistent) try keepPersistent(ctx, id_buf.items, result.value.resource);
     return result;
 }
 
@@ -1192,9 +1260,19 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
     if (!std.ascii.eqlIgnoreCase(scheme, "unix") and !std.ascii.eqlIgnoreCase(scheme, "udg")) {
         _ = socketOptions(context) catch |err| return failConnect(ctx, args, 1, "stream_socket_client", args[0].string.bytes(), err);
     }
+    var id_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer id_buf.deinit(ctx.allocator);
+    if ((flags & 1) != 0) {
+        try id_buf.print(ctx.allocator, "stream_socket_client__{s}", .{args[0].string.bytes()});
+        if (try reusePersistent(ctx, id_buf.items)) |obj| {
+            try reportSocketError(ctx, args, 1, null);
+            return NativeResult.borrowed(.{ .resource = obj });
+        }
+    }
     const result = try connectStream(ctx, args, 1, args[0].string.bytes(), if (args.len > 3) args[3] else null, (flags & 2) != 0, "stream_socket_client");
     // the socket keeps the context it was made with (php_stream_xport_create)
     if (result.value == .resource) try filesystem.attachContext(ctx, result.value.resource, if (args.len > 5) args[5] else null);
+    if (result.value == .resource and (flags & 1) != 0) try keepPersistent(ctx, id_buf.items, result.value.resource);
     return result;
 }
 

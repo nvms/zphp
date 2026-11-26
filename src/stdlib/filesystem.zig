@@ -2819,6 +2819,7 @@ threadlocal var stat_cache_allocator: ?Allocator = null;
 pub fn resetStreamState() void {
     clearStatCache();
     user_streams.freeErrorLog();
+    network.resetPersistentStreams();
 }
 
 pub fn clearStatCache() void {
