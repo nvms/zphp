@@ -12,6 +12,11 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const c = @import("c_curl");
 const array_diff = @import("array_diff.zig");
+const value_mod = @import("../runtime/value.zig");
+const fs = @import("filesystem.zig");
+const streams = @import("streams.zig");
+const platform = @import("../platform.zig");
+const sys = @import("../sys.zig");
 
 pub const entries = .{
     .{ "curl_init", curlInit },
@@ -207,15 +212,23 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
     // WRITEFUNCTION wins, and clearing the function goes back to stdout
     if (option == c.CURLOPT_WRITEFUNCTION) {
         try obj.set(ctx.allocator, "__write_user", .{ .bool = value != .null });
+        try obj.set(ctx.allocator, "__file_stream", .null);
         if (value == .null) try obj.set(ctx.allocator, "__return_transfer", .{ .bool = false });
         return setCallback(ctx, obj, "__write_function", value);
     }
-    if (option == c.CURLOPT_HEADERFUNCTION) return setCallback(ctx, obj, "__header_function", value);
+    if (option == c.CURLOPT_HEADERFUNCTION) {
+        if (value != .null) try obj.set(ctx.allocator, "__header_stream", .null);
+        return setCallback(ctx, obj, "__header_function", value);
+    }
+    if (option == c.CURLOPT_FILE or option == c.CURLOPT_WRITEHEADER or option == c.CURLOPT_INFILE or option == c.CURLOPT_STDERR) {
+        return setStreamOption(ctx, obj, option, value);
+    }
 
     // CURLOPT_RETURNTRANSFER - PHP-specific, not a real libcurl option
     if (option == 19913) {
         try obj.set(ctx.allocator, "__return_transfer", .{ .bool = value.isTruthy() });
         try obj.set(ctx.allocator, "__write_user", .{ .bool = false });
+        try obj.set(ctx.allocator, "__file_stream", .null);
         return NativeResult.scalar(.{ .bool = true });
     }
     // backward compatibility only
@@ -342,6 +355,101 @@ fn optionIn(comptime list: []const []const u8, option: i64) bool {
     return false;
 }
 
+// CURLOPT_FILE, _WRITEHEADER, _INFILE and _STDERR take a stream (null
+// resets the handler). php casts it to a FILE*: curl's bytes go straight
+// to a plain file's descriptor, past the stream's own position, and through
+// the stream's operations for anything else
+fn setStreamOption(ctx: *NativeContext, obj: *PhpObject, option: i64, value: Value) RuntimeError!NativeResult {
+    const slot: []const u8 = if (option == c.CURLOPT_FILE) "__file_stream" else if (option == c.CURLOPT_WRITEHEADER) "__header_stream" else if (option == c.CURLOPT_INFILE) "__infile_stream" else "__stderr_stream";
+    const name: []const u8 = if (option == c.CURLOPT_FILE) "CURLOPT_FILE" else if (option == c.CURLOPT_WRITEHEADER) "CURLOPT_WRITEHEADER" else "CURLOPT_STDERR";
+    if (value == .null) {
+        try obj.set(ctx.allocator, slot, .null);
+        return NativeResult.scalar(.{ .bool = true });
+    }
+    // zend_fetch_resource2_ex
+    if (value != .resource) {
+        try ctx.vm.setPendingException("TypeError", "curl_setopt(): supplied argument is not a valid File-Handle resource");
+        return error.RuntimeError;
+    }
+    const res = value.resource;
+    const is_stream = std.mem.eql(u8, res.class_name, "FileHandle") or std.mem.eql(u8, res.class_name, "DirectoryHandle");
+    if (!is_stream or value_mod.resourceClosed(res)) {
+        try ctx.vm.setPendingException("TypeError", "curl_setopt(): supplied resource is not a valid File-Handle resource");
+        return error.RuntimeError;
+    }
+    if (option != c.CURLOPT_INFILE) {
+        const mode_v = res.get("__mode");
+        const mode: []const u8 = if (mode_v == .string) mode_v.string.bytes() else "r";
+        const writable = mode.len == 0 or mode[0] != 'r' or (mode.len > 1 and mode[1] == '+');
+        if (!writable) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "curl_setopt(): The file handle provided for {s} must be writable", .{name});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("ValueError", msg);
+            return error.RuntimeError;
+        }
+    }
+    try obj.set(ctx.allocator, slot, value);
+    if (option == c.CURLOPT_FILE) {
+        try obj.set(ctx.allocator, "__write_user", .{ .bool = false });
+        try obj.set(ctx.allocator, "__return_transfer", .{ .bool = false });
+    }
+    if (option == c.CURLOPT_WRITEHEADER) try obj.set(ctx.allocator, "__header_function", .null);
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn streamSlot(obj: *PhpObject, slot: []const u8) ?*PhpObject {
+    const v = obj.get(slot);
+    return if (v == .resource) v.resource else null;
+}
+
+// _php_curl_verify_handlers: a stream closed since it was set is dropped
+fn verifyHandlers(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
+    inline for (.{
+        .{ "__stderr_stream", "CURLOPT_STDERR resource has gone away, resetting to stderr" },
+        .{ "__infile_stream", "CURLOPT_INFILE resource has gone away, resetting to default" },
+        .{ "__header_stream", "CURLOPT_WRITEHEADER resource has gone away, resetting to default" },
+        .{ "__file_stream", "CURLOPT_FILE resource has gone away, resetting to default" },
+    }) |entry| {
+        if (streamSlot(obj, entry[0])) |res| if (value_mod.resourceClosed(res)) {
+            try ctx.vm.emitWarning("curl_exec(): " ++ entry[1]);
+            try obj.set(ctx.allocator, entry[0], .null);
+        };
+    }
+}
+
+// a plain file (or pipe) stream's descriptor, which the FILE* php casts to
+// writes through directly
+fn rawDescriptor(res: *PhpObject) ?std.posix.fd_t {
+    if (fs.isNetStream(res)) return null;
+    if (streams.backend(res) != .fd) return null;
+    const fd = res.get("__fd");
+    return if (fd == .int and fd.int >= 0) @intCast(fd.int) else null;
+}
+
+fn writeToStream(ctx: *NativeContext, res: *PhpObject, data: []const u8) usize {
+    if (value_mod.resourceClosed(res)) return 0;
+    if (!platform.is_windows) if (rawDescriptor(res)) |fd| {
+        var done: usize = 0;
+        while (done < data.len) {
+            const n = sys.write(fd, data[done..]) catch break;
+            if (n == 0) break;
+            done += n;
+        }
+        return done;
+    };
+    const n = streams.write(ctx, res, data) catch return 0;
+    return if (n < 0) 0 else @intCast(n);
+}
+
+fn readFromStream(ctx: *NativeContext, res: *PhpObject, dest: []u8) usize {
+    if (value_mod.resourceClosed(res)) return 0;
+    if (!platform.is_windows) if (rawDescriptor(res)) |fd| {
+        return std.posix.read(fd, dest) catch 0;
+    };
+    const n = streams.read(ctx, res, dest) catch return 0;
+    return if (n < 0) 0 else @intCast(n);
+}
+
 // SAVE_CURL_ERROR
 fn setoptResult(ctx: *NativeContext, obj: *PhpObject, code: c.CURLcode) RuntimeError!NativeResult {
     try obj.set(ctx.allocator, "__errno", .{ .int = @intCast(code) });
@@ -388,6 +496,10 @@ const Transfer = struct {
     write_fn: Value,
     header_fn: Value,
     return_transfer: bool,
+    file_stream: ?*PhpObject = null,
+    header_stream: ?*PhpObject = null,
+    infile_stream: ?*PhpObject = null,
+    stderr_stream: ?*PhpObject = null,
     buffer: std.ArrayListUnmanaged(u8) = .empty,
     failed: bool = false,
 
@@ -413,6 +525,7 @@ fn transferWrite(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) c
     const total = size * nmemb;
     const t: *Transfer = @ptrCast(@alignCast(userdata));
     if (t.write_fn != .null) return t.call(t.write_fn, data[0..total]);
+    if (t.file_stream) |res| return writeToStream(t.ctx, res, data[0..total]);
     if (t.return_transfer) {
         t.buffer.appendSlice(t.ctx.allocator, data[0..total]) catch return 0;
     } else {
@@ -425,7 +538,49 @@ fn transferWrite(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) c
 fn transferHeader(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
     const total = size * nmemb;
     const t: *Transfer = @ptrCast(@alignCast(userdata));
+    if (t.header_stream) |res| return writeToStream(t.ctx, res, data[0..total]);
     return t.call(t.header_fn, data[0..total]);
+}
+
+// curl_read's PHP_CURL_DIRECT: the INFILE stream, or nothing without one
+fn transferRead(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
+    const t: *Transfer = @ptrCast(@alignCast(userdata));
+    const res = t.infile_stream orelse return 0;
+    return readFromStream(t.ctx, res, data[0 .. size * nmemb]);
+}
+
+// the FILE* libcurl writes its verbose output to, over the STDERR stream:
+// a plain file's descriptor, or (glibc and musl) a cookie stream through
+// the stream's operations
+const CookieIo = extern struct {
+    read: ?*const anyopaque = null,
+    write: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.c) isize,
+    seek: ?*const anyopaque = null,
+    close: ?*const anyopaque = null,
+};
+extern "c" fn fopencookie(cookie: ?*anyopaque, mode: [*:0]const u8, funcs: CookieIo) ?*anyopaque;
+extern "c" fn fdopen(fd: c_int, mode: [*:0]const u8) ?*anyopaque;
+extern "c" fn fclose(file: ?*anyopaque) c_int;
+
+fn cookieWrite(cookie: ?*anyopaque, data: [*]const u8, len: usize) callconv(.c) isize {
+    const t: *Transfer = @ptrCast(@alignCast(cookie orelse return -1));
+    const res = t.stderr_stream orelse return -1;
+    return @intCast(writeToStream(t.ctx, res, data[0..len]));
+}
+
+fn openStderrFile(t: *Transfer) ?*anyopaque {
+    if (platform.is_windows) return null;
+    const res = t.stderr_stream orelse return null;
+    if (rawDescriptor(res)) |fd| {
+        const copy = std.c.dup(fd);
+        if (copy < 0) return null;
+        return fdopen(copy, "a") orelse {
+            sys.close(copy);
+            return null;
+        };
+    }
+    if (comptime @import("builtin").os.tag != .linux) return null;
+    return fopencookie(t, "a", .{ .write = &cookieWrite });
 }
 
 const CurlCallback = ?*const fn ([*]u8, usize, usize, *anyopaque) callconv(.c) usize;
@@ -440,6 +595,7 @@ fn curlExec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const obj = getThisObj(args) orelse return NativeResult.scalar(.{ .bool = false });
     const handle = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
+    try verifyHandlers(ctx, obj);
     const return_transfer_v = obj.get("__return_transfer");
     var transfer = Transfer{
         .ctx = ctx,
@@ -447,12 +603,24 @@ fn curlExec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
         .write_fn = if (obj.get("__write_user") == .bool and obj.get("__write_user").bool) callbackValue(obj, "__write_function") else .null,
         .header_fn = callbackValue(obj, "__header_function"),
         .return_transfer = return_transfer_v == .bool and return_transfer_v.bool,
+        .file_stream = streamSlot(obj, "__file_stream"),
+        .header_stream = streamSlot(obj, "__header_stream"),
+        .infile_stream = streamSlot(obj, "__infile_stream"),
+        .stderr_stream = streamSlot(obj, "__stderr_stream"),
     };
     defer transfer.buffer.deinit(ctx.allocator);
 
     _ = c.curl_easy_setopt(handle, c.CURLOPT_WRITEFUNCTION, @as(CurlCallback, &transferWrite));
     _ = c.curl_easy_setopt(handle, c.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&transfer)));
-    if (transfer.header_fn != .null) {
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_READFUNCTION, @as(CurlCallback, &transferRead));
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_READDATA, @as(*anyopaque, @ptrCast(&transfer)));
+    const stderr_file = openStderrFile(&transfer);
+    if (stderr_file) |f| _ = c.curl_easy_setopt(handle, c.CURLOPT_STDERR, f);
+    defer if (stderr_file) |f| {
+        _ = c.curl_easy_setopt(handle, c.CURLOPT_STDERR, @as(?*anyopaque, null));
+        _ = fclose(f);
+    };
+    if (transfer.header_fn != .null or transfer.header_stream != null) {
         _ = c.curl_easy_setopt(handle, c.CURLOPT_HEADERFUNCTION, @as(CurlCallback, &transferHeader));
         _ = c.curl_easy_setopt(handle, c.CURLOPT_HEADERDATA, @as(*anyopaque, @ptrCast(&transfer)));
     } else {
@@ -466,6 +634,8 @@ fn curlExec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     _ = c.curl_easy_setopt(handle, c.CURLOPT_HEADERDATA, @as(?*anyopaque, null));
     _ = c.curl_easy_setopt(handle, c.CURLOPT_WRITEFUNCTION, @as(CurlCallback, null));
     _ = c.curl_easy_setopt(handle, c.CURLOPT_HEADERFUNCTION, @as(CurlCallback, null));
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_READDATA, @as(?*anyopaque, null));
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_READFUNCTION, @as(CurlCallback, null));
     if (ctx.vm.pending_exception != null) return error.RuntimeError;
 
     // store error info
@@ -806,7 +976,7 @@ fn curlReset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     try obj.set(ctx.allocator, "__error", .{ .string = Value.String.borrowed("") });
     try obj.set(ctx.allocator, "__errno", .{ .int = 0 });
     try obj.set(ctx.allocator, "__http_code", .{ .int = 0 });
-    for ([_][]const u8{ "__write_function", "__header_function", "__private" }) |name| {
+    for ([_][]const u8{ "__write_function", "__header_function", "__private", "__file_stream", "__header_stream", "__infile_stream", "__stderr_stream" }) |name| {
         if (obj.get(name) != .undef) try obj.set(ctx.allocator, name, .null);
     }
     freeSlist(obj);
