@@ -1666,7 +1666,7 @@ fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
                 } else {
                     // too large for an int, it is read as a string
                     var buf: [64]u8 = undefined;
-                    try ctx.vm.output.appendSlice(ctx.allocator, @import("formatted_print.zig").gcvt(f, 14, '.', 'E', &buf));
+                    try exitWrite(ctx, @import("formatted_print.zig").gcvt(f, 14, '.', 'E', &buf));
                     ctx.vm.exit_requested = true;
                     return error.RuntimeError;
                 }
@@ -1678,13 +1678,22 @@ fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
             else => return exitTypeError(ctx, arg),
         }
         if (text) |t| {
-            try ctx.vm.output.appendSlice(ctx.allocator, t);
+            try exitWrite(ctx, t);
         } else {
             ctx.vm.exit_code = @truncate(status);
         }
     }
     ctx.vm.exit_requested = true;
     return error.RuntimeError;
+}
+
+// exit()'s message is an ordinary write: an output handler it runs may
+// throw, and then exit returns with the exception instead of exiting
+fn exitWrite(ctx: *NativeContext, text: []const u8) RuntimeError!void {
+    if (text.len == 0) return;
+    try ctx.vm.output.appendSlice(ctx.allocator, text);
+    if (ctx.vm.ob_chunk_watch) try @import("output_control.zig").checkChunks(ctx.vm);
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
 }
 
 fn exitTypeError(ctx: *NativeContext, arg: Value) RuntimeError!NativeResult {
