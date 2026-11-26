@@ -24793,17 +24793,23 @@ pub const VM = struct {
         if (frame.call_name) |name| self.releaseClosureByName(name);
         const snames = if (frame.func) |f| f.slot_names else frame.slot_names;
         const vars_populated = frame.vars.count() > 0;
+        // zend_free_compiled_variables: the compiled variables in their
+        // order (a slot whose variable lives in the table releases the
+        // table's value), then the rest of the table
+        for (frame.locals, 0..) |lv, i| {
+            const name = if (i < snames.len) snames[i] else "<unnamed slot>";
+            const v = if (vars_populated and i < snames.len and snames[i].len > 0) frame.vars.get(snames[i]) orelse lv else lv;
+            self.releaseValue(v);
+            if (self.debug_gc_verify) self.gcRecordFrameRelease(frame, name, v);
+        }
         if (vars_populated) {
             var it = frame.vars.iterator();
-            while (it.next()) |entry| {
+            next: while (it.next()) |entry| {
+                const name = entry.key_ptr.*;
+                for (snames[0..@min(snames.len, frame.locals.len)]) |sn| if (sn.len > 0 and std.mem.eql(u8, sn, name)) continue :next;
                 self.releaseValue(entry.value_ptr.*);
-                if (self.debug_gc_verify) self.gcRecordFrameRelease(frame, entry.key_ptr.*, entry.value_ptr.*);
+                if (self.debug_gc_verify) self.gcRecordFrameRelease(frame, name, entry.value_ptr.*);
             }
-        }
-        for (frame.locals, 0..) |lv, i| {
-            if (vars_populated and i < snames.len and snames[i].len > 0 and frame.vars.contains(snames[i])) continue;
-            self.releaseValue(lv);
-            if (self.debug_gc_verify) self.gcRecordFrameRelease(frame, if (i < snames.len) snames[i] else "<unnamed slot>", lv);
         }
     }
 
