@@ -1930,6 +1930,8 @@ fn noBuiltinDefault(name: []const u8) bool {
         .{"output_encoding"},     .{"output_handler"},             .{"request_order"},         .{"sendmail_from"},
         .{"sqlite3.extension_dir"}, .{"sys_temp_dir"},             .{"unserialize_callback_func"}, .{"upload_tmp_dir"},
         .{"user_agent"},          .{"user_dir"},                   .{"zend.script_encoding"},
+        .{"mbstring.detect_order"}, .{"mbstring.http_input"},      .{"mbstring.http_output"},  .{"mbstring.internal_encoding"},
+        .{"mbstring.substitute_character"},
     });
     return names.has(name);
 }
@@ -2141,7 +2143,7 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         else => {},
     }
     // PHP rejects unknown directives. Only allow known names.
-    const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else return NativeResult.scalar(Value{ .bool = false });
+    const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else if (std.mem.startsWith(u8, name, "mbstring.") and noBuiltinDefault(name)) "" else return NativeResult.scalar(Value{ .bool = false });
     // max_memory_limit can only be set at startup, and so can the mail
     // and syslog settings (PHP_INI_SYSTEM)
     if (std.mem.eql(u8, name, "max_memory_limit") or @import("mail.zig").isSystemIni(name) or std.mem.eql(u8, name, "syslog.facility") or std.mem.eql(u8, name, "syslog.ident") or std.mem.eql(u8, name, "arg_separator.input")) return NativeResult.scalar(Value{ .bool = false });
@@ -2175,6 +2177,10 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         }
     }
     if (std.mem.eql(u8, name, "assert.callback") and (buf.items.len > 0 or ctx.vm.ini_callbacks.contains("assert.callback"))) try ctx.vm.raiseError(8192, "ini_set(): assert.callback INI setting is deprecated");
+    // mbstring's handlers deprecate its encoding settings on any new value
+    inline for (.{ "mbstring.http_input", "mbstring.http_output", "mbstring.internal_encoding" }) |deprecated| {
+        if (std.mem.eql(u8, name, deprecated)) try ctx.vm.raiseError(8192, "ini_set(): Use of " ++ deprecated ++ " is deprecated");
+    }
     if (std.mem.startsWith(u8, name, "session.")) {
         // the session's handlers refuse changes while a session runs
         // (SESSION_CHECK_ACTIVE_STATE), and deprecate the transparent

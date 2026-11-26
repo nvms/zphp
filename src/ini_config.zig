@@ -321,6 +321,14 @@ fn reportStartupDeprecations(vm: *VM) RuntimeError!void {
     if (get("report_memleaks")) |value| if (!iniBool(value)) {
         try vm.raiseErrorAt(8192, "PHP Startup: Directive 'report_memleaks' is deprecated", .{ .file = "Unknown", .line = 0 });
     };
+    // mbstring's handlers deprecate its encoding settings whenever they are
+    // given a value, even an empty one, in the order it declares them
+    for ([_][]const u8{ "mbstring.http_input", "mbstring.http_output", "mbstring.internal_encoding" }) |name| {
+        if (get(name) == null) continue;
+        const msg = try std.fmt.allocPrint(vm.allocator, "PHP Startup: Use of {s} is deprecated", .{name});
+        defer vm.allocator.free(msg);
+        try vm.raiseErrorAt(8192, msg, .{ .file = "Unknown", .line = 0 });
+    }
     // mbstring reapplies zend.script_encoding as it starts
     if (@import("pipeline/multibyte.zig").invalid_script_encoding) |name| {
         const msg = try std.fmt.allocPrint(vm.allocator, "PHP Startup: INI setting contains invalid encoding \"{s}\"", .{name});
