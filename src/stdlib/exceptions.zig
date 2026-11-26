@@ -418,6 +418,12 @@ fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError
 fn traceString(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(ctx.allocator);
-    @import("../error_format.zig").writeTrace(&buf, ctx.allocator, throwable.getForScope("trace", ctx.vm.exceptionTraceScope(throwable)));
+    const Warner = struct {
+        vm: *VM,
+        pub fn warn(self: @This(), msg: []const u8) void {
+            self.vm.emitWarning(msg) catch {};
+        }
+    };
+    @import("../error_format.zig").writeTrace(&buf, ctx.allocator, throwable.getForScope("trace", ctx.vm.exceptionTraceScope(throwable)), Warner{ .vm = ctx.vm });
     return buf.toOwnedSlice(ctx.allocator);
 }

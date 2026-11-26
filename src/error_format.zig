@@ -256,7 +256,7 @@ fn writeFatalTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, err: *
     // a compile error php's parser raises
     if (err.get("__no_trace") == .bool) return;
     write(buf, alloc, "Stack trace:\n");
-    writeTrace(buf, alloc, err.getForScope("trace", vm.exceptionTraceScope(err)));
+    writeTrace(buf, alloc, err.getForScope("trace", vm.exceptionTraceScope(err)), null);
     write(buf, alloc, "\n");
 }
 
@@ -404,42 +404,76 @@ pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
 }
 
 // a throwable's trace array as getTraceAsString() prints it, ending with the
-// {main} line and no newline
-pub fn writeTrace(buf: *Writer, alloc: std.mem.Allocator, trace: Value) void {
+// {main} line and no newline: zend_trace_to_string and _build_trace_string.
+// `warner` (null, or anything with `warn(msg)`) gets php's warnings about
+// malformed frames
+pub fn writeTrace(buf: *Writer, alloc: std.mem.Allocator, trace: Value, warner: anytype) void {
+    const Warner = @TypeOf(warner);
+    const warn = struct {
+        fn f(w: Warner, msg: []const u8) void {
+            if (Warner != @TypeOf(null)) w.warn(msg);
+        }
+    }.f;
     if (trace != .array) {
         write(buf, alloc, "#0 {main}");
         return;
     }
-    for (trace.array.entries.items, 0..) |entry, i| {
-        if (entry.value != .array) continue;
-        const e = entry.value.array;
-        // php appends these as C strings, which end at an anonymous class's NUL
-        const fn_s = class_names.display(stringField(e, "function") orelse "?");
-        const class_s = class_names.display(stringField(e, "class") orelse "");
-        const type_s = stringField(e, "type") orelse "";
-        const file_s = stringField(e, "file") orelse "";
-        const line_v = e.get(.{ .string = Value.String.borrowed("line") });
-        const line_n: i64 = if (line_v == .int) line_v.int else 0;
-        // a frame with no file/line was called from an internal function
-        // (a native dispatched the user callback) - PHP renders these as
-        // `[internal function]` instead of the synthesized `(0)` location
-        if (file_s.len == 0 and line_n == 0) {
-            writeFmt(buf, alloc, "#{d} [internal function]: {s}{s}{s}(", .{ i, class_s, type_s, fn_s });
-        } else {
-            writeFmt(buf, alloc, "#{d} {s}({d}): {s}{s}{s}(", .{ i, file_s, line_n, class_s, type_s, fn_s });
+    var num: usize = 0;
+    for (trace.array.entries.items) |entry| {
+        const frame = if (entry.ref) |r| r.* else entry.value;
+        if (frame != .array) {
+            var tmp: [64]u8 = undefined;
+            const index: i64 = switch (entry.key) {
+                .int => |k| k,
+                .string => 0,
+            };
+            warn(warner, std.fmt.bufPrint(&tmp, "Expected array for frame {d}", .{index}) catch "Expected array for frame");
+            continue;
         }
-        const args_v = e.get(.{ .string = Value.String.borrowed("args") });
-        if (args_v == .array) {
-            for (args_v.array.entries.items, 0..) |arg_entry, ai| {
-                if (ai > 0) write(buf, alloc, ", ");
-                // a named argument (one a variadic collected) shows its name
-                if (arg_entry.key == .string) writeFmt(buf, alloc, "{s}: ", .{arg_entry.key.string.bytes()});
-                writeTraceArg(buf, alloc, arg_entry.value);
+        const e = frame.array;
+        writeFmt(buf, alloc, "#{d} ", .{num});
+        num += 1;
+        if (field(e, "file")) |file| {
+            if (file != .string) {
+                warn(warner, "File name is not a string");
+                write(buf, alloc, "[unknown file]: ");
+            } else {
+                var line: i64 = 0;
+                if (field(e, "line")) |l| {
+                    if (l == .int) line = l.int else warn(warner, "Line is not an int");
+                }
+                writeFmt(buf, alloc, "{s}({d}): ", .{ file.string.bytes(), line });
             }
+        } else write(buf, alloc, "[internal function]: ");
+        // php appends these as C strings, which end at an anonymous class's NUL
+        inline for (.{ "class", "type", "function" }) |key| {
+            if (field(e, key)) |v| {
+                if (v != .string) {
+                    warn(warner, "Value for " ++ key ++ " is not a string");
+                    write(buf, alloc, "[unknown]");
+                } else write(buf, alloc, class_names.display(v.string.bytes()));
+            }
+        }
+        write(buf, alloc, "(");
+        if (field(e, "args")) |args_v| {
+            if (args_v == .array) {
+                for (args_v.array.entries.items, 0..) |arg_entry, ai| {
+                    if (ai > 0) write(buf, alloc, ", ");
+                    // a named argument (one a variadic collected) shows its name
+                    if (arg_entry.key == .string) writeFmt(buf, alloc, "{s}: ", .{arg_entry.key.string.bytes()});
+                    writeTraceArg(buf, alloc, if (arg_entry.ref) |r| r.* else arg_entry.value);
+                }
+            } else warn(warner, "args element is not an array");
         }
         write(buf, alloc, ")\n");
     }
-    writeFmt(buf, alloc, "#{d} {{main}}", .{trace.array.entries.items.len});
+    writeFmt(buf, alloc, "#{d} {{main}}", .{num});
+}
+
+// a frame's element, whatever it holds
+fn field(arr: anytype, key: []const u8) ?Value {
+    const ep = arr.getPtr(.{ .string = Value.String.borrowed(key) }) orelse return null;
+    return if (ep.ref) |r| r.* else ep.value;
 }
 
 fn stringField(arr: anytype, key: []const u8) ?[]const u8 {
