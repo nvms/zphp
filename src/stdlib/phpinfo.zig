@@ -35,6 +35,9 @@ pub const CREDITS_ALL: i64 = 0xFFFFFFFF;
 
 const Out = struct {
     ctx: *NativeContext,
+    // phpinfo() sorts the directives first (zend_ini_sort_entries); a
+    // module printed alone lists them as registered
+    sorted: bool = true,
 
     fn print(self: Out, s: []const u8) RuntimeError!void {
         try self.ctx.vm.output.appendSlice(self.ctx.allocator, s);
@@ -290,8 +293,8 @@ const module_infos = [_]ModuleInfo{
     .{ .name = "curl", .tables = &.{.{ .rows = &.{enabled("cURL support")} }} },
     .{ .name = "date", .tables = &.{.{ .rows = &.{
         enabled("date/time support"),
-        .{ t("timelib version"), t("2022.17") },
-        .{ t("\"Olson\" Timezone Database Version"), t("0.system") },
+        .{ t("timelib version"), t("2026.03") },
+        .{ t("\"Olson\" Timezone Database Version"), .{ .call = "timezone_version_get" } },
         .{ t("Timezone Database"), t("internal") },
         .{ t("Default timezone"), .{ .call = "date_default_timezone_get" } },
     } }} },
@@ -423,38 +426,8 @@ fn printModules(ctx: *NativeContext, out: Out) RuntimeError!void {
     std.mem.sort([]const u8, names.items, {}, lessIgnoreCase);
 
     for (names.items) |name| {
-        if (nativeExtension(name)) |ext| {
-            if (ext.version.len == 0) continue;
-            try out.section(name);
-            try out.tableStart();
-            try out.row(&.{ "Version", ext.version });
-            try nativeExtensionIni(ctx, out, ext);
-            continue;
-        }
-        try out.section(name);
-        if (std.mem.eql(u8, name, "Core")) {
-            try out.tableStart();
-            try out.row(&.{ "PHP Version", php_version.string });
-            try iniEntries(ctx, out, name);
-            continue;
-        }
-        if (std.mem.eql(u8, name, "pcre")) {
-            try @import("pcre.zig").writeInfoTable(ctx, &ctx.vm.output);
-            try iniEntries(ctx, out, name);
-            continue;
-        }
-        const info = for (&module_infos) |*m| {
-            if (std.mem.eql(u8, m.name, name)) break m;
-        } else null;
-        if (info) |m| {
-            for (m.tables) |table| try printTable(ctx, out, table);
-            if (!m.no_ini) try iniEntries(ctx, out, name);
-        } else {
-            // a module without an info function: its version and directives
-            try out.tableStart();
-            try out.row(&.{ "Version", php_version.string });
-            try iniEntries(ctx, out, name);
-        }
+        if (nativeExtension(name)) |ext| if (ext.version.len == 0) continue;
+        try printModuleSection(ctx, out, name);
     }
 
     try out.section("Additional Modules");
@@ -464,6 +437,51 @@ fn printModules(ctx: *NativeContext, out: Out) RuntimeError!void {
         const ext = nativeExtension(name) orelse continue;
         if (ext.version.len == 0) try out.printf("{s}\n", .{name});
     }
+}
+
+// php_info_print_module for a module with information: its name, then its
+// MINFO table or its version and directives
+fn printModuleSection(ctx: *NativeContext, out: Out, name: []const u8) RuntimeError!void {
+    if (nativeExtension(name)) |ext| {
+        if (ext.version.len == 0) return out.printf("{s}\n", .{name});
+        try out.section(name);
+        try out.tableStart();
+        try out.row(&.{ "Version", ext.version });
+        return nativeExtensionIni(ctx, out, ext);
+    }
+    try out.section(name);
+    if (std.mem.eql(u8, name, "Core")) {
+        try out.tableStart();
+        try out.row(&.{ "PHP Version", php_version.string });
+        return iniEntries(ctx, out, name);
+    }
+    if (std.mem.eql(u8, name, "pcre")) {
+        try @import("pcre.zig").writeInfoTable(ctx, &ctx.vm.output);
+        return iniEntries(ctx, out, name);
+    }
+    const info = for (&module_infos) |*m| {
+        if (std.mem.eql(u8, m.name, name)) break m;
+    } else null;
+    if (info) |m| {
+        for (m.tables) |table| try printTable(ctx, out, table);
+        if (!m.no_ini) try iniEntries(ctx, out, name);
+    } else {
+        // a module without an info function: its version and directives
+        try out.tableStart();
+        try out.row(&.{ "Version", php_version.string });
+        try iniEntries(ctx, out, name);
+    }
+}
+
+// php_info_print_module (ReflectionExtension::info, the cli's --ri) for a
+// module by its declared name
+pub fn printModule(ctx: *NativeContext, name: []const u8) RuntimeError!void {
+    return printModuleSection(ctx, .{ .ctx = ctx, .sorted = false }, name);
+}
+
+// the cli's --ri main: display_ini_entries(NULL), the engine's directives
+pub fn printMainIni(ctx: *NativeContext) RuntimeError!void {
+    return iniEntries(ctx, .{ .ctx = ctx, .sorted = false }, "Core");
 }
 
 fn nativeExtension(name: []const u8) ?*@import("../extension.zig").Extension {
@@ -579,7 +597,7 @@ fn atol(s: []const u8) i64 {
     return std.fmt.parseInt(i64, trimmed[0..end], 10) catch 0;
 }
 
-// display_ini_entries(module): the module's directives sorted by name
+// display_ini_entries(module): the module's directives, sorted when phpinfo() sorted them
 fn iniEntries(ctx: *NativeContext, out: Out, module: []const u8) RuntimeError!void {
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(ctx.allocator);
@@ -587,7 +605,7 @@ fn iniEntries(ctx: *NativeContext, out: Out, module: []const u8) RuntimeError!vo
         if (std.ascii.eqlIgnoreCase(entry[1], module)) try names.append(ctx.allocator, entry[0]);
     }
     if (names.items.len == 0) return;
-    std.mem.sort([]const u8, names.items, {}, lessIgnoreCase);
+    if (out.sorted) std.mem.sort([]const u8, names.items, {}, lessIgnoreCase);
     try out.tableStart();
     try out.header(&.{ "Directive", "Local Value", "Master Value" });
     for (names.items) |name| {

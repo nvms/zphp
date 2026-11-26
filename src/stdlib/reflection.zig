@@ -909,28 +909,7 @@ fn reflectionTrue(_: *NativeContext, _: []const Value) RuntimeError!NativeResult
 fn rextInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(ctx.allocator);
-    try out.print(ctx.allocator, "\n{s}\n\n", .{name});
-    if (std.mem.eql(u8, name, "Reflection")) {
-        try out.appendSlice(ctx.allocator, "Reflection => enabled\n");
-    } else if (std.mem.eql(u8, name, "date")) {
-        const zone = try ctx.vm.callByName("date_default_timezone_get", &.{});
-        try out.print(ctx.allocator, "date/time support => enabled\ntimelib version => 2022.17\n\"Olson\" Timezone Database Version => 0.system\nTimezone Database => internal\nDefault timezone => {s}\n", .{if (zone == .string) zone.string.bytes() else "UTC"});
-    } else {
-        try out.print(ctx.allocator, "{s} support => enabled\n", .{name});
-    }
-    var first = true;
-    for (extensions.ini) |pair| {
-        const entry = pair[0];
-        if (!std.mem.eql(u8, pair[1], name)) continue;
-        if (first) try out.appendSlice(ctx.allocator, "\nDirective => Local Value => Master Value\n");
-        first = false;
-        const v = try ctx.vm.callByName("ini_get", &.{.{ .string = Value.String.borrowed(entry) }});
-        const text = if (v == .string) (if (v.string.bytes().len == 0) "no value" else v.string.bytes()) else "no value";
-        try out.print(ctx.allocator, "{s} => {s} => {s}\n", .{ entry, text, text });
-    }
-    try ctx.vm.output.appendSlice(ctx.allocator, out.items);
+    try @import("phpinfo.zig").printModule(ctx, name);
     return NativeResult.scalar(.null);
 }
 
