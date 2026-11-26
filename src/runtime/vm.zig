@@ -10866,7 +10866,7 @@ pub const VM = struct {
                     return error.RuntimeError;
                 },
 
-                .separate_static_prop => {
+                .separate_static_prop, .separate_static_prop_unset => {
                     const class_idx = self.readU16();
                     const prop_idx = self.readU16();
                     const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
@@ -10875,7 +10875,7 @@ pub const VM = struct {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     };
-                    _ = self.staticPropTarget(class_name, prop_name, .indirect) catch {
+                    _ = self.staticPropTarget(class_name, prop_name, if (op == .separate_static_prop_unset) .unset else .indirect) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     };
@@ -29858,7 +29858,9 @@ pub const VM = struct {
     }
 
     // declare installs a declared default, which no scope rule applies to
-    const StaticAccess = enum { read, write, indirect, declare };
+    // unset is an indirect write that lets an object or an uninitialized
+    // property through (zend_fetch_static_prop_helper's BP_VAR_UNSET)
+    const StaticAccess = enum { read, write, indirect, unset, declare };
 
     // the error php raises for a static property access the current scope
     // may not make, or null when it may. any access needs the declaring
@@ -29883,7 +29885,11 @@ pub const VM = struct {
         if (access == .read) return null;
         const set_vis = explicit_set_vis orelse return null;
         if (self.checkVisibility(declaring, set_vis)) return null;
-        const verb: []const u8 = if (access == .indirect) "indirectly modify" else "modify";
+        if (access == .unset) {
+            const held = entry.value_ptr.static_props.get(prop_name) orelse .undef;
+            if (held == .object or held == .undef) return null;
+        }
+        const verb: []const u8 = if (access == .indirect or access == .unset) "indirectly modify" else "modify";
         if (self.currentDefiningClass()) |scope| {
             return try std.fmt.allocPrint(self.allocator, "Cannot {s} {s}(set) property {s}::${s} from scope {s}", .{ verb, @tagName(set_vis), declaring, prop_name, scope });
         }

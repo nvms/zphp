@@ -1499,6 +1499,10 @@ fn compileUnsetPropBase(self: *Compiler, node_idx: u32) Error!void {
         try self.emitOp(.array_get_unset);
         return;
     }
+    // FETCH_STATIC_PROP_UNSET: an uninitialized typed property is no
+    // object to unset from, not an error
+    if (node.tag == .static_prop_access and node.main_token != 0 and std.mem.startsWith(u8, self.ast.tokenSlice(node.main_token), "$"))
+        return compileUnsetDimensionBase(self, node_idx);
     if (node.tag != .property_access or self.isDynamicProp(node)) return self.compileNode(node_idx);
     try compileUnsetPropBase(self, node.data.lhs);
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
@@ -1528,7 +1532,7 @@ fn compileUnsetDimensionBase(self: *Compiler, node_idx: u32) Error!void {
         const class_name = try staticClassOperand(self, self.ast.nodes[node.data.lhs]);
         var prop_name = self.ast.tokenSlice(node.main_token);
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
-        try self.emitOp(.separate_static_prop);
+        try self.emitOp(.separate_static_prop_unset);
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
         try compileCoalesceFetch(self, node_idx);

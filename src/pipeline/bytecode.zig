@@ -685,6 +685,10 @@ pub const OpCode = enum(u16) {
     // null (or false) the callee returned becomes the array the write goes
     // into, as FETCH_DIM_W vivifies the variable the VAR points at
     vivify_returned_ref,
+    // u16 class, u16 property: separate_static_prop for an unset's container
+    // (FETCH_STATIC_PROP_UNSET): an object or an uninitialized property may
+    // be fetched where the scope can't modify the property
+    separate_static_prop_unset,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -783,6 +787,7 @@ pub const OpCode = enum(u16) {
             .set_static_prop_rw,
             .deprecate_const,
             .separate_static_prop,
+            .separate_static_prop_unset,
             .unset_static_prop,
             .array_set_static,
             .get_static,
