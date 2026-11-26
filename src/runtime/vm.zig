@@ -9126,12 +9126,19 @@ pub const VM = struct {
                         retainValue(old);
                         defer self.releaseValue(old);
                         const new_val = try self.stepValue(old, up) orelse continue;
-                        self.writeReference(cell, new_val) catch {
+                        // a reference a typed property holds steps as
+                        // zend_incdec_typed_ref: past the int range is its error
+                        const stored = if (cellOf(cell).typed) self.verifyRefAssignable(cell, new_val) catch {
+                            if (new_val == .string) self.releaseValue(new_val);
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        } else new_val;
+                        self.writeReference(cell, stored) catch {
                             if (new_val == .string) self.releaseValue(new_val);
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        self.push(if (pre) new_val else old);
+                        self.push(if (pre) stored else old);
                         if (new_val == .string) self.releaseValue(new_val);
                     } else if (aei_arr == .object and self.hasMethod(aei_arr.object.class_name, "offsetGet") and !self.offsetGetReturnsRef(aei_arr.object)) {
                         // FETCH_DIM_RW on an ArrayAccess object: offsetGet's
