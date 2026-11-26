@@ -5,6 +5,7 @@ foreach (['spl', 'SPL', 'json', 'Reflection', 'ctype', 'random', 'date'] as $nam
     ob_start();
     (new ReflectionExtension($name))->info();
     $text = ob_get_clean();
-    // the default timezone depends on the configuration
-    echo preg_replace('/^(Default timezone|date\.timezone) => .*$/m', '$1 => X', $text);
+    // the default timezone and a distribution php's system tz database
+    // depend on the configuration
+    echo preg_replace('/^(Default timezone|date\.timezone|"Olson" Timezone Database Version) => .*$/m', '$1 => X', $text);
 }
