@@ -8022,7 +8022,31 @@ pub const VM = struct {
                     const ok = Value.toArrayKey(outer_key);
                     if (existing == .string) {
                         const s = existing.string.bytes();
-                        var idx: i64 = switch (ik) {
+                        // zend_check_string_offset: null, a bool and a float
+                        // are cast with a warning, an array or object is a
+                        // TypeError
+                        const cast_key = inner_key == .null or inner_key == .undef or inner_key == .bool or inner_key == .float;
+                        if (cast_key) {
+                            // the handler may release the array holding the
+                            // string: the write then goes nowhere
+                            const kept = if (base == .array) self.warnPinned(base.array, v, "String offset cast occurred") catch {
+                                if (try self.resumeRaised()) continue;
+                                return error.RuntimeError;
+                            } else kept: {
+                                self.emitWarning("String offset cast occurred") catch if (try self.resumeRaised()) continue;
+                                break :kept true;
+                            };
+                            if (!kept) {
+                                self.push(.null);
+                                continue;
+                            }
+                        } else if (inner_key == .array or inner_key == .object or inner_key == .resource) {
+                            const m = try std.fmt.allocPrint(self.allocator, "Cannot access offset of type {s} on string", .{inner_key.valueName()});
+                            defer self.allocator.free(m);
+                            if (try self.throwBuiltinException("TypeError", m)) continue;
+                            return error.RuntimeError;
+                        }
+                        var idx: i64 = if (cast_key) Value.toInt(inner_key) else switch (ik) {
                             .int => |n| n,
                             // zend_check_string_offset: a leading-numeric
                             // string warns and names its number, any other
@@ -17465,6 +17489,24 @@ pub const VM = struct {
     // when the handler left the array with other holders as well
     fn warnOffsetKeyOnW(self: *VM, key: Value, arr: *PhpArray, keep: Value) RuntimeError!bool {
         return self.warnOffsetKeyPinned(key, arr, keep, true);
+    }
+
+    // a warning raised while a write holds arr: false when the handler left
+    // the array with no holder but this write
+    fn warnPinned(self: *VM, arr: *PhpArray, keep: Value, msg: []const u8) RuntimeError!bool {
+        const before = arr.refcount;
+        arrayRetain(arr);
+        retainValue(keep);
+        defer self.releaseValue(keep);
+        self.emitWarning(msg) catch |err| {
+            arrayUnpin(arr);
+            if (arr.refcount < before and arr.refcount == 0) self.queueArrayRelease(arr);
+            return err;
+        };
+        const kept = arr.refcount == before + 1;
+        arrayUnpin(arr);
+        if (!kept and arr.refcount == 0) self.queueArrayRelease(arr);
+        return kept;
     }
 
     // "Undefined array key" for a write fetch: false when the handler left
