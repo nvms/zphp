@@ -11273,6 +11273,20 @@ pub const VM = struct {
                         self.push(callable);
                         continue;
                     }
+                    // so is its __invoke's, which php calls through a
+                    // trampoline (zend_closure_from_frame)
+                    if (callable == .array and callable.array.entries.items.len == 2) {
+                        const target = callable.array.entries.items[0].value;
+                        const method = callable.array.entries.items[1].value;
+                        if (target == .object and std.mem.eql(u8, target.object.class_name, "Closure") and
+                            method == .string and std.ascii.eqlIgnoreCase(method.string.bytes(), "__invoke"))
+                        {
+                            retainValue(target);
+                            self.releaseValue(callable);
+                            self.push(target);
+                            continue;
+                        }
+                    }
                     // what the callable names must exist, and be callable from
                     // here, when the closure is made. resolving it may
                     // autoload, which runs php: the popped callable is held
@@ -23276,6 +23290,10 @@ pub const VM = struct {
         // a private pair, uncounted, so the cycle collector counts what php's does
         if (callable == .array and callable.array.entries.items.len == 2)
             return self.newFakeMethodClosure(callable.array.entries.items[0].value, callable.array.entries.items[1].value, called_class);
+        // an invokable object's closure is one of its __invoke method, with
+        // the object as $this
+        if (callable == .object and !std.mem.eql(u8, callable.object.class_name, "Closure"))
+            return self.newFakeMethodClosure(callable, .{ .string = Value.String.borrowed("__invoke") }, called_class);
         const target = callable;
         const state = try self.allocator.create(FakeClosure);
         errdefer self.allocator.destroy(state);
