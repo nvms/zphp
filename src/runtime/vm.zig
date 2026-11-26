@@ -19425,6 +19425,10 @@ pub const VM = struct {
             while (it.next()) |entry| {
                 try copy.putProperty(self.allocator, entry.key_ptr.*, try self.copyObjectCloneValue(entry.value_ptr.*));
             }
+            // a property unset() left for magic methods stays that way in
+            // the copy (the clone copies php's IS_PROP_UNINIT flag)
+            var unset_names = src.unset_slots.keyIterator();
+            while (unset_names.next()) |name| try copy.markUnset(self.allocator, name.*);
             if (native_clone) |hook| if (!hook(self, src, copy)) {
                 // a hook may refuse with its class's own error
                 if (self.pending_exception == null) try self.setUncloneable(src.class_name);
