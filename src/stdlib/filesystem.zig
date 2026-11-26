@@ -5354,7 +5354,11 @@ fn setCloexec(fd: std.posix.fd_t) void {
     _ = sys.fcntl(fd, 2, flags | 1) catch {};
 }
 
-fn procChildDup(src: std.posix.fd_t, target: std.posix.fd_t, err_fd: std.posix.fd_t) void {
+fn dupCloexec(fd: std.posix.fd_t) !std.posix.fd_t {
+    return @intCast(try sys.fcntl(fd, std.c.F.DUPFD_CLOEXEC, 0));
+}
+
+fn procChildDup(src:std.posix.fd_t, target: std.posix.fd_t, err_fd: std.posix.fd_t) void {
     sys.dup2(src, target) catch |e| procChildFail(err_fd, e);
 }
 
@@ -5440,13 +5444,28 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
             d.child_fd = pair[1];
         },
         .pty => {
-            var master: c_int = -1;
-            var slave: c_int = -1;
-            if (openpty(&master, &slave, null, null, null) != 0) return error.ProcSpawnFailed;
-            setCloexec(master);
-            setCloexec(slave);
-            d.parent_fd = master;
-            d.child_fd = slave;
+            // every "pty" entry is an end of the same pseudoterminal: the
+            // first opens it, the rest take duplicates of its descriptors
+            var shared: ?*const PreparedDesc = null;
+            for (prepared) |*other| {
+                if (other == d) break;
+                if (other.action == .pty) {
+                    shared = other;
+                    break;
+                }
+            }
+            if (shared) |first| {
+                d.parent_fd = try dupCloexec(first.parent_fd);
+                d.child_fd = try dupCloexec(first.child_fd);
+            } else {
+                var master: c_int = -1;
+                var slave: c_int = -1;
+                if (openpty(&master, &slave, null, null, null) != 0) return error.ProcSpawnFailed;
+                setCloexec(master);
+                setCloexec(slave);
+                d.parent_fd = master;
+                d.child_fd = slave;
+            }
         },
         .inherit, .opened, .redirect, .redirect_index => {},
     };
