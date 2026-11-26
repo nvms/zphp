@@ -140,6 +140,8 @@ const Watched = struct {
     fd: i64,
     poll_index: ?usize,
     ready: bool = false,
+    // a regular file's readiness, fixed: ready to read and write
+    regular: bool = false,
 };
 
 const WatchList = std.ArrayListUnmanaged(Watched);
@@ -237,16 +239,16 @@ fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!N
     return NativeResult.scalar(.{ .int = count });
 }
 
+// what selectDescriptor answers for a php://temp stream: php waits on the
+// temporary file it moves to, which is always ready to read and write
+const temp_file_fd: i64 = -2;
+
 // php_stream_cast(PHP_STREAM_AS_FD_FOR_SELECT): the descriptor select waits
 // on, through a user stream's stream_cast; php's warning for a stream that
 // has none
 pub fn selectDescriptor(ctx: *NativeContext, obj: *PhpObject, report: bool) RuntimeError!?i64 {
     if (!std.mem.eql(u8, obj.class_name, "FileHandle") or value_mod.resourceClosed(obj)) return null;
-    const st = streams.get(obj);
-    if (st) |s_| if (s_.readfilters.head != null or s_.writefilters.head != null) {
-        try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot cast a filtered stream on this system", .{});
-        return null;
-    };
+    // a filtered stream is cast for select like any other (php 8.6)
     if (filesystem.fileHandleWrapper(obj)) |w| {
         if (try user_streams.cast(ctx, obj, w, user_streams.CAST_FOR_SELECT, true)) |inner| {
             if (try selectDescriptor(ctx, inner, report)) |fd| return fd;
@@ -254,7 +256,10 @@ pub fn selectDescriptor(ctx: *NativeContext, obj: *PhpObject, report: bool) Runt
         try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot represent a stream of type user-space as a select()able descriptor", .{});
         return null;
     }
-    if (streams.memoryOf(obj) != null) {
+    if (streams.memoryOf(obj)) |m| {
+        // php://temp moves its bytes to a temporary file to be cast
+        // (php_stream_temp_cast), which select sees as a regular file
+        if (m.temp) return temp_file_fd;
         const path = obj.get("__path");
         const label: []const u8 = if (path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://temp")) "TEMP" else if (path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://memory")) "MEMORY" else "RFC2397";
         try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot represent a stream of type {s} as a select()able descriptor", .{label});
@@ -276,6 +281,10 @@ fn watchStreams(ctx: *NativeContext, args: []const Value, watched: *WatchList, p
             if (v != .resource) continue;
             const fd = (try selectDescriptor(ctx, v.resource, true)) orelse continue;
             any = true;
+            if (fd == temp_file_fd) {
+                try watched.append(ctx.allocator, .{ .slot = @intCast(slot), .key = entry.key, .val = v, .fd = fd, .poll_index = null, .ready = slot < 2, .regular = true });
+                continue;
+            }
             var poll_index: ?usize = null;
             if (!platform.is_windows or isNetStream(v)) {
                 const sock = platform.socketFromInt(fd) orelse continue;
@@ -290,7 +299,7 @@ fn watchStreams(ctx: *NativeContext, args: []const Value, watched: *WatchList, p
 }
 
 fn hasHandles(watched: []const Watched) bool {
-    for (watched) |w| if (w.poll_index == null) return true;
+    for (watched) |w| if (w.poll_index == null and !w.regular) return true;
     return false;
 }
 
@@ -302,7 +311,9 @@ fn anyReady(watched: []const Watched) bool {
 // sockets wait in poll. with crt handles in the mix (windows only) the wait
 // is sliced: each slice peeks the handles, then polls or sleeps for the
 // slice, until something is ready or the timeout runs out
-fn awaitReady(watched: []Watched, pollfds: []sys.pollfd, timeout_ms: i32) !void {
+fn awaitReady(watched: []Watched, pollfds: []sys.pollfd, timeout_ms_in: i32) !void {
+    // a regular file ready already: select returns without waiting
+    const timeout_ms = if (anyReady(watched)) 0 else timeout_ms_in;
     if (!platform.is_windows or !hasHandles(watched)) {
         try pollSockets(pollfds, timeout_ms);
         markSocketsReady(watched, pollfds);
@@ -338,6 +349,10 @@ fn markHandlesReady(watched: []Watched) bool {
     var any = false;
     for (watched) |*w| {
         if (w.poll_index != null) continue;
+        if (w.regular) {
+            if (w.ready) any = true;
+            continue;
+        }
         w.ready = switch (w.slot) {
             0 => handleReadable(w.fd),
             1 => true,

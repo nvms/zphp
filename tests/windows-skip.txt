@@ -81,3 +81,4 @@ socket_read_buffered_no_wait.php: uses a unix socket pair, which php's windows b
 stream_socket_client_no_connect.php: php's windows build has no unix transport ("Unable to find the socket transport")
 error_log_mail.php: the message is piped to cat through the shell, which cmd.exe lacks
 pcntl_dispatch_fiber_switch.php: pcntl and posix_kill are posix-only
+stream_select_filtered_and_temp.php: the runner's php fails stream_socket_pair(STREAM_PF_UNIX) itself on windows (setsockopt 10042)
