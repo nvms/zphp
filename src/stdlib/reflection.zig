@@ -3633,16 +3633,21 @@ fn rpGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.borrowed(.{ .object = obj });
 }
 
+// a closure's __invoke is a trampoline with internal arginfo that carries
+// no default value strings, so its defaults can't be retrieved
+fn defaultAvailable(this: *PhpObject) bool {
+    const has_default = this.get("__has_default");
+    return has_default == .bool and has_default.bool and this.get("__closure_method") != .bool;
+}
+
 fn rpIsDefaultValueAvailable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const has_default = this.get("__has_default");
-    return NativeResult.scalar(.{ .bool = has_default == .bool and has_default.bool });
+    return NativeResult.scalar(.{ .bool = defaultAvailable(this) });
 }
 
 fn rpGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const has_default = this.get("__has_default");
-    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
+    if (!defaultAvailable(this)) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
     // a user function's default is evaluated when asked for, as php does:
     // constants resolve then, and an unresolvable one throws then
     const lazy_func = this.get("__default_func");
@@ -3744,16 +3749,14 @@ fn decodeConstSentinel(ctx: *NativeContext, v: Value) !?[]const u8 {
 
 fn rpIsDefaultValueConstant(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const has_default = this.get("__has_default");
-    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
+    if (!defaultAvailable(this)) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
     const name = this.get("__default_const_name");
     return NativeResult.scalar(.{ .bool = name == .string and name.string.bytes().len > 0 });
 }
 
 fn rpGetDefaultValueConstantName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const has_default = this.get("__has_default");
-    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
+    if (!defaultAvailable(this)) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
     const name = this.get("__default_const_name");
     if (name == .string and name.string.bytes().len > 0) return NativeResult.share(name);
     return NativeResult.scalar(.null);
