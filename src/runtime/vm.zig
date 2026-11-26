@@ -912,6 +912,8 @@ pub const NativeCall = struct {
     // the object an engine method runs on (a fiber's or generator's own
     // methods have no native frame to hold it)
     this: Value = .null,
+    // the named arguments passed past its parameters
+    named: ?*PhpArray = null,
 };
 
 pub const NativeInvocation = struct {
@@ -14265,7 +14267,7 @@ pub const VM = struct {
                                     const placed = try self.placeNativeNamedArgs(arr, params, &resolved_buf, &resolved_sources, natives_mod.acceptsNamedExtras(fn_name));
                                     if (placed.problem) |problem| {
                                         self.dropN(1);
-                                        if (try self.throwNamedArgProblem(fn_name, params, problem)) continue;
+                                        if (try self.throwNamedArgProblem(fn_name, params, problem, resolved_buf[0..placed.count])) continue;
                                         return error.RuntimeError;
                                     }
                                     ac = placed.count;
@@ -14947,7 +14949,7 @@ pub const VM = struct {
                             var resolved_sources: [256]RefSource = undefined;
                             const placed = try self.placeNativeNamedArgs(arr, params, &resolved, &resolved_sources, natives_mod.acceptsNamedExtras(full_name));
                             if (placed.problem) |problem| {
-                                if (try self.throwNamedArgProblem(full_name, params, problem)) continue;
+                                if (try self.throwNamedArgProblem(full_name, params, problem, resolved[0..placed.count])) continue;
                                 return error.RuntimeError;
                             }
                             resolved_ac = placed.count;
@@ -16972,6 +16974,7 @@ pub const VM = struct {
         // the parameters php's stubs mark #[\SensitiveParameter]
         const sensitive = deprecations.sensitive_parameters.get(call.label) orelse 0;
         for (call.args, 0..) |a, i| try args.append(self.allocator, try self.traceArgValue(a, sensitive, i));
+        if (call.named) |named| for (named.entries.items) |e| try args.set(self.allocator, e.key, try self.traceArgValue(e.value, sensitive, call.args.len));
         return entry;
     }
 
@@ -18013,7 +18016,7 @@ pub const VM = struct {
             var resolved_sources: [256]RefSource = undefined;
             const placed = try self.placeNativeNamedArgs(arr, params, &resolved, &resolved_sources, natives_mod.acceptsNamedExtras(ctn));
             if (placed.problem) |problem| {
-                if (try self.throwNamedArgProblem(ctn, params, problem)) return .thrown;
+                if (try self.throwNamedArgProblem(ctn, params, problem, resolved[0..placed.count])) return .thrown;
                 return error.RuntimeError;
             }
             for (0..placed.count) |i| {
@@ -30362,7 +30365,7 @@ pub const VM = struct {
             // eval is a language construct to php: its frame lists no arguments
             const shown_args = if (std.mem.eql(u8, label, "eval")) &[_]Value{} else input_args;
             const from_native = if (outer) |o| o.depth == self.frame_count or (o.depth + 1 == self.frame_count and self.frames[self.frame_count - 1].native) else false;
-            record = .{ .label = label, .args = shown_args, .depth = self.frame_count, .instance = call.instance, .outer = outer, .from_native = from_native };
+            record = .{ .label = label, .args = shown_args, .depth = self.frame_count, .instance = call.instance, .outer = outer, .from_native = from_native, .named = named };
             self.native_call = &record;
         }
         if (native.deprecated) |suffix| try self.warnDeprecatedNative(name orelse label, suffix);
@@ -32327,7 +32330,7 @@ pub const VM = struct {
             var resolved_sources: [256]RefSource = undefined;
             const placed = try self.placeNativeNamedArgs(arr, params, &resolved, &resolved_sources, natives_mod.acceptsNamedExtras(name));
             if (placed.problem) |problem| {
-                if (try self.throwNamedArgProblem(name, params, problem)) return;
+                if (try self.throwNamedArgProblem(name, params, problem, resolved[0..placed.count])) return;
                 return error.RuntimeError;
             }
             const pos = placed.count;
@@ -32610,6 +32613,9 @@ pub const VM = struct {
         var assigned: [256]bool = @splat(false);
         var positional: usize = 0;
         var count: usize = 0;
+        // a name for a variadic that takes none is passed all the same: the
+        // function refuses it once it has checked the rest
+        var rejected = false;
         entries: for (arr.entries.items) |entry| {
             const index = switch (entry.key) {
                 .int => blk: {
@@ -32623,7 +32629,7 @@ pub const VM = struct {
                         break :blk pi;
                     };
                     for (params) |p| if (p.variadic) {
-                        if (!accept_extras) return .{ .problem = .variadic_named };
+                        if (!accept_extras) rejected = true;
                         if (self.native_named_args == null) self.native_named_args = try self.allocArray();
                         try self.native_named_args.?.set(self.allocator, entry.key, entry.value);
                         continue :entries;
@@ -32645,6 +32651,7 @@ pub const VM = struct {
                 else => |d| resolved[i] = try self.nativeDefault(d),
             }
         }
+        if (rejected) return .{ .count = count, .problem = .variadic_named };
         return .{ .count = count };
     }
 
@@ -32668,10 +32675,38 @@ pub const VM = struct {
         };
     }
 
-    pub fn throwNamedArgProblem(self: *VM, func_name: []const u8, params: []const native_params.Param, problem: NamedArgProblem) RuntimeError!bool {
-        self.discardNativeNamedArgs();
-        const class: []const u8, const msg = try self.namedArgProblemMessage(func_name, params, problem);
+    pub fn throwNamedArgProblem(self: *VM, func_name: []const u8, params: []const native_params.Param, problem: NamedArgProblem, positional: []const Value) RuntimeError!bool {
+        return self.raiseNamedArgProblem(func_name, params, problem, positional, false);
+    }
+
+    // a named argument php refuses: thrown (true when caught here) or left
+    // pending. one an internal function's variadic can't take is passed and
+    // refused by the function's argument parsing, after its count check, so
+    // that error comes from the function's frame
+    pub fn raiseNamedArgProblem(self: *VM, func_name: []const u8, params: []const native_params.Param, problem: NamedArgProblem, positional: []const Value, pending: bool) RuntimeError!bool {
+        const extras = self.native_named_args;
+        self.native_named_args = null;
+        defer if (extras) |e| if (e.refcount == 0) self.queueArrayRelease(e);
+        var class: []const u8, var msg = try self.namedArgProblemMessage(func_name, params, problem);
         defer self.allocator.free(msg);
+        const outer = self.native_call;
+        defer self.native_call = outer;
+        var record: NativeCall = undefined;
+        if (problem == .variadic_named) {
+            if (self.native_fns.get(func_name)) |native| if (!native.arity.admits(positional.len)) {
+                var buf: [256]u8 = undefined;
+                const text = try self.allocator.dupe(u8, native.arity.describe(&buf, func_name, positional.len));
+                self.allocator.free(msg);
+                msg = text;
+                class = "ArgumentCountError";
+            };
+            record = .{ .label = func_name, .args = positional, .depth = self.frame_count, .instance = false, .outer = outer, .named = extras };
+            self.native_call = &record;
+        }
+        if (pending) {
+            try self.setPendingException(class, msg);
+            return false;
+        }
         return self.throwBuiltinException(class, msg);
     }
 

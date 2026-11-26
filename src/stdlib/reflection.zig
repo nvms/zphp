@@ -1755,9 +1755,7 @@ fn bindArguments(ctx: *NativeContext, func_key: []const u8, display: []const u8,
         var sources: [256]vm_mod.RefSource = undefined;
         const placed = try ctx.vm.placeNativeNamedArgs(arr, sig.params, &resolved, &sources, false);
         if (placed.problem) |problem| {
-            const class, const msg = try ctx.vm.namedArgProblemMessage(display, sig.params, problem);
-            defer ctx.allocator.free(msg);
-            _ = try ctx.vm.throwBuiltinException(class, msg);
+            _ = try ctx.vm.throwNamedArgProblem(display, sig.params, problem, resolved[0..placed.count]);
             return error.RuntimeError;
         }
         bound.list.clearRetainingCapacity();

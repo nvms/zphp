@@ -634,10 +634,7 @@ pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: 
     var sources: [256]vm_mod.RefSource = undefined;
     const placed = try vm.placeNativeNamedArgs(arr, signature.params, &resolved, &sources, @import("natives.zig").acceptsNamedExtras(name));
     if (placed.problem) |problem| {
-        const class: []const u8, const msg = try vm.namedArgProblemMessage(name, signature.params, problem);
-        defer vm.allocator.free(msg);
-        vm.discardNativeNamedArgs();
-        try vm.setPendingException(class, msg);
+        _ = try vm.raiseNamedArgProblem(name, signature.params, problem, resolved[0..placed.count], true);
         return error.RuntimeError;
     }
     if (from_native) {
