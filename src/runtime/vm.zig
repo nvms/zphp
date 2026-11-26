@@ -1378,6 +1378,9 @@ pub const VM = struct {
     // the internal Closure::__invoke, so its argument errors name no call
     // site and are never strict
     invoking_closure: bool = false,
+    // the next named-argument call callables.invokeArgArrayFrom makes goes
+    // through Closure::__invoke; it reads and clears this
+    closure_invoke_named: bool = false,
     // the native whose callback is being called (array_map, usort, ...) and
     // the frame depth it called from; a deeper frame means php code calls
     native_caller: struct { name: ?[]const u8 = null, frames: usize = 0 } = .{},
@@ -14339,6 +14342,7 @@ pub const VM = struct {
                             defer self.objRelease(o);
                             self.dropN(1);
                             const handlers_before = self.handler_count;
+                            self.closure_invoke_named = callee == .closure;
                             const result = callables.invokeArgArray(self, callee, arr) catch {
                                 if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
                                 return error.RuntimeError;

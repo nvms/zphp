@@ -538,6 +538,9 @@ pub fn invokeArgArray(vm: *VM, callee: Callee, arr: *PhpArray) RuntimeError!Valu
 // from_native: an internal function makes the call (call_user_func), so a
 // by-reference parameter given a value warns as zend_call_function does
 pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: bool) RuntimeError!Value {
+    // the call goes through Closure::__invoke (zend_get_closure_invoke_method)
+    const via_invoke = vm.closure_invoke_named;
+    vm.closure_invoke_named = false;
     var named = false;
     for (arr.entries.items) |entry| {
         if (entry.key == .string) {
@@ -574,6 +577,7 @@ pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: 
                 if (state.called_class) |called| if (target == .static_method) {
                     target.static_method.called_class = called;
                 };
+                vm.closure_invoke_named = via_invoke;
                 return invokeArgArrayFrom(vm, target, arr, from_native);
             }
         },
@@ -634,7 +638,11 @@ pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: 
     var sources: [256]vm_mod.RefSource = undefined;
     const placed = try vm.placeNativeNamedArgs(arr, signature.params, &resolved, &sources, @import("natives.zig").acceptsNamedExtras(name));
     if (placed.problem) |problem| {
-        _ = try vm.raiseNamedArgProblem(name, signature.params, problem, resolved[0..placed.count], true);
+        // an internal function's closure called through __invoke has its
+        // missing arguments checked on the trampoline, which is named
+        // Closure::__invoke (zend_handle_undef_args)
+        const undef = problem == .not_passed or problem == .default_unknown;
+        _ = try vm.raiseNamedArgProblem(if (via_invoke and undef) "Closure::__invoke" else name, signature.params, problem, resolved[0..placed.count], true);
         return error.RuntimeError;
     }
     if (from_native) {

@@ -4903,7 +4903,11 @@ fn closureCall(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 // $closure->__invoke(...$args) calls the closure as it is bound
 fn closureInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (ctx.named_args) |named| return NativeResult.share(try ctx.invokeCallableNamed(.{ .object = this }, args, named));
+    if (ctx.named_args) |named| {
+        ctx.vm.closure_invoke_named = true;
+        defer ctx.vm.closure_invoke_named = false;
+        return NativeResult.share(try ctx.invokeCallableNamed(.{ .object = this }, args, named));
+    }
     return NativeResult.share(try ctx.vm.callValueCallable(.{ .object = this }, args));
 }
 
