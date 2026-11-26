@@ -366,7 +366,14 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                 _ = sctx.open_arrays.remove(arr);
             };
             try buf.appendSlice(a, "a:");
-            try serializeArrayBody(ctx, buf, sctx, arr, !is_root and (in_rcn_array or arr.refcount > 1));
+            const rcn = !is_root and (in_rcn_array or arr.refcount > 1);
+            // held while walked (GC_TRY_ADDREF): a __serialize that writes to
+            // it through a reference separates instead of growing it under us
+            // (an uncounted temporary has no holder that could write to it)
+            const pin = arr.refcount > 0;
+            if (pin) arr.retain();
+            defer if (pin) ctx.vm.releaseValue(.{ .array = arr });
+            try serializeArrayBody(ctx, buf, sctx, arr, rcn);
         },
         .object => |obj| {
             sctx.object_depth += 1;
