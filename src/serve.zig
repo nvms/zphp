@@ -2346,6 +2346,9 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
                 const hdr = entry.value.string.bytes();
                 // Content-Type is already in the base headers above
                 if (http.isContentTypeHeader(hdr)) continue;
+                // so is the body's real length: a script's own Content-Length
+                // would be a second one (and wrong once the body is gzipped)
+                if (std.ascii.startsWithIgnoreCase(hdr, "content-length:")) continue;
                 // header("HTTP/1.1 N ...") is PHP's way to set the status code,
                 // NOT a real header. PHP keeps it in headers_list (so user code
                 // can introspect) but does not emit it on the wire - the wire
