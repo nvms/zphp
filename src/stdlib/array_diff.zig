@@ -741,6 +741,11 @@ fn array_diff(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         total += arg.array.entries.items.len;
     }
     if (total == 0) return NativeResult.borrowed(args[0]);
+    // php refuses a total its hash table couldn't hold (HT_MAX_SIZE, 64-bit)
+    if (total >= 0x40000000) {
+        try ctx.vm.setPendingException("Error", "The total number of elements must be lower than 1073741824");
+        return error.RuntimeError;
+    }
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
