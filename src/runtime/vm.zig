@@ -35646,9 +35646,13 @@ pub const VM = struct {
         self.gc_dtors_in_fiber = prev_in_fiber;
         if (fiber.state == .suspended) {
             // the destructor holds this fiber now; the application may
-            // keep it or let it go
+            // keep it or let it go. php's zend_object_release destroys it
+            // at once when nothing else does, before the next destructor
             self.gc_dtor_fiber = null;
-            self.fiberRelease(fiber);
+            if (fiber.refcount == 1) {
+                fiber.refcount = 0;
+                self.destroyReleasedFiber(fiber);
+            } else self.fiberRelease(fiber);
         } else {
             fiber.state = .created;
         }
@@ -36030,28 +36034,34 @@ pub const VM = struct {
                 self.fiber_release_cursor += 1;
                 if (fiber.refcount != 0 or fiber.pooled) continue;
                 self.markDrainItem();
-                if (fiber.state == .suspended) {
-                    fiber.refcount += 1;
-                    self.destroyFiber(fiber);
-                    fiber.refcount -= 1;
-                    if (fiber.refcount != 0) continue;
-                }
-                self.releaseFiberNative(fiber);
-                if (self.hasPendingReleases()) self.drainPendingDestruct();
-                self.releaseValue(fiber.callable);
-                self.releaseFiberEntry(fiber);
-                self.releaseValue(fiber.suspend_value);
-                self.releaseValue(fiber.return_value);
-                if (fiber.handle != 0) {
-                    self.free_handles.append(self.allocator, fiber.handle) catch {};
-                    fiber.handle = 0;
-                }
-                fiber.deinit(self.allocator);
-                if (!self.serve_mode) {
-                    fiber.pooled = true;
-                    self.free_fibers.append(self.allocator, fiber) catch {};
-                }
+                self.destroyReleasedFiber(fiber);
             }
+        }
+    }
+
+    // a fiber nothing references: one still suspended is destroyed (its
+    // finally blocks run), then what it held goes
+    fn destroyReleasedFiber(self: *VM, fiber: *Fiber) void {
+        if (fiber.state == .suspended) {
+            fiber.refcount += 1;
+            self.destroyFiber(fiber);
+            fiber.refcount -= 1;
+            if (fiber.refcount != 0) return;
+        }
+        self.releaseFiberNative(fiber);
+        if (self.hasPendingReleases()) self.drainPendingDestruct();
+        self.releaseValue(fiber.callable);
+        self.releaseFiberEntry(fiber);
+        self.releaseValue(fiber.suspend_value);
+        self.releaseValue(fiber.return_value);
+        if (fiber.handle != 0) {
+            self.free_handles.append(self.allocator, fiber.handle) catch {};
+            fiber.handle = 0;
+        }
+        fiber.deinit(self.allocator);
+        if (!self.serve_mode) {
+            fiber.pooled = true;
+            self.free_fibers.append(self.allocator, fiber) catch {};
         }
     }
 
