@@ -3375,7 +3375,8 @@ fn methodPrototype(ctx: *NativeContext, this: *PhpObject) ?[]const u8 {
     if (this.get("__closure") != .null) return null;
     const name = methodLookupName(this) orelse return null;
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return null;
-    return @import("reflection_string.zig").prototypeOf(ctx.vm, declaring, name, 0);
+    const class_name = if (this.get("__class") == .string) this.get("__class").string.bytes() else declaring;
+    return @import("reflection_string.zig").prototypeIn(ctx.vm, class_name, declaring, name);
 }
 
 fn rmGetPrototype(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {

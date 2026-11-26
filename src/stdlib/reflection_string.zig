@@ -505,6 +505,39 @@ pub fn prototypeOf(vm: *VM, class_name: []const u8, method: []const u8, depth: u
     return proto;
 }
 
+// the prototype of a method declaring declares, as class_name's copy
+// of it has it: a class below the declaring one that implements an
+// interface declaring the method makes that interface's the prototype
+// (do_inheritance_check_on_method gives the inherited function its own)
+pub fn prototypeIn(vm: *VM, class_name: []const u8, declaring: []const u8, method: []const u8) ?[]const u8 {
+    var proto = prototypeOf(vm, declaring, method, 0);
+    if (std.ascii.eqlIgnoreCase(class_name, declaring)) return proto;
+    var chain: [64][]const u8 = undefined;
+    var n: usize = 0;
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        if (std.ascii.eqlIgnoreCase(cn, declaring)) break;
+        if (n == chain.len) return proto;
+        const cls = vm.classes.get(cn) orelse return proto;
+        chain[n] = cn;
+        n += 1;
+        current = cls.parent;
+    }
+    if (current == null) return proto;
+    // from the class right below the declaring one down
+    var i = n;
+    while (i > 0) {
+        i -= 1;
+        const cls = vm.classes.get(chain[i]) orelse continue;
+        for (cls.interfaces.items) |iface| {
+            // an interface the parent already implements was bound there
+            if (cls.parent) |parent| if (vm.isInstanceOf(parent, iface)) continue;
+            if (interfaceDeclarer(vm, iface, method, 0)) |decl| proto = prototypeOf(vm, decl, method, 1) orelse decl;
+        }
+    }
+    return proto;
+}
+
 fn containsName(list: []const []const u8, name: []const u8) bool {
     for (list) |n| if (std.mem.eql(u8, n, name)) return true;
     return false;
@@ -707,7 +740,7 @@ fn appendFunction(w: *Writer, view: FnView, scope: ?[]const u8, indent: []const 
         }
     }
     if (view.scope != null and !view.is_closure and !view.trampoline) {
-        if (prototypeOf(vm, view.scope.?, view.name, 0)) |proto| try w.fmt(", prototype {s}", .{proto});
+        if (prototypeIn(vm, scope orelse view.scope.?, view.scope.?, view.name)) |proto| try w.fmt(", prototype {s}", .{proto});
         if (std.ascii.eqlIgnoreCase(view.name, "__construct")) try w.str(", ctor");
     }
     try w.str("> ");
