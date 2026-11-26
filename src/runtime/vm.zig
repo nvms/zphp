@@ -7855,7 +7855,7 @@ pub const VM = struct {
                             (obj.slots == null or obj.getSlotIndex(pname) == null) and !self.classDeclaresProperty(obj.class_name, pname) and
                             !self.magicApplies(obj, pname, .get))
                         {
-                            if (try self.checkDynamicProperty(obj, pname)) continue;
+                            if (try self.checkDynamicProperty(obj, pname, 2)) continue;
                         }
                         const new_arr = try self.allocArray();
                         try new_arr.set(self.allocator, ik, v);
@@ -8608,7 +8608,7 @@ pub const VM = struct {
                         (obj.isUnset(prop_name) or !obj.properties.contains(prop_name)) and
                         (obj.slots == null or obj.getSlotIndex(prop_name) == null) and !badPropertyName(prop_name))
                     {
-                        if (try self.checkDynamicProperty(obj, prop_name)) continue;
+                        if (try self.checkDynamicProperty(obj, prop_name, 1)) continue;
                         try obj.set(self.allocator, prop_name, .null);
                         continue;
                     }
@@ -8652,7 +8652,7 @@ pub const VM = struct {
                         (pw_obj.slots == null or pw_obj.getSlotIndex(prop_name) == null) and !self.classDeclaresProperty(pw_obj.class_name, prop_name) and
                         !badPropertyName(prop_name))
                     {
-                        if (try self.checkDynamicProperty(pw_obj, prop_name)) continue;
+                        if (try self.checkDynamicProperty(pw_obj, prop_name, 1)) continue;
                         try pw_obj.set(self.allocator, prop_name, .null);
                     }
                 },
@@ -8802,7 +8802,7 @@ pub const VM = struct {
                     if (hook_cell == null and (eap_obj.isUnset(prop_name) or !eap_obj.properties.contains(prop_name)) and
                         (eap_obj.slots == null or eap_obj.getSlotIndex(prop_name) == null) and !self.classDeclaresProperty(eap_obj.class_name, prop_name))
                     {
-                        if (try self.checkDynamicProperty(eap_obj, prop_name)) continue;
+                        if (try self.checkDynamicProperty(eap_obj, prop_name, 1)) continue;
                     }
                     if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const new_arr = try self.allocArray();
@@ -10143,7 +10143,7 @@ pub const VM = struct {
                         }
                         // a reference to a property that doesn't exist creates it
                         if (!has_prop) {
-                            if (!self.classDeclaresProperty(obj_ptr.class_name, prop_name) and try self.checkDynamicProperty(obj_ptr, prop_name)) continue;
+                            if (!self.classDeclaresProperty(obj_ptr.class_name, prop_name) and try self.checkDynamicProperty(obj_ptr, prop_name, 0)) continue;
                             try obj_ptr.set(self.allocator, prop_name, .null);
                         }
                         try self.initializeForReference(obj_ptr, prop_name);
@@ -10245,7 +10245,7 @@ pub const VM = struct {
                         // a reference to a property that doesn't exist creates
                         // it, as the named form does
                         if (!has_prop) {
-                            if (!self.classDeclaresProperty(obj_ptr.class_name, prop_owned) and try self.checkDynamicProperty(obj_ptr, prop_owned)) continue;
+                            if (!self.classDeclaresProperty(obj_ptr.class_name, prop_owned) and try self.checkDynamicProperty(obj_ptr, prop_owned, 0)) continue;
                             try obj_ptr.set(self.allocator, prop_owned, .null);
                         }
                         try self.initializeForReference(obj_ptr, prop_owned);
@@ -13517,7 +13517,7 @@ pub const VM = struct {
                             // is created null, unless a handler made it meanwhile
                             const rw_fetch = !capturing and self.rw_prop_fetch_ip == gp_ip and self.rw_prop_fetch_chunk == @intFromPtr(self.currentChunk()) and obj.lazy == null;
                             const rw = rw_fetch and !gp_vr.declared;
-                            if (rw and try self.checkDynamicPropertyRule(obj, prop_name)) continue;
+                            if (rw and try self.checkDynamicPropertyRule(obj, prop_name, 2)) continue;
                             // a by-reference argument creates the property
                             if (!capturing) {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, prop_name });
@@ -27761,16 +27761,18 @@ pub const VM = struct {
 
     // raises what dynamicPropertyRule asks for, from the run loop. returns
     // true when an exception was raised and dispatched
-    fn checkDynamicProperty(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!bool {
+    // pins: the holds the fetching op itself has on obj (a pinned or stacked
+    // operand), which php's operand doesn't count
+    fn checkDynamicProperty(self: *VM, obj: *PhpObject, name: []const u8, pins: u32) RuntimeError!bool {
         const kind = self.staticAsInstance(obj, name, false) catch {
             _ = try self.resumeRaised();
             return true;
         };
         if (kind == .denied) return true;
-        return self.checkDynamicPropertyRule(obj, name);
+        return self.checkDynamicPropertyRule(obj, name, pins);
     }
 
-    fn checkDynamicPropertyRule(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!bool {
+    fn checkDynamicPropertyRule(self: *VM, obj: *PhpObject, name: []const u8, pins: u32) RuntimeError!bool {
         switch (self.dynamicPropertyRule(obj)) {
             .allowed => return false,
             .forbidden => {
@@ -27782,7 +27784,31 @@ pub const VM = struct {
             .deprecated => {
                 const msg = try std.fmt.allocPrint(self.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, name });
                 defer self.allocator.free(msg);
-                self.raiseError(E_DEPRECATED, msg) catch {
+                // zend_deprecated_dynamic_property: the object is held across
+                // the handler, and one the handler released is destroyed and
+                // the creation refused. only the op's own holds left after the
+                // handler dropped some means no variable has it any more; a
+                // temporary operand's holder is one of those holds, so the
+                // count has to have fallen
+                obj.refcount +%= 1;
+                const before = obj.refcount;
+                const raised = self.raiseError(E_DEPRECATED, msg);
+                if (obj.refcount < before and obj.refcount <= 1 + pins) {
+                    const refusal = try std.fmt.allocPrint(self.allocator, "Cannot create dynamic property {s}::${s}", .{ obj.class_name, name });
+                    defer self.allocator.free(refusal);
+                    self.releaseValue(.{ .object = obj });
+                    raised catch {
+                        _ = try self.resumeRaised();
+                        return true;
+                    };
+                    if (self.pending_exception == null) {
+                        if (try self.throwBuiltinException("Error", refusal)) return true;
+                        return error.RuntimeError;
+                    }
+                    return true;
+                }
+                obj.refcount -%= 1;
+                raised catch {
                     _ = try self.resumeRaised();
                     return true;
                 };
@@ -27851,7 +27877,7 @@ pub const VM = struct {
                 if (try self.throwBuiltinException("Error", bad_property_name_message)) return .dispatched;
                 return error.RuntimeError;
             }
-            if (try self.checkDynamicPropertyRule(obj, prop_name)) return .dispatched;
+            if (try self.checkDynamicPropertyRule(obj, prop_name, 1)) return .dispatched;
         }
         // typed property: coerce/enforce the declared type before storing
         // (matches PHP weak/strict mode)
