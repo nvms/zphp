@@ -1213,6 +1213,10 @@ fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) Runtime
     var buf: [16]Value = undefined;
     const call_args = try ctx.argsFromArray(arr, &buf);
     defer ctx.freeArgs(call_args, &buf);
+    // the call holds its own copies of the arguments (zend_fcall_info_args),
+    // so a native changing one in place doesn't change the array's
+    for (call_args) |v| VM.retainValue(v);
+    defer for (call_args) |v| ctx.vm.releaseValue(v);
     return NativeResult.share(try ctx.invokeCallable(args[0], call_args));
 }
 

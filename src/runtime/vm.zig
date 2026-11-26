@@ -325,17 +325,26 @@ pub const NativeContext = struct {
         const callee = try self.vm.callbackCallee(callable);
         try self.warnValuesForReferences(callee, args.len);
         // an internal function that changes its array argument in place gets
-        // its own copy of a value (php wraps the value in a temporary reference)
-        if (callee == .function and args.len > 0 and args.len <= 16 and args[0] == .array and args[0].array.refcount > 1 and
-            self.vm.native_fns.get(callee.function) != null and @import("../stdlib/byref_args.zig").arg0IsByRef(callee.function))
-        {
+        // its own copy of a value (php wraps the value in a temporary
+        // reference); array_multisort changes every array it is given
+        if (callee == .function and args.len > 0 and args.len <= 16 and self.vm.native_fns.get(callee.function) != null) {
+            const byref = @import("../stdlib/byref_args.zig");
+            const every = std.ascii.eqlIgnoreCase(callee.function, "array_multisort");
             var copy: [16]Value = undefined;
             @memcpy(copy[0..args.len], args);
-            const own = try self.vm.cloneArray(args[0].array);
-            copy[0] = .{ .array = own };
-            VM.retainValue(copy[0]);
-            defer self.vm.releaseValue(copy[0]);
-            return callables.invoke(self.vm, callee, copy[0..args.len]);
+            var owned: [16]bool = @splat(false);
+            defer for (copy[0..args.len], owned[0..args.len]) |v, own| if (own) self.vm.releaseValue(v);
+            var any = false;
+            for (args, 0..) |arg, i| {
+                if (i > 0 and !every) break;
+                if (i == 0 and !byref.arg0IsByRef(callee.function)) break;
+                if (arg != .array or arg.array.refcount <= 1) continue;
+                copy[i] = .{ .array = try self.vm.cloneArray(arg.array) };
+                VM.retainValue(copy[i]);
+                owned[i] = true;
+                any = true;
+            }
+            if (any) return callables.invoke(self.vm, callee, copy[0..args.len]);
         }
         return callables.invoke(self.vm, callee, args);
     }
