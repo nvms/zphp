@@ -13642,8 +13642,7 @@ pub const VM = struct {
                             }
                             self.push(val);
                         } else if (self.magicApplies(obj, prop_name, .get)) {
-                            var result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
-                            if (gp_vr.declared and gp_vr.type_str.len > 0 and slot_present_gp) result = try self.checkMagicGetResult(obj, gp_vr, prop_name, result);
+                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                             self.push(result);
                         } else if (badPropertyName(prop_name)) {
                             if (try self.throwBuiltinException("Error", bad_property_name_message)) continue;
@@ -25698,7 +25697,14 @@ pub const VM = struct {
             const key = self.resolveMethod(obj.class_name, "__get") catch break :blk false;
             break :blk if (self.functions.get(key)) |f| f.strict_types else false;
         };
-        if (try self.propertyTypeAccepts(result, vr.type_str, vr.defining_class, strict)) |accepted| return accepted;
+        if (try self.propertyTypeAccepts(result, vr.type_str, vr.defining_class, strict)) |accepted| {
+            // a reference __get returned holds the coerced value too (the
+            // check coerces the zval in place)
+            if (@intFromEnum(accepted) != @intFromEnum(result)) if (self.last_return_ref) |cell| {
+                if (!cellOf(cell).typed) try self.writeReference(cell, accepted);
+            };
+            return accepted;
+        }
         const msg = try std.fmt.allocPrint(self.allocator, "Value of type {s} returned from {s}::__get() must be compatible with unset property {s}::${s} of type {s}", .{ Value.typeName(result), vr.defining_class, vr.defining_class, prop_name, try self.propertyTypeText(vr.type_str, vr.defining_class) });
         defer self.allocator.free(msg);
         self.releaseValue(result);
@@ -33108,10 +33114,26 @@ pub const VM = struct {
     }
 
     fn callMagicGet(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!Value {
-        return self.callMagicProperty(obj, .get, prop_name, .null) catch |err| {
+        // zend_std_read_property: __get answering for a typed property that
+        // was unset must give what the property's type allows
+        const typed = self.unsetTypedProperty(obj, prop_name);
+        if (typed != null) self.setReturnRef(null);
+        const result = self.callMagicProperty(obj, .get, prop_name, .null) catch |err| {
             if (err == error.RuntimeError) return error.RuntimeError;
             return .null;
         };
+        if (typed) |vr| return self.checkMagicGetResult(obj, vr, prop_name, result);
+        return result;
+    }
+
+    // the declared typed property the scope sees, in its unset state (php's
+    // prop_info for a read that falls back to __get)
+    fn unsetTypedProperty(self: *VM, obj: *PhpObject, prop_name: []const u8) ?VisResult {
+        const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+        if (!vr.declared or vr.type_str.len == 0) return null;
+        if (obj.slots == null or obj.getSlotIndexForScope(prop_name, vr.defining_class) == null) return null;
+        if (!self.propVisible(vr, prop_name, vr.visibility)) return null;
+        return vr;
     }
 
     // php's zend_bad_property_name: a property name can't start with a nul
