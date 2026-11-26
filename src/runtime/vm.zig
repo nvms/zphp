@@ -5760,7 +5760,10 @@ pub const VM = struct {
                 .get_var_var, .get_var_var_quiet => {
                     const name_val = self.pop();
                     var text_buf: [32]u8 = undefined;
-                    const raw_name = varVarText(name_val, &text_buf);
+                    const raw_name = self.varVarNameText(name_val, &text_buf) catch {
+                        _ = try self.resumeRaised();
+                        continue;
+                    };
                     // an empty name is the variable named "" (`${''}`)
                     {
                         var buf: [256]u8 = undefined;
@@ -5786,7 +5789,12 @@ pub const VM = struct {
                     const separate_only = vv_op == .separate_var_var;
                     const name_val = self.pop();
                     var buf: [256]u8 = undefined;
-                    const dollar_name = varVarName(if (name_val == .string) name_val.string.bytes() else "", &buf);
+                    var text_buf: [32]u8 = undefined;
+                    const raw_name = self.varVarNameText(name_val, &text_buf) catch {
+                        _ = try self.resumeRaised();
+                        continue;
+                    };
+                    const dollar_name = varVarName(raw_name, &buf);
                     const frame = self.currentFrame();
                     const cur = self.frameVariable(frame, dollar_name) orelse .null;
                     if (separate_only and cur != .array) {
@@ -5821,7 +5829,10 @@ pub const VM = struct {
                 .set_var_var => {
                     const name_val = self.pop();
                     var text_buf: [32]u8 = undefined;
-                    const raw_name = varVarText(name_val, &text_buf);
+                    const raw_name = self.varVarNameText(name_val, &text_buf) catch {
+                        _ = try self.resumeRaised();
+                        continue;
+                    };
                     // zend_fetch_this_var for a write: $this is no variable
                     if (std.mem.eql(u8, raw_name, "this")) {
                         self.stackRelease(name_val);
@@ -10367,7 +10378,10 @@ pub const VM = struct {
                     const name_val = self.popTransfer();
                     defer self.stackRelease(name_val);
                     var text_buf: [32]u8 = undefined;
-                    const raw_name = varVarText(name_val, &text_buf);
+                    const raw_name = self.varVarNameText(name_val, &text_buf) catch {
+                        _ = try self.resumeRaised();
+                        continue;
+                    };
                     var buf: [256]u8 = undefined;
                     const name = try self.internName(varVarName(raw_name, &buf));
                     if (self.frame_count > 0) {
@@ -10385,7 +10399,10 @@ pub const VM = struct {
                     const name_val = self.popTransfer();
                     defer self.stackRelease(name_val);
                     var text_buf: [32]u8 = undefined;
-                    const raw_name = varVarText(name_val, &text_buf);
+                    const raw_name = self.varVarNameText(name_val, &text_buf) catch {
+                        _ = try self.resumeRaised();
+                        continue;
+                    };
                     var buf: [256]u8 = undefined;
                     self.unsetVariableNamed(try self.internName(varVarName(raw_name, &buf)));
                     // widen gate at unset: explicit-close intent drains every
@@ -30633,6 +30650,13 @@ pub const VM = struct {
         // and so do too many digits for a long
         _ = std.fmt.parseInt(i64, s[number_at..i], 10) catch return false;
         return true;
+    }
+
+    // zend_fetch_var's name: zval_try_get_tmp_string, so an object's
+    // __toString runs (and may throw) and an array warns
+    fn varVarNameText(self: *VM, v: Value, buf: *[32]u8) RuntimeError![]const u8 {
+        if (v == .object or v == .array) return self.valueToString(v);
+        return varVarText(v, buf);
     }
 
     fn varVarText(v: Value, buf: *[32]u8) []const u8 {
