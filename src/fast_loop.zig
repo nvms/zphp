@@ -564,6 +564,19 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += op_bytes;
                     continue :dispatch _next;
                 },
+                // bury 1: the moved value's fetch mark moves with it
+                .swap => {
+                    const top = stack[sp - 1];
+                    stack[sp - 1] = stack[sp - 2];
+                    stack[sp - 2] = top;
+                    const top_mark = fetch_marks[sp - 1];
+                    fetch_marks[sp - 1] = fetch_marks[sp - 2];
+                    fetch_marks[sp - 2] = top_mark;
+                    if (top == .array and !top_mark) VM.markStackValue(top.array, sp - 2);
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
+                },
                 .bury => {
                     const n = code[ip];
                     ip += 1;
