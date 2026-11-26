@@ -56,6 +56,8 @@ const Identity = struct {
     // what is listed for the entry when it isn't the target itself: a Closure
     // made from a callable, or an object called through __invoke
     listed: ?*PhpObject = null,
+    // a __call or __callStatic trampoline for a method the scope can't call
+    trampoline: bool = false,
 };
 
 // the entry's resolution, or null when it no longer resolves. key and
@@ -108,7 +110,7 @@ pub fn identity(ctx: *NativeContext, callable: Value) RuntimeError!?Identity {
         .magic => |mg| {
             const key = try std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ mg.class, mg.name });
             defer ctx.allocator.free(key);
-            return .{ .kind = .method, .object = mg.object, .name = mg.name, .class = mg.class, .key = try lower(ctx, key) };
+            return .{ .kind = .method, .object = mg.object, .name = mg.name, .class = mg.class, .key = try lower(ctx, key), .trampoline = true };
         },
     }
 }
@@ -178,10 +180,17 @@ fn register(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     if (isAutoloadCall(id)) return sic.throwNow(ctx, "ValueError", "spl_autoload_register(): Argument #1 ($callback) must not be the spl_autoload_call() function", .{});
     if (try findRegistered(ctx, id) != null) return NativeResult.scalar(.{ .bool = true });
     const stored = try storedCallable(ctx, callable, id);
+    const vm = ctx.vm;
+    // the resolution php keeps: a method the registering scope reaches is
+    // called as itself from anywhere, one it doesn't through the trampoline
+    const how: VM.AutoloadCall = if (id.trampoline) .trampoline else if (callable == .array and id.kind == .method and id.listed == null) .method else .resolve;
+    try vm.autoload_resolved.ensureTotalCapacity(vm.allocator, vm.autoload_callbacks.items.len + 1);
     if (prepend) {
-        try ctx.vm.autoload_callbacks.insert(ctx.vm.allocator, 0, stored);
+        try vm.autoload_callbacks.insert(vm.allocator, 0, stored);
+        vm.autoload_resolved.insertAssumeCapacity(0, how);
     } else {
-        try ctx.vm.autoload_callbacks.append(ctx.vm.allocator, stored);
+        try vm.autoload_callbacks.append(vm.allocator, stored);
+        vm.autoload_resolved.appendAssumeCapacity(how);
     }
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -221,10 +230,12 @@ fn unregister(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         if (sic.pending(ctx)) return error.RuntimeError;
         for (ctx.vm.autoload_callbacks.items) |cb| ctx.vm.releaseValue(cb);
         ctx.vm.autoload_callbacks.clearRetainingCapacity();
+        ctx.vm.autoload_resolved.clearRetainingCapacity();
         return NativeResult.scalar(.{ .bool = true });
     }
     const i = (try findRegistered(ctx, id)) orelse return NativeResult.scalar(.{ .bool = false });
     const removed = ctx.vm.autoload_callbacks.orderedRemove(i);
+    if (i < ctx.vm.autoload_resolved.items.len) _ = ctx.vm.autoload_resolved.orderedRemove(i);
     ctx.vm.releaseValue(removed);
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -264,7 +275,9 @@ pub fn performAutoload(ctx: *NativeContext, class_name: []const u8) RuntimeError
         const cb = vm.autoload_callbacks.items[i];
         VM.retainValue(cb);
         defer vm.releaseValue(cb);
-        _ = try sic.callValue(ctx, cb, &.{.{ .string = Value.String.borrowed(class_name) }});
+        if (i < vm.autoload_resolved.items.len and vm.autoload_resolved.items[i] != .resolve) {
+            _ = try vm.callResolvedAutoloader(cb, vm.autoload_resolved.items[i], class_name);
+        } else _ = try sic.callValue(ctx, cb, &.{.{ .string = Value.String.borrowed(class_name) }});
         if (sic.pending(ctx)) return;
         if (vm.classes.contains(lookup) or vm.interfaces.contains(lookup) or vm.traits.contains(lookup)) return;
         // php's hash position moves to the next bucket; one the autoloader

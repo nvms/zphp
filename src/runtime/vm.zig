@@ -1396,6 +1396,9 @@ pub const VM = struct {
     source: []const u8 = "",
     file_path: []const u8 = "",
     autoload_callbacks: std.ArrayListUnmanaged(Value) = .empty,
+    // parallel to autoload_callbacks: how the entry resolved where it was
+    // registered, which is how it is called wherever the autoload happens
+    autoload_resolved: std.ArrayListUnmanaged(AutoloadCall) = .empty,
     // spl_autoload_extensions(), null for php's default ".inc,.php"
     spl_autoload_extensions: ?[]u8 = null,
     autoload_depth: u8 = 0,
@@ -4176,6 +4179,7 @@ pub const VM = struct {
         for (&self.url_scanners) |*scanner| scanner.deinit(self.allocator);
         self.request_vars.deinit(self.allocator);
         self.autoload_callbacks.deinit(self.allocator);
+        self.autoload_resolved.deinit(self.allocator);
         if (self.spl_autoload_extensions) |exts| self.allocator.free(exts);
         self.magic_guards.deinit(self.allocator);
         self.magic_call_guard.deinit(self.allocator);
@@ -27068,7 +27072,9 @@ pub const VM = struct {
             defer self.releaseValue(callback);
             // "Class::method" goes through the callable rules, which keep
             // the class it names as the called scope
-            if (callback == .string and std.mem.indexOf(u8, callback.string.bytes(), "::") == null) {
+            if (i < self.autoload_resolved.items.len and self.autoload_resolved.items[i] != .resolve) {
+                _ = try self.callResolvedAutoloader(callback, self.autoload_resolved.items[i], class_name);
+            } else if (callback == .string and std.mem.indexOf(u8, callback.string.bytes(), "::") == null) {
                 _ = try self.callByName(callback.string.bytes(), &.{.{ .string = Value.String.borrowed(class_name) }});
             } else {
                 var ctx = self.makeContext(null);
@@ -27079,6 +27085,32 @@ pub const VM = struct {
             // autoloader removed leaves a hole that the step passes over too
             i += 1;
         }
+    }
+
+    // how an autoloader resolved when it was registered (php keeps its fcc):
+    // resolve: as a callable at each call; method: [target, method] itself,
+    // whatever the visibility where the autoload happens; trampoline: the
+    // method through __call or __callStatic, which stood in for it there
+    pub const AutoloadCall = enum(u8) { resolve, method, trampoline };
+
+    pub fn callResolvedAutoloader(self: *VM, callback: Value, how: AutoloadCall, class_name: []const u8) RuntimeError!Value {
+        if (callback != .array) return .null;
+        const target = callback.array.get(.{ .int = 0 });
+        const method = callback.array.get(.{ .int = 1 });
+        if (method != .string) return .null;
+        const name = method.string.bytes();
+        const callee: callables.Callee = switch (target) {
+            .object => |o| if (how == .trampoline)
+                .{ .magic = .{ .object = o, .class = o.class_name, .name = name } }
+            else
+                .{ .method = .{ .object = o, .name = name } },
+            .string => |s| if (how == .trampoline)
+                .{ .magic = .{ .object = null, .class = s.bytes(), .name = name } }
+            else
+                .{ .static_method = .{ .registered = try self.resolveMethod(s.bytes(), name), .called_class = s.bytes() } },
+            else => return .null,
+        };
+        return callables.invoke(self, callee, &.{.{ .string = Value.String.borrowed(class_name) }});
     }
 
     // a comparison php fails with an Error (Value.compare leaves the reason
@@ -32711,6 +32743,7 @@ pub const VM = struct {
         self.releaseTickFunctions();
         for (self.autoload_callbacks.items) |cb| self.releaseValue(cb);
         self.autoload_callbacks.clearRetainingCapacity();
+        self.autoload_resolved.clearRetainingCapacity();
         if (self.spl_autoload_extensions) |exts| self.allocator.free(exts);
         self.spl_autoload_extensions = null;
         if (self.user_error_handler) |h| self.releaseValue(h);
