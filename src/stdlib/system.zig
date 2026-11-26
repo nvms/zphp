@@ -1083,8 +1083,9 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
     }) {
         try appendNativeEntries(vm, result, natives[0..native_count], &next_native, i, ignore_args, provide_object, limit);
         if (limit > 0 and result.entries.items.len >= limit) break;
-        // the frame a native method call keeps its $this in is no php frame
-        if (vm.frames[i].native) {
+        // the frame a native method call keeps its $this in is no php frame,
+        // nor one that doesn't exist yet (a deprecated function's)
+        if (vm.frames[i].native or i == vm.hidden_trace_frame) {
             count -%= 1;
             continue;
         }
@@ -1113,8 +1114,9 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
                 try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
             }
         } else {
-            try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(i - 1)) });
-            const caller = &vm.frames[i - 1];
+            const caller_index = if (i - 1 == vm.hidden_trace_frame and i >= 2) i - 2 else i - 1;
+            try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(caller_index)) });
+            const caller = &vm.frames[caller_index];
             if (vm.sourceLocation(caller.chunk, if (caller.ip > 0) caller.ip - 1 else 0)) |loc| {
                 try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
             }

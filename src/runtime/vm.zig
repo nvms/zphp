@@ -16586,7 +16586,12 @@ pub const VM = struct {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
                 const call_site: ?SourcePosition = if (self.attributeSiteAt(i)) |s|
                     .{ .file = s.file, .line = s.line }
-                else if (i > 0 and !called_by_native and i != self.trace_floor) self.framePosition(i - 1) else null;
+                else if (i > 0 and !called_by_native and i != self.trace_floor)
+                    // a hidden frame doesn't exist yet: what it runs is
+                    // called from its caller's line
+                    self.framePosition(if (i - 1 == self.hidden_trace_frame and i >= 2) i - 2 else i - 1)
+                else
+                    null;
                 // a generator running as a delegate was reached through the
                 // generators waiting in yield from, which php lists between
                 // it and the frame that resumed them
