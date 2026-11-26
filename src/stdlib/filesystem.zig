@@ -1455,7 +1455,9 @@ fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]con
     }
     if (std.mem.eql(u8, spelled_path, "php://stdout") or std.mem.eql(u8, spelled_path, "php://output")) {
         const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
-        try ctx.vm.output.appendSlice(ctx.allocator, data);
+        if (spelled_path[6] == 'o') {
+            try ctx.vm.output.appendSlice(ctx.allocator, data);
+        } else try @import("output_control.zig").writeBelowBuffers(ctx.vm, data);
         return NativeResult.scalar(.{ .int = @intCast(data.len) });
     }
     if (std.mem.eql(u8, spelled_path, "php://stderr")) {
@@ -3155,7 +3157,11 @@ fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("w") });
         // php's output stream has no seek: it never moves the descriptor
         // under the output
-        if (path[6] == 'o') (try streams.of(ctx, obj)).no_seek = true;
+        if (path[6] == 'o') {
+            const s = try streams.of(ctx, obj);
+            s.no_seek = true;
+            s.php_output = true;
+        }
         return NativeResult.borrowed(.{ .resource = obj });
     }
     if (std.mem.eql(u8, path, "php://stderr")) {
@@ -3798,11 +3804,14 @@ pub fn streamWrite(ctx: *NativeContext, obj: *PhpObject, data: []const u8) Runti
 // the raw write to a descriptor or socket: what it took, or -1
 pub fn fdWrite(ctx: *NativeContext, obj: *PhpObject, io: StreamIo, data: []const u8) RuntimeError!isize {
     const file = io.file;
-    // route php://stdout and php://output through the VM output buffer so the order
-    // matches echo. for php://stderr, flush the buffer first so anything echo'd before
-    // this call lands before our stderr write
+    // php://output is echo; php://stdout goes through the vm's output
+    // too, so the order matches echo, but below the output buffers. for
+    // php://stderr, flush the buffer first so anything echo'd before this
+    // call lands before our stderr write
     if (!io.socket and platform.isStdout(file)) {
-        try ctx.vm.output.appendSlice(ctx.allocator, data);
+        if ((try streams.of(ctx, obj)).php_output) {
+            try ctx.vm.output.appendSlice(ctx.allocator, data);
+        } else try @import("output_control.zig").writeBelowBuffers(ctx.vm, data);
         return @intCast(data.len);
     }
     if (!io.socket and platform.isStderr(file)) ctx.vm.flushOutputToStdout();

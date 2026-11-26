@@ -61,6 +61,8 @@ pub const Stream = struct {
     // reads bypass the buffer (php://memory and php://temp)
     no_buffer: bool = false,
     no_seek: bool = false,
+    // php://output: writes go through output buffering, unlike stdout's
+    php_output: bool = false,
     was_written: bool = false,
     // php keeps reading until it has the whole request for plain files and
     // memory streams; every other stream returns what one read brought

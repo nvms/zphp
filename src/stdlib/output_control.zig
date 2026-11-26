@@ -74,6 +74,24 @@ fn sync(vm: *VM) void {
     }
 }
 
+// a write to the stdout stream bypasses output buffering: it goes after
+// what was output below the buffers and before what they hold, which
+// then starts past it
+pub fn writeBelowBuffers(vm: *VM, data: []const u8) !void {
+    if (vm.ob_stack.items.len == 0) return vm.output.appendSlice(vm.allocator, data);
+    sync(vm);
+    // a disabled level's bytes already belong below
+    var at = vm.ob_stack.items[0].start;
+    for (vm.ob_stack.items, 0..) |level, i| {
+        if (level.flags & disabled == 0) break;
+        at = levelEnd(vm, i);
+    }
+    try vm.output.insertSlice(vm.allocator, at, data);
+    for (vm.ob_stack.items) |*level| {
+        if (level.start >= at) level.start += data.len;
+    }
+}
+
 // the bytes a level holds: up to the next level, or the end for the top one.
 // a disabled level stores nothing: what reaches it passes below
 fn levelEnd(vm: *VM, index: usize) usize {
@@ -169,13 +187,13 @@ fn handlerOp(vm: *VM, ctx: *NativeContext, index: usize, op_in: i64, comptime fu
     var op = op_in;
     if (level.flags & started == 0) op |= op_start;
     const id = level.id;
-    const start = level.start;
+    var start = level.start;
     var outcome: Outcome = .{ .status = .no_data };
 
     if (level.callback) |cb| {
         const raw = try Value.String.create(vm.allocator, vm.output.items[start..]);
         defer raw.release();
-        const before = vm.output.items.len;
+        var before = vm.output.items.len;
         const outer_running = vm.ob_running;
         vm.ob_running = index;
         const result = ctx.invokeCallable(cb, &.{ .{ .string = raw }, .{ .int = op } });
@@ -186,6 +204,11 @@ fn handlerOp(vm: *VM, ctx: *NativeContext, index: usize, op_in: i64, comptime fu
             return .{ .status = .no_data };
         }
         level = &vm.ob_stack.items[index];
+        // a write to stdout or a flush of what is below the buffers moved
+        // the handler's input while it ran
+        const moved = @as(isize, @intCast(level.start)) - @as(isize, @intCast(start));
+        start = level.start;
+        before = @intCast(@as(isize, @intCast(before)) + moved);
         // what the handler printed was stored in its own buffer, after its input
         var echoed: []u8 = &.{};
         defer vm.allocator.free(echoed);
