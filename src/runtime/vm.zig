@@ -7641,7 +7641,7 @@ pub const VM = struct {
                         },
                     }
                 },
-                .array_get_vivify, .array_get_vivify_rw, .array_get_vivify_ref => {
+                .array_get_vivify, .array_get_vivify_rw, .array_get_vivify_ref, .array_get_list_w => {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (op == .array_get_vivify_rw and arr_val == .null and key != .array and key != .object) {
@@ -7715,7 +7715,7 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                                 return error.RuntimeError;
                             } else {
-                                if (existing == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
+                                if (existing == .bool and op != .array_get_list_w) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                                 const new_arr = try self.allocArray();
                                 const new_val = Value{ .array = new_arr };
                                 try self.arraySetOwned(arr_val.array, arr_key, new_val);

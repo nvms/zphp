@@ -761,7 +761,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += op_bytes;
                     continue :dispatch _next;
                 },
-                .array_get_vivify, .array_get_vivify_rw => {
+                .array_get_vivify, .array_get_vivify_rw, .array_get_list_w => {
                     const agv_key = stack[sp - 1];
                     const agv_arr = stack[sp - 2];
                     sp -= 2;

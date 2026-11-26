@@ -693,6 +693,10 @@ pub const OpCode = enum(u16) {
     // value on top. an array the loop hasn't iterated yet is separated from
     // its other holders (zend_hash_iterator_pos_ex), the top becoming the copy
     separate_live_iterable,
+    // array_get_vivify for the container of a nested list binding
+    // references (FETCH_DIM_W, MAKE_REF, then FETCH_LIST_W): a false
+    // element becomes an array without the deprecation, as a reference does
+    array_get_list_w,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -867,6 +871,7 @@ pub const OpCode = enum(u16) {
             .array_get_vivify,
             .array_get_vivify_rw,
             .array_get_vivify_ref,
+            .array_get_list_w,
             .get_prop_dynamic,
             .ensure_array_prop_dynamic,
             .get_prop_coalesce_dynamic,

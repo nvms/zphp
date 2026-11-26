@@ -1226,7 +1226,7 @@ fn isConstantFetch(self: *Compiler, idx: u32) bool {
     };
 }
 
-fn listHasRef(self: *Compiler, idx: u32) bool {
+pub fn listHasRef(self: *Compiler, idx: u32) bool {
     if (idx == 0) return false;
     const n = self.ast.nodes[idx];
     return switch (n.tag) {

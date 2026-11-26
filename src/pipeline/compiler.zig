@@ -1695,7 +1695,7 @@ pub const Compiler = struct {
                     }
                     try self.emitOp(.dup);
                     try self.compileNode(slot_node.data.rhs);
-                    try self.emitOp(.array_get_list);
+                    try self.emitOp(self.listFetchOp(slot_node.data.lhs));
                     try self.compileStoreTop(slot_node.data.lhs);
                     continue;
                 }
@@ -1707,7 +1707,7 @@ pub const Compiler = struct {
                 const key_idx = try self.addConstant(.{ .int = @intCast(i) });
                 try self.emitOp(.constant);
                 try self.emitU16(key_idx);
-                try self.emitOp(.array_get_list);
+                try self.emitOp(self.listFetchOp(slot));
                 try self.compileStoreTop(slot);
             }
         } else if (target.tag == .array_literal) {
@@ -1733,10 +1733,19 @@ pub const Compiler = struct {
                     try self.emitOp(.constant);
                     try self.emitU16(key_idx);
                 }
-                try self.emitOp(.array_get_list);
+                try self.emitOp(self.listFetchOp(elem.data.lhs));
                 try self.compileStoreTop(elem.data.lhs);
             }
         }
+    }
+
+    // a nested list binding references fetches its container for writing
+    // (zend_compile_list_assign's FETCH_DIM_W / FETCH_LIST_W): a missing or
+    // null element becomes the array the references go into
+    fn listFetchOp(self: *Compiler, target_idx: u32) OpCode {
+        const n = self.ast.nodes[target_idx];
+        if ((n.tag == .list_destructure or n.tag == .array_literal) and compiler_expr.listHasRef(self, target_idx)) return .array_get_list_w;
+        return .array_get_list;
     }
 
     // stores the value on top of the stack into a write target (a variable,
