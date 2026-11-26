@@ -121,6 +121,14 @@ pub fn notify(ctx: *NativeContext, context: ?*PhpObject, code: i64, severity: i6
     };
 }
 
+// smart_str_append_header_value: a From or User-Agent value stops at its
+// first CR or LF, so a setting can't inject a header of its own
+fn appendHeaderValue(ctx: *NativeContext, req: *std.ArrayListUnmanaged(u8), value: []const u8, header_name: []const u8) RuntimeError!void {
+    const end = std.mem.indexOfAny(u8, value, "\r\n") orelse value.len;
+    try req.appendSlice(ctx.allocator, value[0..end]);
+    if (end < value.len) try fs.warnDocref(ctx, "Header {s} value contains newline characters and has been truncated", .{header_name});
+}
+
 fn lower(a: std.mem.Allocator, s: []const u8) ![]u8 {
     const out = try a.dupe(u8, s);
     for (out) |*c| c.* = std.ascii.toLower(c.*);
@@ -370,7 +378,9 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         try notify(ctx, context, NOTIFY_AUTH_REQUIRED, 0, null, 0, 0, 0);
     };
     if (have & HAVE_FROM == 0) if (ctx.vm.ini_settings.get("from")) |from| if (from.len > 0) {
-        try req.print(a, "From: {s}\r\n", .{from});
+        try req.appendSlice(a, "From: ");
+        try appendHeaderValue(ctx, &req, from, "From");
+        try req.appendSlice(a, "\r\n");
     };
     if (have & HAVE_HOST == 0) {
         try req.print(a, "Host: {s}", .{resource.host});
@@ -384,7 +394,9 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
     }
     if (ua == null) ua = ctx.vm.ini_settings.get("user_agent");
     if (have & HAVE_USER_AGENT == 0) if (ua) |u| if (u.len > 0) {
-        try req.print(a, "User-Agent: {s}\r\n", .{u});
+        try req.appendSlice(a, "User-Agent: ");
+        try appendHeaderValue(ctx, &req, u, "User-Agent");
+        try req.appendSlice(a, "\r\n");
     };
     const content: ?[]const u8 = if (contextOption(context, "http", "content")) |v| (if (v == .string and v.string.bytes().len > 0) v.string.bytes() else null) else null;
     if (has_user_headers) {
