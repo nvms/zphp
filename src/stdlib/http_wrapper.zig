@@ -529,10 +529,12 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
                 if (loc.len > 1 and resource.path != null) {
                     const p = resource.path.?;
                     const dir = if (std.mem.lastIndexOfScalar(u8, p, '/')) |slash| p[0 .. slash + 1] else "/";
+                    // php truncates the path after its last slash and then joins with
+                    // another one, so "/dir/page" + "other" requests "/dir//other"
                     if (std.mem.eql(u8, dir, "/")) {
                         try loc_path.print(a, "/{s}", .{loc});
                     } else {
-                        try loc_path.print(a, "{s}/{s}", .{ dir[0 .. dir.len - 1], loc });
+                        try loc_path.print(a, "{s}/{s}", .{ dir, loc });
                     }
                 } else try loc_path.print(a, "/{s}", .{loc});
             } else try loc_path.appendSlice(a, loc);
