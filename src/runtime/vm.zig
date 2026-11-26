@@ -386,11 +386,14 @@ pub const NativeContext = struct {
                 break :blk if (inner == .string) inner.string.bytes() else return;
             },
             .method => |m| blk: {
-                if (!std.ascii.eqlIgnoreCase(m.name, "__invoke")) return;
-                const instance = m.object.closureName() orelse return;
-                invoke_shown = "Closure::__invoke";
-                break :blk instance;
+                if (std.ascii.eqlIgnoreCase(m.name, "__invoke")) if (m.object.closureName()) |instance| {
+                    invoke_shown = "Closure::__invoke";
+                    break :blk instance;
+                };
+                break :blk m.registered orelse (self.vm.resolveMethod(m.object.class_name, m.name) catch return);
             },
+            .static_method => |m| m.registered,
+            .invoke => |obj| self.vm.resolveMethod(obj.class_name, "__invoke") catch return,
             else => return,
         };
         const func = self.vm.functions.get(name) orelse return;
