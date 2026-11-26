@@ -309,6 +309,7 @@ Zend/tests/attributes/deprecated/error_on_enum.phpt
 Zend/tests/attributes/deprecated/error_on_interface.phpt
 Zend/tests/attributes/deprecated/functions/001.phpt
 Zend/tests/attributes/deprecated/functions/deprecated_handler_001.phpt
+Zend/tests/attributes/deprecated/functions/deprecated_handler_002.phpt
 Zend/tests/attributes/deprecated/functions/deprecated_handler_003.phpt
 Zend/tests/attributes/deprecated/functions/error_code_001.phpt
 Zend/tests/attributes/deprecated/functions/magic_call.phpt
@@ -1620,6 +1621,7 @@ Zend/tests/exceptions/bug48428.phpt
 Zend/tests/exceptions/bug50005.phpt
 Zend/tests/exceptions/bug50383.phpt
 Zend/tests/exceptions/bug51394.phpt
+Zend/tests/exceptions/bug53511.phpt
 Zend/tests/exceptions/bug54043.phpt
 Zend/tests/exceptions/bug60569.phpt
 Zend/tests/exceptions/bug61362.phpt
@@ -2014,6 +2016,7 @@ Zend/tests/function_outside_namespace.phpt
 Zend/tests/function_redecl.phpt
 Zend/tests/functions/007.phpt
 Zend/tests/functions/readonly_as_method_name_is_ok.phpt
+Zend/tests/functions/zend_call_function_deprecated_frame.phpt
 Zend/tests/gc/bug43918.phpt
 Zend/tests/gc/bug47343.phpt
 Zend/tests/gc/bug54305.phpt
@@ -2329,6 +2332,7 @@ Zend/tests/gh10168/assign_untyped_prop_ref_with_prop_ref.phpt
 Zend/tests/gh10168/assign_untyped_prop_with_prop_ref.phpt
 Zend/tests/gh10168/assign_with_prop_ref.phpt
 Zend/tests/gh10168/wrong_assign_to_variable.phpt
+Zend/tests/gh10169.phpt
 Zend/tests/gh10232.phpt
 Zend/tests/gh10251.phpt
 Zend/tests/gh10486.phpt
@@ -2372,6 +2376,7 @@ Zend/tests/gh13670_001.phpt
 Zend/tests/gh13670_002.phpt
 Zend/tests/gh13670_003.phpt
 Zend/tests/gh13931.phpt
+Zend/tests/gh14003.phpt
 Zend/tests/gh14456.phpt
 Zend/tests/gh14969.phpt
 Zend/tests/gh15712.phpt
@@ -3304,6 +3309,7 @@ Zend/tests/named_params/basic.phpt
 Zend/tests/named_params/bug80096.phpt
 Zend/tests/named_params/call_user_func.phpt
 Zend/tests/named_params/call_user_func_array.phpt
+Zend/tests/named_params/cannot_pass_by_ref.phpt
 Zend/tests/named_params/ctor_extra_named_args.phpt
 Zend/tests/named_params/duplicate_param.phpt
 Zend/tests/named_params/func_get_args.phpt
