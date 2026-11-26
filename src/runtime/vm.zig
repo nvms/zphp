@@ -18076,6 +18076,8 @@ pub const VM = struct {
             try self.setPendingException("ValueError", "Path must not be empty");
             return error.RuntimeError;
         }
+        // an exception a stream wrapper's url_stat threw ends the include
+        // with nothing reported of its own (zend_include_or_eval)
         if (try includes.resolve(self, path)) |found| {
             // the plain files opener checks open_basedir on the resolved path
             if (open_basedir.setting(self) != null and !includes.hasScheme(found) and !try open_basedir.allows(self, @tagName(kind), found)) {

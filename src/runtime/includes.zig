@@ -40,7 +40,7 @@ pub fn includePath(vm: *const VM) []const u8 {
 // each include_path entry, then the directory of the running file. the result
 // is the file's canonical path, interned for the life of the VM, so every
 // spelling of one file is one entry for require_once and get_included_files
-pub fn resolve(vm: *VM, path: []const u8) error{OutOfMemory}!?[]const u8 {
+pub fn resolve(vm: *VM, path: []const u8) error{ OutOfMemory, RuntimeError }!?[]const u8 {
     if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return null;
     if (hasScheme(path)) return try intern(vm, path);
     if (namesOwnLocation(path)) return canonical(vm, path);
@@ -53,6 +53,8 @@ pub fn resolve(vm: *VM, path: []const u8) error{OutOfMemory}!?[]const u8 {
             const trypath = try std.fmt.allocPrint(vm.allocator, "{s}/{s}", .{ entry, path });
             defer vm.allocator.free(trypath);
             if (@import("../stdlib/filesystem.zig").wrapperUrlExists(vm, trypath)) return try intern(vm, trypath);
+            // php_resolve_path: an exception url_stat threw ends the search
+            if (vm.pending_exception != null) return error.RuntimeError;
             continue;
         }
         if (try joined(vm, entry, path)) |found| return found;
