@@ -2102,6 +2102,7 @@ fn native_rename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return NativeResult.scalar(.{ .bool = false });
     };
     _ = bundle.remove(from);
+    clearStatAndRealpathCache();
     return NativeResult.scalar(.{ .bool = true });
 }
 

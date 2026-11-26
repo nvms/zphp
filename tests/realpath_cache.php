@@ -51,6 +51,15 @@ var_dump(realpath_cache_size() > 0);
 unlink("$base/link2");
 var_dump(count(array_filter(array_keys(realpath_cache_get()), fn($k) => str_starts_with($k, $base))));
 
+// so does a rename
+touch("$base/g");
+var_dump($show(realpath("$base/g")));
+exec('rm -f ' . escapeshellarg("$base/g"));
+touch("$base/h");
+rename("$base/h", "$base/i");
+var_dump(realpath("$base/g"));
+unlink("$base/i");
+
 // relative paths, and a working directory that was removed
 chdir("$base/dir1");
 var_dump($show(realpath('')), $show(realpath('.')), $show(realpath('..')), realpath('nope'));
