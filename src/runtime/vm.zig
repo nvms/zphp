@@ -2051,20 +2051,30 @@ pub const VM = struct {
         };
     }
 
-    fn staticPropIsReferenced(self: *VM, class_name: []const u8, prop_name: []const u8) bool {
-        const ri = self.ref_index orelse return false;
-        if (ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name })) |list| {
-            return list.items.len > 0;
-        }
-        return false;
+    // the reference cell a static property is bound to, if any
+    fn staticPropBoundCell(self: *VM, class_name: []const u8, prop_name: []const u8) ?*Value {
+        const ri = self.ref_index orelse return null;
+        const list = ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name }) orelse return null;
+        return if (list.items.len > 0) list.items[0] else null;
     }
 
-    fn propIsReferenced(self: *VM, obj: *PhpObject, prop_name: []const u8) bool {
-        const ri = self.ref_index orelse return false;
-        if (ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = prop_name })) |list| {
-            return list.items.len > 0;
-        }
-        return false;
+    // the reference cell a property is bound to, if any
+    fn propRefCell(self: *VM, obj: *PhpObject, prop_name: []const u8) ?*Value {
+        const ri = self.ref_index orelse return null;
+        const list = ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = prop_name }) orelse return null;
+        return if (list.items.len > 0) list.items[0] else null;
+    }
+
+    // the array an in-place write to a referenced property goes into: the
+    // reference set shares it, but a value copy holding it too (`$copy = $r`)
+    // makes the set separate, as php's write fetch through a reference does
+    fn separateReferencedProp(self: *VM, cell: *Value, arr: *PhpArray) RuntimeError!*PhpArray {
+        if (cell.* != .array or cell.array != arr) return arr;
+        if (arr.refcount - arr.byref_pins <= self.referenceAliasCount(cell) and !self.stackHoldsArray(arr)) return arr;
+        const clone = try self.shallowCloneCow(arr);
+        self.setCell(cell, .{ .array = clone });
+        try self.propagateCellWrite(cell, cell.*);
+        return clone;
     }
 
     // for by-ref foreach advancing past an element: if $name's current cell has
@@ -7873,8 +7883,11 @@ pub const VM = struct {
                         var ea = existing;
                         // a referenced property (`$r=&$obj->prop`) is shared on
                         // purpose - mutate in place, never separate a copy
-                        const inner = if (hook_cell != null or self.propIsReferenced(obj, pname)) existing.array else try self.cowSeparate(existing.array);
-                        if (inner != existing.array) {
+                        const ref_cell = if (hook_cell == null) self.propRefCell(obj, pname) else null;
+                        const inner = if (hook_cell != null) existing.array else if (ref_cell) |cell| try self.separateReferencedProp(cell, existing.array) else try self.cowSeparate(existing.array);
+                        if (ref_cell != null) {
+                            ea = .{ .array = inner };
+                        } else if (inner != existing.array) {
                             try obj.set(self.allocator, pname, .{ .array = inner });
                             inner.refcount -= 1;
                             ea = .{ .array = inner };
@@ -8850,8 +8863,12 @@ pub const VM = struct {
                     if (cur == .array) {
                         // a referenced property (`$r=&$obj->prop`) is shared on
                         // purpose - write through it in place, never separate
-                        if (hook_cell != null or self.propIsReferenced(eap_obj, prop_name)) {
+                        if (hook_cell != null) {
                             self.pushFetched(cur);
+                            continue;
+                        }
+                        if (self.propRefCell(eap_obj, prop_name)) |cell| {
+                            self.pushFetched(.{ .array = try self.separateReferencedProp(cell, cur.array) });
                             continue;
                         }
                         const sep = try self.cowSeparate(cur.array);
@@ -8933,7 +8950,12 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         if (cur == .array) {
-                            const sep = if (self.staticPropIsReferenced(class_name, prop_name)) cur.array else try self.cowSeparate(cur.array);
+                            if (self.staticPropBoundCell(class_name, prop_name)) |cell| {
+                                const sep = try self.separateReferencedProp(cell, cur.array);
+                                self.pushFetched(.{ .array = sep });
+                                continue;
+                            }
+                            const sep = try self.cowSeparate(cur.array);
                             // raw write to the static slot - cowSeparate already
                             // counted the slot's reference (refcount 1)
                             if (sep != cur.array) {
@@ -10686,8 +10708,12 @@ pub const VM = struct {
                         // only plain, visible storage is ours to separate: hooks,
                         // __get, and referenced properties are left to the fetch
                         if (cur == .array and self.propVisible(vr, name, vr.visibility) and
-                            !self.hasPropHook(obj.class_name, name, .get) and !self.propIsReferenced(obj, name))
+                            !self.hasPropHook(obj.class_name, name, .get))
                         {
+                            if (self.propRefCell(obj, name)) |cell| {
+                                _ = try self.separateReferencedProp(cell, cur.array);
+                                continue;
+                            }
                             const sep = try self.cowSeparate(cur.array);
                             if (sep != cur.array) {
                                 try obj.setForScope(self.allocator, name, .{ .array = sep }, scope);
@@ -10829,12 +10855,16 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
                     if (self.getStaticPropPtr(class_name, prop_name)) |slot| {
-                        if (slot.* == .array and !self.staticPropIsReferenced(class_name, prop_name)) {
-                            const sep = try self.cowSeparate(slot.array);
-                            if (sep != slot.array) {
-                                const old = slot.*;
-                                slot.* = .{ .array = sep };
-                                self.releaseValue(old);
+                        if (slot.* == .array) {
+                            if (self.staticPropBoundCell(class_name, prop_name)) |cell| {
+                                _ = try self.separateReferencedProp(cell, slot.array);
+                            } else {
+                                const sep = try self.cowSeparate(slot.array);
+                                if (sep != slot.array) {
+                                    const old = slot.*;
+                                    slot.* = .{ .array = sep };
+                                    self.releaseValue(old);
+                                }
                             }
                         }
                     }
