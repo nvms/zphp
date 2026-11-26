@@ -948,6 +948,12 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         // destructors don't. an uncaught exception ends the script cleanly
         if (vm.pending_exception == null or vm.uncatchable_fatal) vm.unclean_shutdown = true;
         try reportRuntimeError(allocator, vm);
+        // the bailout is over once reported: what a shutdown function throws
+        // is an uncaught exception of its own
+        if (vm.uncatchable_fatal) {
+            vm.discardPending();
+            vm.uncatchable_fatal = false;
+        }
         _ = try runShutdown(allocator, vm);
         _ = flushScriptOutput(vm);
         if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
