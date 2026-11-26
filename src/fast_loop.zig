@@ -1838,6 +1838,11 @@ inline fn copyValue(self: *VM, ic: *InlineCache, val: Value) RuntimeError!Value 
 // pooled locals are given back, since the frame is never entered, and true
 // means the error landed in a catch and the fast loop must return
 inline fn fillDefaults(self: *VM, ic: *InlineCache, func: *const ObjFunction, locals: []Value, bound: usize, offset: usize) RuntimeError!bool {
+    const saved_args = .{ ic.default_args, ic.default_args_func, ic.default_args_depth };
+    ic.default_args = locals[offset..][0..bound];
+    ic.default_args_func = func;
+    ic.default_args_depth = self.frame_count;
+    defer ic.default_args, ic.default_args_func, ic.default_args_depth = saved_args;
     for (bound..func.arity) |i| {
         if (i >= func.defaults.len) continue;
         var dispatched = false;
