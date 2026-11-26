@@ -85,6 +85,12 @@ fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         ctx.vm.response_code = args[2].int;
         ctx.vm.response_code_set = true;
     }
+    // a script that sets its own Content-Length can't know the compressed
+    // size, so php turns output compression off (sapi_header_op, req #44164)
+    if (std.mem.indexOfScalar(u8, hdr, ':')) |colon| if (std.ascii.eqlIgnoreCase(hdr[0..colon], "Content-Length")) {
+        _ = try ctx.vm.setIni("zlib.output_compression", "0");
+        ctx.vm.zlib_output_compression = 0;
+    };
     // the cli's header handler keeps no headers
     if (!ctx.vm.serve_mode) return NativeResult.scalar(.null);
 
