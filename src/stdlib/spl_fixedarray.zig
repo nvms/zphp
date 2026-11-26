@@ -156,8 +156,8 @@ fn resize(ctx: *NativeContext, obj: *PhpObject, size: usize) RuntimeError!void {
     if (size > current) {
         for (current..size) |_| try arr.append(ctx.allocator, .null);
     } else {
-        // the cut elements are released last first, their destructors
-        // seeing the array at its new size
+        // the cut elements are released in order (spl_fixedarray_dtor_range),
+        // their destructors seeing the array at its new size
         var released: std.ArrayListUnmanaged(Value) = .empty;
         defer released.deinit(ctx.allocator);
         while (arr.entries.items.len > size) {
@@ -167,8 +167,12 @@ fn resize(ctx: *NativeContext, obj: *PhpObject, size: usize) RuntimeError!void {
         }
         arr.next_int_key = @intCast(arr.entries.items.len);
         if (arr.entries.items.len == 0) arr.has_int_keys = false;
-        for (released.items) |v| ctx.vm.releaseValue(v);
-        ctx.vm.drainPendingDestruct();
+        var i = released.items.len;
+        while (i > 0) {
+            i -= 1;
+            ctx.vm.releaseValue(released.items[i]);
+            ctx.vm.drainPendingDestruct();
+        }
     }
     const cached = obj.get(P.resize);
     try setResize(ctx, obj, -1);
