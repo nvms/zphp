@@ -1836,7 +1836,12 @@ fn newInstanceWith(ctx: *NativeContext, positional: []const Value, named: ?*PhpA
     ctx.vm.native_caller = .{ .name = "ReflectionClass::newInstance", .frames = ctx.vm.frame_count };
     defer ctx.vm.native_caller = outer;
     try bound.warnValues(ctx, key);
-    _ = try ctx.callMethod(obj, "__construct", bound.list.items);
+    // zend_object_store_ctor_failed: a constructor that threw leaves the
+    // object without a destructor call
+    _ = ctx.callMethod(obj, "__construct", bound.list.items) catch |err| {
+        if (ctx.vm.pending_exception != null) obj.destructor_called = true;
+        return err;
+    };
     return NativeResult.borrowed(.{ .object = obj });
 }
 
