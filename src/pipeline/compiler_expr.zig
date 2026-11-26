@@ -1985,6 +1985,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
 
     if (!hasSplatOrNamed(self.ast, args) and isGlobalFunction(self, callee, "sprintf") and try compileSprintfRope(self, args)) return;
     if (!hasSplatOrNamed(self.ast, args) and isGlobalFunction(self, callee, "printf") and try compilePrintfRope(self, args)) return;
+    if (!hasSplatOrNamed(self.ast, args) and isGlobalFunction(self, callee, "array_map") and try compileArrayMapLoop(self, node, args)) return;
 
     if (callee.tag == .property_access and callee.main_token == 0) try checkMethodName(self, callee.data.rhs);
     if (hasSplatOrNamed(self.ast, args)) {
@@ -2214,6 +2215,202 @@ fn compilePrintfRope(self: *Compiler, args: []const u32) Error!bool {
 // value per placeholder compiles to string casts and concatenation, so the
 // call leaves no sprintf frame in traces and stops at the first exception.
 // false when the call doesn't qualify and nothing was emitted
+// zend_compile_func_array_map: array_map(f(...), $array), or a partial
+// application whose other arguments are literals, compiles to a loop that
+// calls f for each element and keys the results as array_map does. the
+// callback is never made: the call runs in this frame, with no array_map()
+// frame in traces. php leaves strict_types files alone, where array_map's
+// own weak-mode call of the callback would differ
+fn compileArrayMapLoop(self: *Compiler, call_node: Ast.Node, args: []const u32) Error!bool {
+    if (args.len != 2) return false;
+    if (@import("compiler.zig").strictTypesDeclared(self.ast, self.ast.extraSlice(self.ast.nodes[0].data.lhs))) return false;
+    // an array argument that compiles to a constant other than an array
+    // leaves the call as it is (it fails as array_map's own call does)
+    if (foldsToScalar(self, args[1])) return false;
+    const cb = self.ast.nodes[args[0]];
+    // the call the callback names, with its arguments; a first-class
+    // callable has only the variadic placeholder
+    const Kind = enum { function, dynamic, static_literal, static_dynamic };
+    var kind: Kind = undefined;
+    var target: Ast.Node = undefined;
+    var cb_args: []const u32 = &.{};
+    switch (cb.tag) {
+        .callable_ref => {
+            target = self.ast.nodes[cb.data.lhs];
+            switch (target.tag) {
+                .static_call => {},
+                .method_call, .nullsafe_method_call, .dynamic_static_call => return false,
+                // a function is named by an identifier or a qualified name;
+                // anything else is an expression giving the callable
+                else => {},
+            }
+        },
+        .call, .static_call => {
+            target = cb;
+            cb_args = self.ast.extraSlice(cb.data.rhs);
+            // zend_partial_apply: one placeholder, the rest literals
+            if (cb_args.len == 0) return false;
+            var placeholders: usize = 0;
+            for (cb_args) |a| {
+                const arg = self.ast.nodes[a];
+                switch (arg.tag) {
+                    .placeholder_arg => placeholders += 1,
+                    .integer_literal, .float_literal => {},
+                    .string_literal => if (arg.data.rhs == Ast.interpolated) return false,
+                    // named arguments would need the spread form
+                    else => return false,
+                }
+            }
+            if (placeholders != 1) return false;
+        },
+        else => return false,
+    }
+    var callee_node: u32 = undefined;
+    var method_name: []const u8 = "";
+    if (target.tag == .static_call) {
+        method_name = self.ast.tokenSlice(target.main_token);
+        callee_node = target.data.lhs;
+        kind = switch (self.ast.nodes[callee_node].tag) {
+            .identifier, .qualified_name => .static_literal,
+            .variable => .static_dynamic,
+            else => return false,
+        };
+    } else {
+        callee_node = if (cb.tag == .callable_ref) cb.data.lhs else target.data.lhs;
+        const callee = self.ast.nodes[callee_node];
+        kind = switch (callee.tag) {
+            // php's compile_assert can't take a temporary as its assertion
+            .identifier => if (std.ascii.eqlIgnoreCase(self.ast.tokenSlice(callee.main_token), "assert")) return false else .function,
+            .qualified_name => .function,
+            .property_access, .nullsafe_property_access, .static_prop_access => return false,
+            else => .dynamic,
+        };
+    }
+    const array_map_offset = self.ast.tokens[self.ast.nodes[call_node.data.lhs].main_token].start;
+
+    // what the loop keeps below its own state: a callable or class
+    // evaluated once, before the array
+    var memo = false;
+    switch (kind) {
+        .dynamic => {
+            try self.compileNode(callee_node);
+            memo = true;
+        },
+        .static_dynamic => {
+            try compileClassRef(self, callee_node);
+            memo = true;
+        },
+        else => {},
+    }
+    try self.compileNode(args[1]);
+    self.current_source_offset = array_map_offset;
+    try self.emitOp(.type_assert_array);
+    try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed("array_map") }));
+    try self.emitByte(2);
+    // [memo?, array] -> [memo?, result, array, position]
+    try self.emitOp(.array_new);
+    try self.emitOp(.swap);
+    try self.emitOp(.iter_begin);
+    const loop_top = self.chunk.offset();
+    const exit_jump = try self.emitJump(.iter_check);
+    // [.., result, array, position, key, value]: the call's arguments
+    // follow, the value copied to the placeholder's place
+    var guards: ArgGuards = .empty;
+    errdefer guards.deinit(self.allocator);
+    // values above the element: the callable or class, then the arguments
+    var above: u8 = 0;
+    if (memo) {
+        // memo, result, array, position, key, value
+        try self.emitOp(.pick);
+        try self.emitByte(5);
+        above += 1;
+    }
+    var class_idx: u16 = 0;
+    if (kind == .static_literal) {
+        const class_node = self.ast.nodes[callee_node];
+        const forwarding = class_node.tag == .identifier and blk: {
+            const written = self.ast.tokenSlice(class_node.main_token);
+            break :blk std.mem.eql(u8, written, "self") or std.mem.eql(u8, written, "parent");
+        };
+        const class_name = if (forwarding) blk: {
+            _ = try resolveNodeClassName(self, class_node);
+            break :blk self.ast.tokenSlice(class_node.main_token);
+        } else try resolveNodeClassName(self, class_node);
+        class_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
+    }
+    const argc: usize = if (cb_args.len == 0) 1 else cb_args.len;
+    if (argc > ArgPos.max) return self.fail(call_node.main_token, "Too many arguments");
+    var pos: usize = 0;
+    while (pos < argc) : (pos += 1) {
+        const is_value = cb_args.len == 0 or self.ast.nodes[cb_args[pos]].tag == .placeholder_arg;
+        if (is_value) {
+            try self.emitOp(.pick);
+            try self.emitByte(above);
+            try emitValueGuard(self, .{ .pos = @intCast(pos), .guards = &guards }, .arg_value);
+        } else {
+            try compileArg(self, cb_args[pos], .{ .pos = @intCast(pos), .guards = &guards });
+        }
+        above += 1;
+    }
+    switch (kind) {
+        .function => {
+            const callee = self.ast.nodes[callee_node];
+            if (callee.tag == .identifier) {
+                const raw_name = self.ast.tokenSlice(callee.main_token);
+                const name = try self.callTargetName(raw_name, self.resolveFunctionName(raw_name));
+                self.current_source_offset = self.ast.tokens[callee.main_token].start;
+                try emitCallOp(self, &guards, .call, .{ .a = try self.addConstant(.{ .string = Value.String.borrowed(name) }), .argc = @intCast(argc) });
+            } else {
+                const parts = self.ast.extraSlice(callee.data.lhs);
+                const fqn = try self.buildQualifiedString(parts);
+                const name = try self.callTargetName(null, try self.resolveQualifiedNonClassName(fqn, callee.data.rhs));
+                if (parts.len > 0) self.current_source_offset = self.ast.tokens[parts[0]].start;
+                try emitCallOp(self, &guards, .call, .{ .a = try self.addConstant(.{ .string = Value.String.borrowed(name) }), .argc = @intCast(argc) });
+            }
+        },
+        .dynamic => {
+            self.current_source_offset = array_map_offset;
+            try emitCallOp(self, &guards, .call_indirect, .{ .argc = @intCast(argc) });
+        },
+        .static_literal => {
+            self.current_source_offset = self.ast.tokens[target.main_token].start;
+            try emitCallOp(self, &guards, .static_call, .{ .a = class_idx, .b = try self.addConstant(.{ .string = Value.String.borrowed(method_name) }), .argc = @intCast(argc) });
+        },
+        .static_dynamic => {
+            self.current_source_offset = self.ast.tokens[target.main_token].start;
+            try emitCallOp(self, &guards, .static_call_dynamic, .{ .a = try self.addConstant(.{ .string = Value.String.borrowed(method_name) }), .argc = @intCast(argc) });
+        },
+    }
+    // [.., result, array, position, key, value, return] -> the return
+    // keyed in the result
+    try self.emitOp(.swap);
+    try self.emitOp(.pop);
+    try self.emitOp(.array_add_below);
+    try self.emitByte(2);
+    try self.emitOp(.iter_advance);
+    try self.emitLoop(loop_top);
+    self.patchJump(exit_jump);
+    try self.emitOp(.iter_end);
+    if (memo) {
+        try self.emitOp(.swap);
+        try self.emitOp(.pop);
+    }
+    return true;
+}
+
+// an expression php's compiler folds to a constant scalar: literals and
+// operators over them
+fn foldsToScalar(self: *Compiler, idx: u32) bool {
+    const node = self.ast.nodes[idx];
+    return switch (node.tag) {
+        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,
+        .string_literal => node.data.rhs != Ast.interpolated,
+        .grouped_expr, .prefix_op => foldsToScalar(self, node.data.lhs),
+        .binary_op => foldsToScalar(self, node.data.lhs) and foldsToScalar(self, node.data.rhs),
+        else => false,
+    };
+}
+
 fn compileSprintfRope(self: *Compiler, args: []const u32) Error!bool {
     if (args.len < 1) return false;
     const fmt_node = self.ast.nodes[args[0]];

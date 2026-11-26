@@ -363,7 +363,7 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
 }
 
 // declare(strict_types=1) among the declares that open the file
-fn strictTypesDeclared(ast: *const Ast, root_stmts: []const u32) bool {
+pub fn strictTypesDeclared(ast: *const Ast, root_stmts: []const u32) bool {
     for (root_stmts) |idx| {
         const node = ast.nodes[idx];
         if (node.tag == .inline_html) continue;

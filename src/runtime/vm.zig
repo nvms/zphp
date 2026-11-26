@@ -11558,6 +11558,33 @@ pub const VM = struct {
                     try self.statics_bound.put(self.allocator, try self.internName(self.staticStorageKey(&key_buf, var_name)), {});
                 },
 
+                .type_assert_array => {
+                    const name_idx = self.readU16();
+                    const argno = self.readByte();
+                    const value = self.stack[self.sp - 1];
+                    if (value == .array) continue;
+                    const fname = self.currentChunk().constants.items[name_idx].string.bytes();
+                    const msg = try self.internalArgTypeMessage(fname, argno, "array", value);
+                    defer self.allocator.free(msg);
+                    if (try self.throwBuiltinException("TypeError", msg)) continue;
+                    return error.RuntimeError;
+                },
+                .pick => {
+                    const n = self.readByte();
+                    const marks = self.ic.?.stack_fetch;
+                    const at = self.sp - 1 - n;
+                    const fetched = marks[at];
+                    self.push(self.stack[at]);
+                    marks[self.sp - 1] = fetched;
+                },
+                .array_add_below => {
+                    const n = self.readByte();
+                    // as array_set_elem stores an array literal's element
+                    const val = self.pop();
+                    const key = self.pop();
+                    const target = self.stack[self.sp - 1 - n];
+                    if (target == .array) try self.arraySetOwned(target.array, Value.toArrayKey(key), val);
+                },
                 .class_ref_check => {
                     const to_name = self.readByte() == 1;
                     const class_ref = self.stack[self.sp - 1];
@@ -25791,6 +25818,16 @@ pub const VM = struct {
             },
             else => return null,
         }
+    }
+
+    // zend_argument_type_error_ex's message for argument argno (from 1) of
+    // an internal function
+    fn internalArgTypeMessage(self: *VM, fname: []const u8, argno: u8, expected: []const u8, value: Value) ![]u8 {
+        const signatures = @import("../stdlib/native_params_generated.zig").map;
+        if (signatures.get(fname)) |sg| if (argno >= 1 and argno <= sg.params.len) {
+            return std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ fname, argno, sg.params[argno - 1].name, expected, valueTypeName(value) });
+        };
+        return std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type {s}, {s} given", .{ fname, argno, expected, valueTypeName(value) });
     }
 
     // zend_cannot_pass_by_reference's message for argument pos of a callee
