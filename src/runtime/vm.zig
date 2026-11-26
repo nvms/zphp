@@ -17028,7 +17028,8 @@ pub const VM = struct {
         } else {
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(call.label) });
         }
-        if (!with_args) return entry;
+        // eval is a language construct: its frame has no argument list
+        if (!with_args or std.mem.eql(u8, call.label, "eval")) return entry;
         const args = try self.traceArgs(entry);
         // the parameters php's stubs mark #[\SensitiveParameter]
         const sensitive = deprecations.sensitive_parameters.get(call.label) orelse 0;
