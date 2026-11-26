@@ -914,6 +914,11 @@ pub const NativeCall = struct {
     this: Value = .null,
     // the named arguments passed past its parameters
     named: ?*PhpArray = null,
+    // where each by-reference argument lives (.none for the others), and the
+    // frame whose variables a .simple source names: php's frame holds the
+    // reference, so a trace shows what the native has written there since
+    ref_sources: []const RefSource = &.{},
+    caller_frame: usize = 0,
 };
 
 pub const NativeInvocation = struct {
@@ -17027,9 +17032,30 @@ pub const VM = struct {
         const args = try self.traceArgs(entry);
         // the parameters php's stubs mark #[\SensitiveParameter]
         const sensitive = deprecations.sensitive_parameters.get(call.label) orelse 0;
-        for (call.args, 0..) |a, i| try args.append(self.allocator, try self.traceArgValue(a, sensitive, i));
+        for (call.args, 0..) |a, i| try args.append(self.allocator, try self.traceArgValue(self.liveNativeArg(call, i) orelse a, sensitive, i));
         if (call.named) |named| for (named.entries.items) |e| try args.set(self.allocator, e.key, try self.traceArgValue(e.value, sensitive, call.args.len));
         return entry;
+    }
+
+    // a by-reference argument's current value, where the caller holds it
+    fn liveNativeArg(self: *VM, call: *const NativeCall, i: usize) ?Value {
+        if (i >= call.ref_sources.len or call.caller_frame >= self.frame_count) return null;
+        const v: Value = switch (call.ref_sources[i]) {
+            .none => return null,
+            .cell => |c| c.value.*,
+            .simple => |var_name| blk: {
+                if (isSuperglobal(var_name)) return null;
+                const fr = &self.frames[call.caller_frame];
+                if (fr.ref_slots.get(var_name)) |cell| break :blk cell.*;
+                if (fr.vars.get(var_name)) |held| break :blk held;
+                const names = if (fr.func) |func| func.slot_names else self.global_slot_names;
+                for (names, 0..) |candidate, si| {
+                    if (std.mem.eql(u8, candidate, var_name)) break :blk if (si < fr.locals.len) fr.locals[si] else return null;
+                }
+                return null;
+            },
+        };
+        return if (v == .undef) .null else v;
     }
 
     const AbstractCandidate = struct { name: []const u8, scope: []const u8 };
@@ -30437,6 +30463,20 @@ pub const VM = struct {
         // only a call whose arguments recorded provenance can bind an output
         // position; by-value sites skip the name lookup entirely
         const sources = self.callerArgSources(input_args.len);
+        var ref_sources_buf: [8]RefSource = undefined;
+        // a native another native calls (array_walk's callback) gets its
+        // arguments from that native, not from the sources of the user call
+        if (name) |n| if (self.native_call == &record and !record.from_native and sources.len > 0 and sources.len <= ref_sources_buf.len and byref_args.hasByRefParams(n)) {
+            var any = false;
+            for (sources, 0..) |source, i| {
+                ref_sources_buf[i] = if (byref_args.isByRef(n, i)) source else .none;
+                if (ref_sources_buf[i] != .none) any = true;
+            }
+            if (any) {
+                record.ref_sources = ref_sources_buf[0..sources.len];
+                record.caller_frame = if (self.inNativeMethodFrame()) self.frame_count - 2 else self.frame_count -| 1;
+            }
+        };
         if (name) |n| if (sources.len > 0 and byref_args.hasByRefParams(n)) {
             for (sources, 0..) |source, i| {
                 if (source != .cell or !byref_args.isByRef(n, i)) continue;
