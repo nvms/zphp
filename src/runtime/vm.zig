@@ -23352,7 +23352,8 @@ pub const VM = struct {
     }
 
     pub fn castToObject(self: *VM, v: Value) !Value {
-        if (v == .object) return v;
+        // a generator or a fiber is an object already
+        if (v == .object or v == .generator or v == .fiber) return v;
         if (v == .float and std.math.isNan(v.float)) try self.emitWarning("unexpected NAN value was coerced to object");
         const obj = try self.allocUserObject("stdClass");
         switch (v) {
