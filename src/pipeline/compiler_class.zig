@@ -1434,6 +1434,149 @@ fn foldsAtCompileTime(ast: *const Ast, idx: u32) bool {
     };
 }
 
+// a literal operand as zend_try_ct_eval_binary_op sees it; .unknown is a
+// value this check doesn't compute (php may or may not fold it)
+const LiteralOperand = union(enum) { int: i64, float: f64, string: []const u8, bool: bool, null, array, unknown };
+
+// zend_binary_op_produces_error over a literal expression: php keeps an
+// operation that would warn or throw (a non-numeric string, an array, a
+// division by zero, ...) as an ast evaluated on first use, so its error is
+// raised then. an operand this can't compute counts as one that errors, so
+// such an expression is evaluated late, which is never wrong
+fn literalOpErrors(ast: *const Ast, idx: u32) bool {
+    var errors = false;
+    _ = literalOperand(ast, idx, &errors);
+    return errors;
+}
+
+fn literalOperand(ast: *const Ast, idx: u32, errors: *bool) LiteralOperand {
+    if (idx == 0) return .unknown;
+    const node = ast.nodes[idx];
+    switch (node.tag) {
+        .integer_literal => {
+            const v = compiler.Compiler.parsePhpIntLiteral(ast.tokenSlice(node.main_token));
+            return if (v == .int) .{ .int = v.int } else .unknown;
+        },
+        .float_literal => return .{ .float = std.fmt.parseFloat(f64, ast.tokenSlice(node.main_token)) catch return .unknown },
+        .true_literal => return .{ .bool = true },
+        .false_literal => return .{ .bool = false },
+        .null_literal => return .null,
+        .string_literal => {
+            const tok = ast.tokens[node.main_token];
+            if (tok.tag != .string) return .unknown;
+            const raw = ast.tokenSlice(node.main_token);
+            if (raw.len < 2 or (raw[0] != '\'' and raw[0] != '"')) return .unknown;
+            const inner = raw[1 .. raw.len - 1];
+            if (std.mem.indexOfScalar(u8, inner, '\\') != null) return .unknown;
+            return .{ .string = inner };
+        },
+        .array_literal => {
+            for (ast.extraSlice(node.data.lhs)) |el_idx| {
+                const el = ast.nodes[el_idx];
+                if (el.tag != .array_element) continue;
+                _ = literalOperand(ast, el.data.lhs, errors);
+                if (el.data.rhs != 0) _ = literalOperand(ast, el.data.rhs, errors);
+            }
+            return .array;
+        },
+        .grouped_expr => return literalOperand(ast, node.data.lhs, errors),
+        .prefix_op => {
+            const inner = literalOperand(ast, node.data.lhs, errors);
+            switch (ast.tokens[node.main_token].tag) {
+                // zend_try_ct_eval_unary_pm multiplies by 1 or -1
+                .minus, .plus => {
+                    if (binaryOpErrors(.star, inner, .{ .int = 1 })) errors.* = true;
+                    return .unknown;
+                },
+                .tilde => {
+                    if (inner == .array or inner == .null or inner == .bool or inner == .unknown) errors.* = true;
+                    return .unknown;
+                },
+                else => return .unknown,
+            }
+        },
+        .binary_op => {
+            const lhs = literalOperand(ast, node.data.lhs, errors);
+            const rhs = literalOperand(ast, node.data.rhs, errors);
+            const op = ast.tokens[node.main_token].tag;
+            if (binaryOpErrors(op, lhs, rhs)) errors.* = true;
+            if (lhs == .int and rhs == .int) return switch (op) {
+                .plus => intOrUnknown(@addWithOverflow(lhs.int, rhs.int)),
+                .minus => intOrUnknown(@subWithOverflow(lhs.int, rhs.int)),
+                .star => intOrUnknown(@mulWithOverflow(lhs.int, rhs.int)),
+                .pipe => .{ .int = lhs.int | rhs.int },
+                .amp => .{ .int = lhs.int & rhs.int },
+                .caret => .{ .int = lhs.int ^ rhs.int },
+                .lt_lt => if (rhs.int >= 0 and rhs.int < 64) .{ .int = lhs.int << @intCast(rhs.int) } else .unknown,
+                .gt_gt => if (rhs.int >= 0 and rhs.int < 64) .{ .int = lhs.int >> @intCast(rhs.int) } else .unknown,
+                else => .unknown,
+            };
+            const numeric = (lhs == .int or lhs == .float) and (rhs == .int or rhs == .float);
+            if (numeric) return switch (op) {
+                .plus => .{ .float = asDouble(lhs) + asDouble(rhs) },
+                .minus => .{ .float = asDouble(lhs) - asDouble(rhs) },
+                .star => .{ .float = asDouble(lhs) * asDouble(rhs) },
+                else => .unknown,
+            };
+            return .unknown;
+        },
+        else => return .unknown,
+    }
+}
+
+fn intOrUnknown(r: struct { i64, u1 }) LiteralOperand {
+    return if (r[1] == 0) .{ .int = r[0] } else .unknown;
+}
+
+fn binaryOpErrors(op: Token.Tag, lhs: LiteralOperand, rhs: LiteralOperand) bool {
+    if (op == .dot) return lhs == .array or rhs == .array;
+    const bitwise = op == .pipe or op == .amp or op == .caret;
+    switch (op) {
+        .plus, .minus, .star, .slash, .star_star, .percent, .lt_lt, .gt_gt, .pipe, .amp, .caret => {},
+        else => return false,
+    }
+    if (lhs == .array or rhs == .array) return !(op == .plus and lhs == .array and rhs == .array);
+    if (lhs == .unknown or rhs == .unknown) return true;
+    if (bitwise and lhs == .string and rhs == .string) return false;
+    if (lhs == .string and !Value.isNumericString(lhs.string)) return true;
+    if (rhs == .string and !Value.isNumericString(rhs.string)) return true;
+    // a numeric string's value isn't computed here
+    if (lhs == .string or rhs == .string) return true;
+    const long_ops = bitwise or op == .lt_lt or op == .gt_gt or op == .percent;
+    if (long_ops and (!longCompatible(lhs) or !longCompatible(rhs))) return true;
+    if (op == .slash and asDouble(rhs) == 0.0) return true;
+    if (op == .percent and asLong(rhs) == 0) return true;
+    if (op == .star_star and asDouble(lhs) == 0.0 and asDouble(rhs) < 0) return true;
+    if ((op == .lt_lt or op == .gt_gt) and asLong(rhs) < 0) return true;
+    return false;
+}
+
+// zend_is_op_long_compatible for the scalars above
+fn longCompatible(v: LiteralOperand) bool {
+    return switch (v) {
+        .float => |f| std.math.isFinite(f) and @floor(f) == f and f >= -9.2233720368547758e18 and f < 9.2233720368547758e18,
+        else => true,
+    };
+}
+
+fn asDouble(v: LiteralOperand) f64 {
+    return switch (v) {
+        .int => |i| @floatFromInt(i),
+        .float => |f| f,
+        .bool => |b| if (b) 1 else 0,
+        else => 0,
+    };
+}
+
+fn asLong(v: LiteralOperand) i64 {
+    return switch (v) {
+        .int => |i| i,
+        .float => |f| if (longCompatible(v)) @intFromFloat(f) else 0,
+        .bool => |b| @intFromBool(b),
+        else => 0,
+    };
+}
+
 // php counts every parameter up to the last one without a default as
 // required: an optional parameter before a required one becomes required
 fn requiredParamCount(ast: *const Ast, param_nodes: []const u32) u8 {
@@ -2738,7 +2881,7 @@ fn defaultExprIsLiteral(ast: *const Ast, idx: u32) bool {
 // expression in one (self::C included) at the class's first use, so an
 // undefined constant is an Error there, not at the declaration
 fn defaultIsImmediate(ast: *const Ast, idx: u32) bool {
-    return literalDefault(ast, idx, false);
+    return literalDefault(ast, idx, false) and !literalOpErrors(ast, idx);
 }
 
 fn literalDefault(ast: *const Ast, idx: u32, class_refs: bool) bool {
@@ -5131,7 +5274,7 @@ fn emitClassConstant(self: *Compiler, class_name: []const u8, class_idx: u16, me
         } else try self.warn(member.main_token, 8192, "Declaring " ++ kind ++ " constant called 'namespace' is deprecated", .{});
     }
     const cprop_idx = try self.addConstant(.{ .string = Value.String.borrowed(const_name) });
-    if (foldsAtCompileTime(self.ast, member.data.lhs)) {
+    if (foldsAtCompileTime(self.ast, member.data.lhs) and !literalOpErrors(self.ast, member.data.lhs)) {
         try self.compileNode(member.data.lhs);
         // an int for a constant typed float without int is a float, as php
         // converts it while compiling
