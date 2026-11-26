@@ -363,6 +363,13 @@ const FnView = struct {
     trampoline: bool = false,
 };
 
+// the class self and parent in the function's types name when printed:
+// none for a trait's code, which keeps them as written
+fn typeScope(vm: *VM, view: FnView) ?[]const u8 {
+    if (reflection.keepsRelativeTypes(vm, view.user, view.scope)) return null;
+    return view.scope;
+}
+
 fn nativeSignature(key: []const u8) ?native_params.Signature {
     return native_params.get(key) orelse interface_signatures.map.get(key);
 }
@@ -588,7 +595,7 @@ const ParamView = struct {
     trampoline: bool = false,
 };
 
-fn paramView(view: FnView, i: usize) ParamView {
+fn paramView(vm: *VM, view: FnView, i: usize) ParamView {
     if (view.user) |f| {
         const raw_name = f.params[i];
         var p = ParamView{
@@ -596,7 +603,7 @@ fn paramView(view: FnView, i: usize) ParamView {
             .name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name,
             .variadic = f.is_variadic and i + 1 == f.arity,
             .by_ref = i < f.ref_params.len and f.ref_params[i],
-            .self_class = view.scope,
+            .self_class = typeScope(vm, view),
         };
         p.required = i < f.required_params;
         p.trampoline = view.trampoline;
@@ -620,7 +627,7 @@ fn paramView(view: FnView, i: usize) ParamView {
         .required = sp.default == .required and !sp.variadic,
         .native = sp,
         .native_fn = view.name,
-        .self_class = view.scope,
+        .self_class = typeScope(vm, view),
     };
 }
 
@@ -737,7 +744,7 @@ fn appendFunction(w: *Writer, view: FnView, scope: ?[]const u8, indent: []const 
             try w.fmt("\n{s}- Parameters [{d}] {{\n", .{ param_indent, count });
             for (0..count) |i| {
                 try w.fmt("{s}  ", .{param_indent});
-                try appendParameter(w, paramView(view, i));
+                try appendParameter(w, paramView(w.ctx.vm, view, i));
                 try w.str("\n");
             }
             try w.fmt("{s}}}\n", .{param_indent});
@@ -745,7 +752,7 @@ fn appendFunction(w: *Writer, view: FnView, scope: ?[]const u8, indent: []const 
     }
     if (ret.text.len > 0) {
         try w.fmt("  {s}- {s} [ ", .{ indent, if (ret.tentative) "Tentative return" else "Return" });
-        try appendType(w, ret.text, false, view.scope);
+        try appendType(w, ret.text, false, typeScope(w.ctx.vm, view));
         try w.str(" ]\n");
     }
     try w.fmt("{s}}}\n", .{indent});
@@ -1303,7 +1310,7 @@ fn parameterToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
     if (position >= paramCount(view)) return NativeResult.literal("");
     var w = Writer{ .ctx = ctx };
     defer w.deinit();
-    try appendParameter(&w, paramView(view, position));
+    try appendParameter(&w, paramView(w.ctx.vm, view, position));
     return w.result();
 }
 

@@ -1266,6 +1266,16 @@ pub fn canonicalUnion(ctx: *NativeContext, text: []const u8, self_class: ?[]cons
     return formatted;
 }
 
+// php resolves self and parent in a class's declared types when it compiles
+// them; a trait's code keeps them as written (zend_is_scope_known), and so
+// does a partial application, which copies its callee's (partial.zig
+// resolves those of a class's code)
+pub fn keepsRelativeTypes(vm: *VM, func: ?*const ObjFunction, declaring: ?[]const u8) bool {
+    if (func) |f| if (f.trait_origin.len > 0 or f.partial != 0) return true;
+    if (declaring) |d| if (vm.traits.contains(d)) return true;
+    return false;
+}
+
 fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, declared_in: ?[]const u8) !*PhpObject {
     // an anonymous class's self stays self: php resolves it only for a
     // class with a name. the type borrows the class name, and the caller's
@@ -3511,7 +3521,7 @@ fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const return_type = if (methodTypeInfo(ctx.vm, key)) |ti| ti.return_type else nativeReturnType(ctx, key);
     if (return_type.len == 0) return NativeResult.scalar(.null);
 
-    const obj = try createTypeObj(ctx, return_type, false, declaring);
+    const obj = try createTypeObj(ctx, return_type, false, if (keepsRelativeTypes(ctx.vm, ctx.vm.functions.get(key), declaring)) null else declaring);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -3606,7 +3616,8 @@ fn rpGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
         if (this.get("__default_value") == .null) is_nullable = true;
     }
     const declaring = this.get("__declaring_class");
-    const self_class: ?[]const u8 = if (declaring == .string and declaring.string.bytes().len > 0) declaring.string.bytes() else null;
+    const keeps = this.get("__keeps_relative") == .bool;
+    const self_class: ?[]const u8 = if (!keeps and declaring == .string and declaring.string.bytes().len > 0) declaring.string.bytes() else null;
     const obj = try createTypeObj(ctx, type_val.string.bytes(), is_nullable, self_class);
     return NativeResult.borrowed(.{ .object = obj });
 }
@@ -4551,6 +4562,8 @@ fn populateRpFields(ctx: *NativeContext, obj: *PhpObject, func: *const ObjFuncti
     const by_ref = if (i < func.ref_params.len) func.ref_params[i] else false;
     try obj.set(ctx.allocator, "__by_reference", .{ .bool = by_ref });
 
+    if (keepsRelativeTypes(ctx.vm, func, if (std.mem.indexOf(u8, type_key, "::")) |sep| type_key[0..sep] else null))
+        try obj.set(ctx.allocator, "__keeps_relative", .{ .bool = true });
     if (std.mem.indexOf(u8, type_key, "::")) |sep| {
         const decl_class = try ctx.allocator.dupe(u8, type_key[0..sep]);
         defer ctx.allocator.free(decl_class);
@@ -4773,6 +4786,8 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
         try obj.set(ctx.allocator, "__by_reference", .{ .bool = by_ref });
 
         // declaring class and method name (or bare function name for free fns)
+        if (keepsRelativeTypes(ctx.vm, func, if (std.mem.indexOf(u8, type_key, "::")) |sep| type_key[0..sep] else null))
+            try obj.set(ctx.allocator, "__keeps_relative", .{ .bool = true });
         if (std.mem.indexOf(u8, type_key, "::")) |sep| {
             const decl_class = try ctx.allocator.dupe(u8, type_key[0..sep]);
             defer ctx.allocator.free(decl_class);

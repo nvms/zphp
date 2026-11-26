@@ -212,6 +212,36 @@ fn quoteString(a: std.mem.Allocator, s: []const u8) ![]const u8 {
     return out.toOwnedSlice(a);
 }
 
+// a declared type with self and parent named by the class they mean in
+// scope (as php's compile of a class's code leaves them), or as written
+// without one
+fn resolveRelativeTypes(vm: *VM, text: []const u8, scope: ?[]const u8) ![]const u8 {
+    const sc = scope orelse return text;
+    if (std.ascii.findIgnoreCase(text, "self") == null and std.ascii.findIgnoreCase(text, "parent") == null) return text;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(vm.allocator);
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '\\' or c >= 0x80)) {
+            try out.append(vm.allocator, c);
+            i += 1;
+            continue;
+        }
+        var j = i;
+        while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '_' or text[j] == '\\' or text[j] >= 0x80)) j += 1;
+        const word = text[i..j];
+        const parent: ?[]const u8 = if (vm.classes.get(sc)) |cd| cd.parent else null;
+        if (std.ascii.eqlIgnoreCase(word, "self")) {
+            try out.appendSlice(vm.allocator, vm.declaredClassName(sc));
+        } else if (std.ascii.eqlIgnoreCase(word, "parent") and parent != null) {
+            try out.appendSlice(vm.allocator, vm.declaredClassName(parent.?));
+        } else try out.appendSlice(vm.allocator, word);
+        i = j;
+    }
+    return vm.internName(out.items);
+}
+
 // a method registered as "Class::method": a user method or an internal one
 fn fromMethod(vm: *VM, t: *Target, registered: []const u8, a: std.mem.Allocator) !void {
     const sep = std.mem.indexOf(u8, registered, "::").?;
@@ -942,25 +972,33 @@ fn compileClosure(vm: *VM, t: *const Target, req: Request, source: []const u8, o
     if (variadic_partial and t.variadic != null) count += 1;
     const types = try vm.allocator.alloc([]const u8, count);
     var typed = false;
+    // a class's code names its class in self and parent, a trait's keeps
+    // them as written
+    const relative_scope: ?[]const u8 = if (t.scope) |sc| blk: {
+        if (vm.traits.contains(sc)) break :blk null;
+        if (t.user) |u| if (u.trait_origin.len > 0) break :blk null;
+        break :blk sc;
+    } else null;
     for (order, 0..) |off, pi| {
-        types[pi] = paramAt(t, @min(off, num_args)).type;
+        types[pi] = try resolveRelativeTypes(vm, paramAt(t, @min(off, num_args)).type, relative_scope);
         if (types[pi].len > 0) typed = true;
     }
     if (count > order.len) {
-        types[order.len] = t.variadic.?.type;
+        types[order.len] = try resolveRelativeTypes(vm, t.variadic.?.type, relative_scope);
         if (types[order.len].len > 0) typed = true;
     }
+    const return_type = try resolveRelativeTypes(vm, t.return_type, relative_scope);
     f.has_param_types = typed;
-    if (t.return_type.len > 0) f.return_type_kind = compiler_class.returnTypeKind(t.return_type);
+    if (return_type.len > 0) f.return_type_kind = compiler_class.returnTypeKind(return_type);
     var replaced = false;
     for (heap_result.type_hints.items) |*th| {
         if (!std.mem.eql(u8, th.name, f.name)) continue;
         if (th.param_types.len > 0) vm.allocator.free(th.param_types);
         th.param_types = types;
-        th.return_type = t.return_type;
+        th.return_type = return_type;
         replaced = true;
     }
-    if (!replaced) try heap_result.type_hints.append(vm.allocator, .{ .name = f.name, .param_types = types, .return_type = t.return_type });
+    if (!replaced) try heap_result.type_hints.append(vm.allocator, .{ .name = f.name, .param_types = types, .return_type = return_type });
     try vm.registerResultFunctions(heap_result);
     // what compiling the generated closure raised, once per call site. the
     // types aren't in the source: php's compile of them deprecates `_`, `let`
