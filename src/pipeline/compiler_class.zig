@@ -4710,15 +4710,15 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
 
-    // case attributes - emit attrs for each enum case that has any.
-    // these end up as constant_attributes so ReflectionClassConstant of an
-    // enum case can find them
+    // case and constant attributes - emit attrs for each enum case or
+    // constant that has any. these end up as constant_attributes so
+    // ReflectionClassConstant and #[\Override] checks find them
     const CaseAttr = struct { name: []const u8, attrs: []const ParsedAttr };
     var cases_with_attrs = std.ArrayListUnmanaged(CaseAttr).empty;
     defer cases_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .enum_case) {
+        if (member.tag == .enum_case or member.tag == .const_decl) {
             const cattrs = try extractAttributes(self, member.main_token, AttrTarget.class_constant);
             if (cattrs.len > 0) {
                 try cases_with_attrs.append(self.allocator, .{
