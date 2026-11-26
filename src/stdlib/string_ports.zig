@@ -1542,7 +1542,10 @@ fn native_substr_replace(ctx: *NativeContext, args: []const Value) RuntimeError!
             var len_idx: usize = 0;
             var repl_idx: usize = 0;
             for (arr.entries.items) |entry| {
-                const orig = try elementString(ctx, entryValue(entry));
+                // held as it was (zval_get_tmp_string): a replacement's
+                // __toString may overwrite the referenced element
+                const orig = try ctx.allocator.dupe(u8, try elementString(ctx, entryValue(entry)));
+                defer ctx.allocator.free(orig);
                 const olen: i64 = @intCast(orig.len);
                 var f: i64 = switch (from) {
                     .array => |fa| if (nextElement(fa, &from_idx)) |v| Value.toInt(v) else 0,
