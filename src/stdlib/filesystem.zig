@@ -2481,6 +2481,9 @@ fn globHasMagic(pattern: []const u8) bool {
     return std.mem.indexOfAny(u8, pattern, if (platform.is_windows) "*?[" else "*?[\\") != null;
 }
 
+// GLOB_MARK appends the platform's directory separator (php's DEFAULT_SLASH)
+const glob_mark = if (platform.is_windows) "\\" else "/";
+
 fn globLiteral(ctx: *NativeContext, result: *PhpArray, path: []const u8, flags: i64) RuntimeError!void {
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const os_path = bundle.osPath(&os_buf, path);
@@ -2489,8 +2492,8 @@ fn globLiteral(ctx: *NativeContext, result: *PhpArray, path: []const u8, flags: 
         break :blk st.mode & 0o170000 == 0o040000;
     } else return;
     if ((flags & 1073741824) != 0 and !is_dir) return;
-    if ((flags & 8) != 0 and is_dir and path[path.len - 1] != '/') {
-        const marked = try std.fmt.allocPrint(ctx.allocator, "{s}/", .{path});
+    if ((flags & 8) != 0 and is_dir and path[path.len - 1] != glob_mark[0]) {
+        const marked = try std.fmt.allocPrint(ctx.allocator, "{s}" ++ glob_mark, .{path});
         defer ctx.allocator.free(marked);
         return result.appendCopiedString(ctx.allocator, marked);
     }
@@ -2592,7 +2595,7 @@ fn globAppendEntry(ctx: *NativeContext, result: *PhpArray, entry: GlobEntry) !vo
     if (!globMatchFlags(entry.pattern, entry.name, FNM_PERIOD)) return;
     if ((entry.flags & GLOB_ONLYDIR) != 0 and !entry.is_dir) return;
     var path_buf: [4096]u8 = undefined;
-    const slash: []const u8 = if ((entry.flags & GLOB_MARK) != 0 and entry.is_dir) "/" else "";
+    const slash: []const u8 = if ((entry.flags & GLOB_MARK) != 0 and entry.is_dir) glob_mark else "";
     const full = if (entry.dir_path.len == 0 and !entry.rooted)
         std.fmt.bufPrint(&path_buf, "{s}{s}", .{ entry.name, slash }) catch return
     else
