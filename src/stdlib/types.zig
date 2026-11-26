@@ -2262,8 +2262,28 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if ((std.mem.eql(u8, name, "error_log") and !std.mem.eql(u8, buf.items, "syslog") or std.mem.eql(u8, name, "mail.log")) and buf.items.len > 0) {
         if (!try open_basedir.allows(ctx.vm, "ini_set", buf.items)) return NativeResult.scalar(Value{ .bool = false });
     }
+    // OnUpdate_zlib_output_compression and _output_handler at run time:
+    // refused once output went out
+    const zlib_compression = std.mem.eql(u8, name, "zlib.output_compression");
+    if (zlib_compression or std.mem.eql(u8, name, "zlib.output_handler")) {
+        try ctx.vm.noteTopLevelOutput();
+        if (ctx.vm.headers_sent) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "ini_set(): Cannot change {s} - headers already sent", .{name});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.emitWarning(msg);
+            return NativeResult.scalar(Value{ .bool = false });
+        }
+    }
     const result = try NativeResult.copyString(ctx.allocator, previous);
     const new_val = try ctx.vm.setIni(name, buf.items);
+    if (zlib_compression) {
+        const zlib_output = @import("zlib_output.zig");
+        ctx.vm.zlib_output_compression = zlib_output.parseCompression(new_val);
+        if (ctx.vm.zlib_output_compression != 0 and !@import("output_control.zig").handlerStarted(ctx.vm, zlib_output.handler_name)) zlib_output.startCompression(ctx.vm) catch |err| {
+            result.value.string.release();
+            return err;
+        };
+    }
     // the ini value is the default zone unless the script set one
     if (is_tz and ctx.vm.default_tz_name.ptr != &ctx.vm.default_tz_buf) ctx.vm.default_tz_name = @import("datetime.zig").internZoneName(new_val);
     // a few ini directives map directly to live VM state. mirror them now so

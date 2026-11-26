@@ -122,8 +122,10 @@ pub const OutputBufferLevel = struct {
     chunk_size: usize = 0,
     buffer_size: usize = 0,
     id: u64 = 0,
-    // zlib's ob_gzhandler, an internal handler
+    // zlib's output compression handler (ob_gzhandler, "zlib output
+    // compression") and its deflate state, owned
     gzip: bool = false,
+    zlib: ?*@import("../stdlib/zlib_output.zig").Context = null,
     // the url rewriter's handler (url_scanner.Kind), 0 for none
     rewriter: u2 = 0,
 };
@@ -1720,6 +1722,15 @@ pub const VM = struct {
     response_headers: ?*PhpArray = null,
     last_http_response_headers: ?*PhpArray = null,
     headers_sent: bool = false,
+    // ZLIBG(compression_coding): the coding the request accepts once found
+    // (0x1f gzip, 0x0f deflate), ZLIBG(output_compression) and the state
+    // ob_gzhandler() called directly keeps; all per request
+    zlib_coding: u8 = 0,
+    zlib_output_compression: i64 = 0,
+    // serve's http/2 responses carry no script headers yet, so nothing may
+    // compress the body for them
+    response_headers_dropped: bool = false,
+    ob_gzhandler_ctx: ?*@import("../stdlib/zlib_output.zig").Context = null,
     // php_module_startup failed (a removed directive is set): the cli runs
     // nothing and exits 1
     startup_failed: bool = false,
@@ -4311,7 +4322,9 @@ pub const VM = struct {
             }
         }
         self.compile_results.deinit(self.allocator);
+        for (self.ob_stack.items) |*level| if (level.zlib) |z| z.destroy(self.allocator);
         self.ob_stack.deinit(self.allocator);
+        if (self.ob_gzhandler_ctx) |z| z.destroy(self.allocator);
         for (&self.url_scanners) |*scanner| scanner.deinit(self.allocator);
         self.request_vars.deinit(self.allocator);
         self.autoload_callbacks.deinit(self.allocator);
@@ -4487,6 +4500,7 @@ pub const VM = struct {
         self.captures.clearRetainingCapacity();
         self.capture_index.clearRetainingCapacity();
         self.interned_names.clearRetainingCapacity();
+        for (self.ob_stack.items) |*level| if (level.zlib) |z| z.destroy(self.allocator);
         self.ob_stack.clearRetainingCapacity();
         self.request_vars.clearRetainingCapacity();
         self.response_code = 200;
@@ -4496,6 +4510,11 @@ pub const VM = struct {
         self.response_headers = null;
         self.last_http_response_headers = null;
         self.headers_sent = false;
+        self.zlib_coding = 0;
+        self.zlib_output_compression = 0;
+        self.response_headers_dropped = false;
+        if (self.ob_gzhandler_ctx) |z| z.destroy(self.allocator);
+        self.ob_gzhandler_ctx = null;
         self.output_start = null;
         self.default_tz_name = "UTC";
         self.default_tz_offset = 0;

@@ -1459,6 +1459,7 @@ fn runDispatch(w: *Worker, c: *Connection, req_in: *const Request, trace: *const
         c.state = .closing;
         return;
     };
+    @import("stdlib/zlib_output.zig").requestStartup(&w.vm) catch {};
 
     w.vm.interpret(dispatch.result) catch |interp_err| {
         // exit() / die() is an orderly script exit, not a 500. flush
@@ -1503,6 +1504,11 @@ fn runDispatch(w: *Worker, c: *Connection, req_in: *const Request, trace: *const
     // (session save, cache flush, profiler stop, etc.) silently never fired
     // an uncaught exception from one is reported like the script's own
     w.vm.runShutdownCallbacks() catch {
+        if (w.vm.pending_exception != null) reportUncaught(w);
+    };
+    // php_request_shutdown then flushes every output buffer through its
+    // handler (ob_gzhandler compresses the body here)
+    @import("stdlib/output_control.zig").endAll(&w.vm) catch {
         if (w.vm.pending_exception != null) reportUncaught(w);
     };
 
@@ -1644,6 +1650,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
         .stream = conn.stream,
         .address = net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = @as([8]u8, @splat(0)) } } },
     };
+    w.vm.response_headers_dropped = true;
     populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch, rid) catch |err| {
         logRequestError(w, "could not set up the request", @errorName(err));
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error", rid);
@@ -2312,7 +2319,8 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
     var status_buf: [32]u8 = undefined;
     const status_text = statusText(code, &status_buf);
 
-    const compressed = if (use_gzip and body.len > 0 and isCompressible(content_type)) gzipCompress(allocator, body) else null;
+    // a body the script encoded itself (ob_gzhandler) is sent as it is
+    const compressed = if (use_gzip and body.len > 0 and isCompressible(content_type) and !hasHeader(extra_headers, "Content-Encoding")) gzipCompress(allocator, body) else null;
     defer if (compressed) |c| allocator.free(c);
 
     const actual_body = if (compressed) |c| c else body;
@@ -2323,7 +2331,9 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
     pos = base.len;
 
     if (compressed != null) {
-        const enc_hdr = "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n";
+        // ob_gzhandler sends its own Vary when the request named no coding
+        // it knows
+        const enc_hdr = if (varyNamesAcceptEncoding(extra_headers)) "Content-Encoding: gzip\r\n" else "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n";
         if (pos + enc_hdr.len < hdr_buf.len) {
             @memcpy(hdr_buf[pos .. pos + enc_hdr.len], enc_hdr);
             pos += enc_hdr.len;
@@ -2368,6 +2378,27 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
     }
     conn.writeAll(hdr_buf[0..pos]) catch return;
     if (actual_body.len > 0) conn.writeAll(actual_body) catch return;
+}
+
+fn hasHeader(headers: ?*PhpArray, name: []const u8) bool {
+    const arr = headers orelse return false;
+    for (arr.entries.items) |entry| {
+        if (entry.value != .string) continue;
+        const hdr = entry.value.string.bytes();
+        if (hdr.len > name.len and hdr[name.len] == ':' and std.ascii.eqlIgnoreCase(hdr[0..name.len], name)) return true;
+    }
+    return false;
+}
+
+fn varyNamesAcceptEncoding(headers: ?*PhpArray) bool {
+    const arr = headers orelse return false;
+    for (arr.entries.items) |entry| {
+        if (entry.value != .string) continue;
+        const hdr = entry.value.string.bytes();
+        if (!std.ascii.startsWithIgnoreCase(hdr, "vary:")) continue;
+        if (std.ascii.findIgnoreCase(hdr["vary:".len..], "accept-encoding") != null) return true;
+    }
+    return false;
 }
 
 fn acceptsGzip(req: *const Request) bool {

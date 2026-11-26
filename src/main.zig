@@ -924,6 +924,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     }
     try initCliServerVars(vm, allocator);
     try initArgv(vm, allocator, script_path, script_args);
+    try @import("stdlib/zlib_output.zig").requestStartup(vm);
     // php's cli resolves the script's path, which fills the realpath cache
     if (!platform.is_windows) {
         var resolved: [@import("stdlib/realpath_cache.zig").max_path]u8 = undefined;

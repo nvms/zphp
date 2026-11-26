@@ -29,6 +29,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("stream_filters.zig").entries,
         @import("http.zig").entries,
         @import("output_control.zig").entries,
+        @import("zlib_output.zig").entries,
         @import("url_scanner.zig").entries,
         @import("system.zig").entries,
         system_posix_entries,

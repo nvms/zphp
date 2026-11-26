@@ -98,6 +98,16 @@ fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return NativeResult.scalar(.null);
 }
 
+// sapi_add_header_ex for an extension's own header (zlib's Content-Encoding
+// and Vary): refused with header()'s warning once the headers are sent
+pub fn addSapiHeader(vm: *VM, hdr: []const u8, replace: bool) RuntimeError!void {
+    var ctx = vm.makeContext(null);
+    if (try headersAlreadySent(&ctx, "Cannot modify header information - headers already sent", " by ")) return;
+    if (!vm.serve_mode) return;
+    if (replace) if (std.mem.indexOfScalar(u8, hdr, ':')) |colon| removeHeaderByName(&ctx, hdr[0..colon]);
+    try appendResponseHeader(&ctx, hdr);
+}
+
 fn native_http_response_code(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const vm = ctx.vm;
     if (vm.serve_mode) {

@@ -3657,6 +3657,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "ob_get_length", Signature{ .params = &[_]Param{}, .returns = "int|false" } },
     .{ "ob_get_level", Signature{ .params = &[_]Param{}, .returns = "int" } },
     .{ "ob_get_status", Signature{ .params = &[_]Param{ .{ .name = "full_status", .default = .{ .bool = false }, .type = "bool" } }, .returns = "array" } },
+    .{ "ob_gzhandler", Signature{ .params = &[_]Param{ .{ .name = "data", .type = "string" }, .{ .name = "flags", .type = "int" } }, .returns = "string|false" } },
     .{ "ob_implicit_flush", Signature{ .params = &[_]Param{ .{ .name = "enable", .default = .{ .bool = true }, .type = "bool" } }, .returns = "void" } },
     .{ "ob_list_handlers", Signature{ .params = &[_]Param{}, .returns = "array" } },
     .{ "ob_start", Signature{ .params = &[_]Param{ .{ .name = "callback", .default = .null }, .{ .name = "chunk_size", .default = .{ .int = 0 }, .type = "int" }, .{ .name = "flags", .default = .{ .int = 112 }, .type = "int", .default_constant = "PHP_OUTPUT_HANDLER_STDFLAGS" } }, .returns = "bool" } },
@@ -4119,4 +4120,5 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "xmlwriter_write_pi", Signature{ .params = &[_]Param{ .{ .name = "writer", .type = "XMLWriter" }, .{ .name = "target", .type = "string" }, .{ .name = "content", .type = "string" } }, .returns = "bool" } },
     .{ "xmlwriter_write_raw", Signature{ .params = &[_]Param{ .{ .name = "writer", .type = "XMLWriter" }, .{ .name = "content", .type = "string" } }, .returns = "bool" } },
     .{ "zend_version", Signature{ .params = &[_]Param{}, .returns = "string" } },
+    .{ "zlib_get_coding_type", Signature{ .params = &[_]Param{}, .returns = "string|false" } },
 });

@@ -807,6 +807,7 @@ pub const functions = Map.initComptime(.{
     .{ "ob_get_length", "standard" },
     .{ "ob_get_level", "standard" },
     .{ "ob_get_status", "standard" },
+    .{ "ob_gzhandler", "zlib" },
     .{ "ob_implicit_flush", "standard" },
     .{ "ob_list_handlers", "standard" },
     .{ "ob_start", "standard" },
@@ -1267,6 +1268,7 @@ pub const functions = Map.initComptime(.{
     .{ "xmlwriter_write_pi", "xmlwriter" },
     .{ "xmlwriter_write_raw", "xmlwriter" },
     .{ "zend_version", "Core" },
+    .{ "zlib_get_coding_type", "zlib" },
 });
 
 pub const classes = Map.initComptime(.{

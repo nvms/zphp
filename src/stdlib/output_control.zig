@@ -11,6 +11,7 @@ const Level = vm_mod.OutputBufferLevel;
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const Value = @import("../runtime/value.zig").Value;
 const callables = @import("../runtime/callables.zig");
+const zlib_output = @import("zlib_output.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 // handler flags (php_output.h)
@@ -121,6 +122,8 @@ fn noteUsed(level: *Level, n: usize) void {
 pub fn freeLevel(vm: *VM, level: *Level) void {
     if (level.callback) |cb| vm.releaseValue(cb);
     level.callback = null;
+    if (level.zlib) |z| z.destroy(vm.allocator);
+    level.zlib = null;
     if (level.name.len > 0 and level.name.ptr != default_handler_name.ptr) vm.allocator.free(level.name);
     level.name = "";
 }
@@ -267,12 +270,48 @@ fn handlerOp(vm: *VM, ctx: *NativeContext, index: usize, op_in: i64, comptime fu
         outcome.out = try @import("url_scanner.zig").handle(vm, kind, vm.output.items[start..], op & (op_flush | op_final) != 0);
         vm.output.shrinkRetainingCapacity(start);
         outcome.status = if (outcome.out.?.len > 0) .success else .no_data;
+    } else if (level.zlib) |z| {
+        // zlib's handler compresses; when it fails, its input passes below
+        // unchanged
+        const input = try vm.allocator.dupe(u8, vm.output.items[start..]);
+        vm.output.shrinkRetainingCapacity(start);
+        var compressed: ?[]u8 = null;
+        var immutable = false;
+        const ok = zlib_output.levelHandler(vm, z, level.flags & started != 0, op, input, &compressed, &immutable) catch |err| {
+            vm.allocator.free(input);
+            return err;
+        };
+        if (index >= vm.ob_stack.items.len or vm.ob_stack.items[index].id != id) {
+            vm.allocator.free(input);
+            if (compressed) |c| vm.allocator.free(c);
+            return .{ .status = .no_data };
+        }
+        level = &vm.ob_stack.items[index];
+        if (immutable) level.flags &= ~(cleanable | removable);
+        // what the handler printed (a header warning) was appended to the
+        // level's buffer: lost when it succeeds, passed below when it fails
+        var passed: std.ArrayListUnmanaged(u8) = .fromOwnedSlice(input);
+        if (!ok) passed.appendSlice(vm.allocator, vm.output.items[@min(start, vm.output.items.len)..]) catch |err| {
+            passed.deinit(vm.allocator);
+            if (compressed) |c| vm.allocator.free(c);
+            return err;
+        };
+        vm.output.shrinkRetainingCapacity(@min(start, vm.output.items.len));
+        level.start = vm.output.items.len;
+        if (ok) {
+            passed.deinit(vm.allocator);
+            outcome.out = compressed orelse try vm.allocator.dupe(u8, "");
+            outcome.status = if (outcome.out.?.len > 0) .success else .no_data;
+        } else {
+            if (compressed) |c| vm.allocator.free(c);
+            outcome.out = try passed.toOwnedSlice(vm.allocator);
+            outcome.status = .failure;
+        }
     } else {
-        // the default handler passes its input along; ob_gzhandler, with no
-        // request asking for compression, fails and so passes it along too
+        // the default handler passes its input along
         outcome.out = try vm.allocator.dupe(u8, vm.output.items[start..]);
         vm.output.shrinkRetainingCapacity(start);
-        outcome.status = if (level.gzip) .failure else if (outcome.out.?.len > 0) .success else .no_data;
+        outcome.status = if (outcome.out.?.len > 0) .success else .no_data;
     }
     level.flags |= started;
     switch (outcome.status) {
@@ -374,6 +413,11 @@ pub fn checkChunks(vm: *VM) RuntimeError!void {
 // php_request_shutdown's php_output_end_all: every level is flushed through
 // its handler, removable or not
 pub fn endAll(vm: *VM) RuntimeError!void {
+    // the script has stopped: what an internal handler raises names no
+    // file ("Unknown")
+    const outer_finished = vm.finished_frames;
+    vm.finished_frames = vm.frame_count;
+    defer vm.finished_frames = outer_finished;
     var ctx = vm.makeContext(null);
     while (vm.ob_stack.items.len > 0) _ = try pop(vm, &ctx, pop_force, "ob_end_flush");
 }
@@ -429,7 +473,7 @@ fn native_ob_start(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         // compression, and the charset conversions of iconv and mbstring,
         // which pass the output through unchanged here
         level.name = try vm.allocator.dupe(u8, handler.string.bytes());
-        level.gzip = std.mem.eql(u8, level.name, "ob_gzhandler");
+        if (std.mem.eql(u8, level.name, "ob_gzhandler")) try zlibHandlerInit(vm, &level);
     } else if (handler != .null) {
         switch (try callables.resolveCallback(vm, handler, .{})) {
             .failure => |failure| {
@@ -456,14 +500,76 @@ fn native_ob_start(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         freeLevel(vm, &level);
         return lockFatal(vm, "ob_start");
     }
+    if (level.gzip and !try zlibConflictCheck(vm, "ob_start(): ", level.name)) {
+        freeLevel(vm, &level);
+        try notice(vm, "ob_start(): Failed to create buffer", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    try push(vm, &level);
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn push(vm: *VM, level: *Level) RuntimeError!void {
     vm.ob_next_id += 1;
     level.id = vm.ob_next_id;
-    vm.ob_stack.append(vm.allocator, level) catch |err| {
-        freeLevel(vm, &level);
+    vm.ob_stack.append(vm.allocator, level.*) catch |err| {
+        freeLevel(vm, level);
         return err;
     };
     if (level.chunk_size > 0) vm.ob_chunk_watch = true;
-    return NativeResult.scalar(.{ .bool = true });
+}
+
+// php_zlib_output_handler_init: the level gets a deflate state, and
+// ob_gzhandler turns output compression on for the request
+fn zlibHandlerInit(vm: *VM, level: *Level) RuntimeError!void {
+    if (vm.zlib_output_compression == 0) vm.zlib_output_compression = if (level.chunk_size > 0) @intCast(level.chunk_size) else zlib_output.default_size;
+    const z = try vm.allocator.create(zlib_output.Context);
+    z.* = .{};
+    level.zlib = z;
+    level.gzip = true;
+}
+
+// php_output_handler_started: a level of that name is on the stack
+pub fn handlerStarted(vm: *VM, name: []const u8) bool {
+    for (vm.ob_stack.items) |l| if (std.mem.eql(u8, l.name, name)) return true;
+    return false;
+}
+
+// php_zlib_output_conflict_check, registered for both zlib handler names:
+// none of the handlers that rewrite the output may already be on the stack
+fn zlibConflictCheck(vm: *VM, comptime func: []const u8, name: []const u8) RuntimeError!bool {
+    if (vm.ob_stack.items.len == 0) return true;
+    inline for (.{ zlib_output.handler_name, "ob_gzhandler", "mb_output_handler", "URL-Rewriter" }) |set| {
+        for (vm.ob_stack.items) |l| if (std.mem.eql(u8, l.name, set)) {
+            if (std.mem.eql(u8, name, set)) {
+                try warning(vm, func ++ "Output handler '{s}' cannot be used twice", .{name});
+            } else try warning(vm, func ++ "Output handler '{s}' conflicts with '{s}'", .{ name, set });
+            return false;
+        };
+    }
+    return true;
+}
+
+// php_zlib_output_compression_start's handler: false when it can't start
+pub fn startZlib(vm: *VM, name: []const u8, chunk: usize, flags: u32) RuntimeError!bool {
+    if (vm.ob_deactivated) return false;
+    var level: Level = .{ .start = vm.output.items.len, .chunk_size = chunk, .flags = flags, .name = try vm.allocator.dupe(u8, name) };
+    level.buffer_size = initialSize(chunk);
+    zlibHandlerInit(vm, &level) catch |err| {
+        freeLevel(vm, &level);
+        return err;
+    };
+    if (vm.ob_running != null or !try zlibConflictCheck(vm, "ini_set(): ", name)) {
+        freeLevel(vm, &level);
+        return false;
+    }
+    try push(vm, &level);
+    return true;
+}
+
+// php_output_start_user for a handler named in the ini (zlib.output_handler)
+pub fn startUser(ctx: *NativeContext, handler: Value, chunk: usize, flags: u32) RuntimeError!void {
+    _ = try native_ob_start(ctx, &.{ handler, .{ .int = @intCast(chunk) }, .{ .int = flags } });
 }
 
 // php_output_start_internal for the url rewriter: a level named
