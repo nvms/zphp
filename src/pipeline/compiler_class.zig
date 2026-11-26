@@ -4385,6 +4385,24 @@ fn compileTraitPropertyDefault(self: *Compiler, trait_name: []const u8, member: 
     try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
 }
 
+// pushes a trait constant's value, or for one naming the using class the
+// sentinel of an initializer that takes the class
+fn compileTraitConstantValue(self: *Compiler, trait_name: []const u8, member: Ast.Node) Error!void {
+    if (!defaultNamesClass(self, member)) return self.compileNode(member.data.lhs);
+    const name = try @import("bytecode.zig").traitConstInitializerName(self.allocator, trait_name, self.ast.tokenSlice(member.main_token));
+    try self.string_allocs.append(self.allocator, name);
+    const prev_class = self.current_class;
+    const prev_in_trait = self.in_trait;
+    self.current_class = trait_name;
+    self.in_trait = true;
+    defer {
+        self.current_class = prev_class;
+        self.in_trait = prev_in_trait;
+    }
+    try compileInitializer(self, name, .argument, member.data.lhs, member.main_token);
+    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+}
+
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     const saved_cond = enterClassCond(self);
     defer self.class_cond_id = saved_cond;
@@ -4485,7 +4503,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const pmember = self.ast.nodes[pi];
         if (std.ascii.eqlIgnoreCase(self.ast.tokenSlice(pmember.main_token), "namespace"))
             try self.warn(pmember.main_token, 8192, "Declaring trait constant called 'namespace' is deprecated", .{});
-        if (pmember.data.lhs != 0) try self.compileNode(pmember.data.lhs);
+        if (pmember.data.lhs != 0) try compileTraitConstantValue(self, trait_name, pmember);
     }
     defer self.trait_const_values = outer_trait_consts;
 

@@ -1127,6 +1127,19 @@ pub fn isTraitDefaultInitializer(s: []const u8) bool {
     return std.mem.startsWith(u8, s, trait_default_prefix);
 }
 
+// a trait constant whose expression names the using class: each class
+// using the trait evaluates it in its own scope on first access, as php
+// copies the expression into the class
+const trait_const_prefix = "\x00traitconst\x00";
+
+pub fn traitConstInitializerName(allocator: std.mem.Allocator, trait_name: []const u8, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, trait_const_prefix ++ "{s}::{s}", .{ trait_name, name });
+}
+
+pub fn isTraitConstInitializer(s: []const u8) bool {
+    return std.mem.startsWith(u8, s, trait_const_prefix);
+}
+
 // an enum case's value that reads the enum's constants, held by the case
 // until the enum's cases are first used
 const enum_case_prefix = "\x00enumcase\x00";

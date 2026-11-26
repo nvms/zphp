@@ -728,6 +728,9 @@ pub const ClassDef = struct {
     // set visibility of static properties declared with an asymmetric one
     static_prop_set_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
     const_final: std.StringHashMapUnmanaged(void) = .{},
+    // trait constants whose expression names this class: constant name ->
+    // the trait's initializer, run with the class on first access
+    trait_const_inits: std.StringHashMapUnmanaged([]const u8) = .{},
     constant_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
@@ -809,6 +812,7 @@ pub const ClassDef = struct {
         self.methods.deinit(allocator);
         self.method_order.deinit(allocator);
         self.const_final.deinit(allocator);
+        self.trait_const_inits.deinit(allocator);
         self.properties.deinit(allocator);
         self.static_props.deinit(allocator);
         self.static_prop_defaults.deinit(allocator);
@@ -1514,7 +1518,9 @@ pub const VM = struct {
     // then (an error handler's) lists the include
     in_require_open: bool = false,
     // trait constants waiting for the using class's own value
-    trait_constant_checks: std.ArrayListUnmanaged(struct { class: []const u8, name: []const u8, trait: []const u8, value: Value }) = .empty,
+    // (or for one an earlier trait gave as an expression, for its value;
+    // first names that trait)
+    trait_constant_checks: std.ArrayListUnmanaged(struct { class: []const u8, name: []const u8, trait: []const u8, value: Value, first: []const u8 = "" }) = .empty,
     // a trait property's default waiting for the class's own to be installed
     // (set_prop_default), as trait_constant_checks
     trait_property_checks: std.ArrayListUnmanaged(struct { class: []const u8, name: []const u8, trait: []const u8, value: Value }) = .empty,
@@ -18880,7 +18886,11 @@ pub const VM = struct {
         self.handler_floor = self.handler_count;
         defer self.handler_floor = floor;
         const evaluating = self.frame_count;
-        var value = self.callByName(name, &.{}) catch |err| {
+        // a trait's constant naming the class runs the trait's initializer
+        // with this class as its scope
+        const trait_init: ?[]const u8 = if (self.classes.getPtr(declared)) |cls| cls.trait_const_inits.get(const_name) else null;
+        const scope_arg = [_]Value{.{ .string = Value.String.borrowed(declared) }};
+        var value = (if (trait_init) |initializer| self.callByName(initializer, &scope_arg) else self.callByName(name, &.{})) catch |err| {
             // the expression belongs to the access, not a frame of its own
             if (self.pending_exception) |exc| if (exc == .object) {
                 const bare = if (self.functions.get(name)) |f| isBareConstantInitializer(f) else false;
@@ -18913,6 +18923,7 @@ pub const VM = struct {
         }
         const kept = try self.copyDefault(value);
         try cls.constants.put(self.allocator, const_name, kept);
+        if (self.trait_constant_checks.items.len > 0) try self.settleTraitConstantChecks(declared, const_name, kept);
         return self.enumCase(kept);
     }
 
@@ -23365,8 +23376,15 @@ pub const VM = struct {
                 try self.trait_constant_sources.put(self.allocator, c.name, trait_name);
                 {
                     try def.constant_order.append(self.allocator, c.name);
-                    // each using class gets its own refcounted copy
-                    try def.constants.put(self.allocator, c.name, try self.copyDefault(c.value));
+                    if (c.value == .string and bytecode.isTraitConstInitializer(c.value.string.bytes())) {
+                        // evaluated in this class's scope on first access
+                        try def.trait_const_inits.put(self.allocator, c.name, c.value.string.bytes());
+                        try def.constants.put(self.allocator, c.name, .undef);
+                        self.markLazyConstants(def);
+                    } else {
+                        // each using class gets its own refcounted copy
+                        try def.constants.put(self.allocator, c.name, try self.copyDefault(c.value));
+                    }
                     try def.constant_docs.put(self.allocator, c.name, c.doc_comment);
                     const vis = c.flags & 0x03;
                     if (vis != 0) try def.const_visibility.put(self.allocator, c.name, @enumFromInt(vis));
@@ -23425,6 +23443,13 @@ pub const VM = struct {
     // earlier trait) also has must agree in visibility, final, type and
     // value. the class's own value is set after its declaration, so that
     // comparison waits for it (`trait_constant_checks`)
+    // a trait constant's value as seen from scope: one naming the using
+    // class is evaluated with scope as that class
+    pub fn traitConstantValue(self: *VM, value: Value, scope: []const u8) RuntimeError!Value {
+        if (value != .string or !bytecode.isTraitConstInitializer(value.string.bytes())) return value;
+        return self.callByName(value.string.bytes(), &.{.{ .string = Value.String.borrowed(scope) }});
+    }
+
     fn checkTraitConstant(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, c: TraitStaticProp) RuntimeError!void {
         if (def.is_enum) for (def.case_order.items) |case_name| if (std.mem.eql(u8, case_name, c.name)) {
             const trait = self.declaredClassName(trait_name);
@@ -23440,9 +23465,20 @@ pub const VM = struct {
         if (vis_mismatch or final_mismatch or type_mismatch) return self.traitConstantConflict(def, class_name, trait_name, first, c.name);
         if (first.ptr == class_name.ptr) {
             try self.trait_constant_checks.append(self.allocator, .{ .class = class_name, .name = c.name, .trait = trait_name, .value = c.value });
-        } else if (!Value.identical(def.constants.get(c.name) orelse .null, c.value)) {
-            return self.traitConstantConflict(def, class_name, trait_name, first, c.name);
+            return;
         }
+        // another trait's. an expression naming the class can't be
+        // evaluated before the class is declared: the same trait's agrees,
+        // and any other is compared once the class's value is (php compares
+        // while composing)
+        const existing = def.constants.get(c.name) orelse .null;
+        const pending = c.value == .string and bytecode.isTraitConstInitializer(c.value.string.bytes());
+        if (existing == .undef or pending) {
+            if (def.trait_const_inits.get(c.name)) |initializer| if (pending and std.mem.eql(u8, initializer, c.value.string.bytes())) return;
+            try self.trait_constant_checks.append(self.allocator, .{ .class = class_name, .name = c.name, .trait = trait_name, .value = c.value, .first = first });
+            return;
+        }
+        if (!Value.identical(existing, c.value)) return self.traitConstantConflict(def, class_name, trait_name, first, c.name);
     }
 
     // php composes a trait's own `use` when the trait is declared: a
@@ -23457,7 +23493,7 @@ pub const VM = struct {
                 if (!std.mem.eql(u8, c.name, o.name)) continue;
                 if ((c.flags & 0x13) == (o.flags & 0x13) and
                     try self.sameConstantType(o.type_str, trait_name, c.type_str, trait_name) and
-                    Value.identical(o.value, c.value)) continue;
+                    Value.identical(try self.traitConstantValue(o.value, trait_name), try self.traitConstantValue(c.value, trait_name))) continue;
                 return self.traitRuleFatal("{s} and {s} define the same constant ({s}) in the composition of {s}. However, the definition differs and is considered incompatible. Class was composed", .{ trait_name, sub_name, c.name, trait_name });
             };
         }
@@ -23506,9 +23542,9 @@ pub const VM = struct {
                 continue;
             }
             _ = self.trait_constant_checks.orderedRemove(i);
-            if (!Value.identical(value, check.value)) {
+            if (!Value.identical(value, try self.traitConstantValue(check.value, class_name))) {
                 const def = self.classes.getPtr(class_name) orelse return;
-                return self.traitConstantConflict(def, class_name, check.trait, class_name, const_name);
+                return self.traitConstantConflict(def, class_name, check.trait, if (check.first.len > 0) check.first else class_name, const_name);
             }
         }
     }

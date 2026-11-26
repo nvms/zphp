@@ -2643,7 +2643,7 @@ pub fn visibleConstants(ctx: *NativeContext, class_name: []const u8, out: *std.A
     if (ctx.vm.traits.contains(class_name)) {
         const declared = ctx.vm.declaredClassName(class_name);
         const consts = ctx.vm.trait_constants.get(declared) orelse return;
-        for (consts) |c| try out.append(ctx.allocator, .{ .declaring = declared, .name = c.name, .value = c.value });
+        for (consts) |c| try out.append(ctx.allocator, .{ .declaring = declared, .name = c.name, .value = try ctx.vm.traitConstantValue(c.value, declared) });
         return;
     }
     var chain: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -2764,7 +2764,8 @@ fn rcGetReflectionConstant(ctx: *NativeContext, args: []const Value) RuntimeErro
     }
     // a trait's reflector sees the constants it declares
     if (traitConstant(ctx.vm, class_name, target)) |tc| {
-        return NativeResult.borrowed(try buildReflectionClassConstant(ctx, ctx.vm.declaredClassName(class_name), target, tc.value));
+        const declared = ctx.vm.declaredClassName(class_name);
+        return NativeResult.borrowed(try buildReflectionClassConstant(ctx, declared, target, try ctx.vm.traitConstantValue(tc.value, declared)));
     }
     return NativeResult.scalar(.{ .bool = false });
 }
@@ -2793,7 +2794,7 @@ fn rcGetConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     try ctx.vm.updateClassConstants(class_name);
     if (findConstantOwner(ctx, class_name, target, 0) != null) {
         if (ctx.vm.getClassConstant(class_name, target)) |val| return NativeResult.share(ctx.vm.enumCase(val));
-        if (traitConstant(ctx.vm, class_name, target)) |tc| return NativeResult.share(tc.value);
+        if (traitConstant(ctx.vm, class_name, target)) |tc| return NativeResult.share(try ctx.vm.traitConstantValue(tc.value, ctx.vm.declaredClassName(class_name)));
     }
     try ctx.vm.raiseError(VM.E_DEPRECATED, "ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists");
     return NativeResult.scalar(.{ .bool = false });
@@ -2870,7 +2871,7 @@ fn rccGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
         }
         current = cls.parent;
     }
-    if (traitConstant(ctx.vm, class_name, const_name)) |tc| return NativeResult.share(tc.value);
+    if (traitConstant(ctx.vm, class_name, const_name)) |tc| return NativeResult.share(try ctx.vm.traitConstantValue(tc.value, ctx.vm.declaredClassName(class_name)));
     return NativeResult.scalar(.null);
 }
 
