@@ -674,6 +674,9 @@ pub const OpCode = enum(u16) {
     // slots below what is left (ZEND_ADD_ARRAY_ELEMENT for an array another
     // loop's state sits above)
     array_add_below,
+    // u16 slot: set_local for a catch's variable (ZEND_CATCH), which
+    // assigns strictly, whatever the file's strict_types
+    catch_set_local,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -708,6 +711,7 @@ pub const OpCode = enum(u16) {
             .get_local_quiet,
             .set_local,
             .set_local_transfer,
+            .catch_set_local,
             .get_global,
             .make_global_ref,
             .concat_assign,

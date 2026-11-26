@@ -711,6 +711,16 @@ fn isReadablePlace(tag: Ast.Node.Tag) bool {
     };
 }
 
+// ZEND_CATCH's assignment, strict whatever the file's strict_types
+fn emitCatchSetVar(self: *Compiler, name: []const u8) Error!void {
+    if (!Compiler.isSuperglobal(name) and !std.mem.eql(u8, name, "$http_response_header") and (self.inFunctionScope() or (name.len > 0 and name[0] == '$'))) {
+        try self.emitOp(.catch_set_local);
+        try self.emitU16(self.getOrCreateSlot(name));
+        return;
+    }
+    try self.emitSetVar(name);
+}
+
 pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     const catch_count = self.ast.extra_data[node.data.rhs];
     const catch_nodes = self.ast.extra_data[node.data.rhs + 1 .. node.data.rhs + 1 + catch_count];
@@ -804,7 +814,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
                 // ZEND_CATCH is on the catch's line: the value it replaces
                 // is destructed there
                 self.current_source_offset = self.ast.tokens[catch_node.main_token].start;
-                try self.emitSetVar(var_name);
+                try emitCatchSetVar(self, var_name);
             }
             try self.emitOp(.pop); // remove exc
 
@@ -821,7 +831,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
                 // ZEND_CATCH is on the catch's line: the value it replaces
                 // is destructed there
                 self.current_source_offset = self.ast.tokens[catch_node.main_token].start;
-                try self.emitSetVar(var_name);
+                try emitCatchSetVar(self, var_name);
             }
             try self.emitOp(.pop);
 

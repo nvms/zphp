@@ -10903,6 +10903,16 @@ pub const VM = struct {
                     const slot = self.readU16();
                     try self.assignLocal(self.currentFrame(), slot, self.peek());
                 },
+                .catch_set_local => {
+                    const slot = self.readU16();
+                    const frame_cs = self.currentFrame();
+                    // ZEND_CATCH always assigns strictly: a typed reference
+                    // the variable is bound to takes the exception as it is
+                    if (frame_cs.ref_slots.count() != 0) if (self.slotRefCell(frame_cs, slot)) |cell| if (cellOf(cell).typed) {
+                        _ = try self.verifyRefAssignableAs(cell, self.peek(), true);
+                    };
+                    try self.assignLocal(frame_cs, slot, self.peek());
+                },
                 .inc_local, .dec_local => {
                     const slot = self.readU16();
                     const frame_il = self.currentFrame();
@@ -31603,6 +31613,10 @@ pub const VM = struct {
     // property the reference is bound to and coerce to the same value for
     // each. returns the value to store; raises the TypeError as pending
     pub noinline fn verifyRefAssignable(self: *VM, cell: *Value, val: Value) RuntimeError!Value {
+        return self.verifyRefAssignableAs(cell, val, self.currentStrictTypes());
+    }
+
+    fn verifyRefAssignableAs(self: *VM, cell: *Value, val: Value, strict: bool) RuntimeError!Value {
         var buf: [8]TypeSource = undefined;
         const sources = self.refTypeSources(cell, &buf);
         if (sources.len == 0) return val;
@@ -31613,7 +31627,6 @@ pub const VM = struct {
             }
             return val;
         };
-        const strict = self.currentStrictTypes();
         var first: ?TypeSource = null;
         var coerced: ?Value = null;
         for (sources) |src| {
