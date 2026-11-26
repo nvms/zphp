@@ -154,6 +154,10 @@ pub const PhpArray = struct {
     // the objects they name, so freeing it releases nothing and the cycle
     // collector ignores its edges
     weak: bool = false,
+    // a WeakMap's table: an element a by-reference foreach bound stays a
+    // reference after the loop moves on (php's refcount-1 reference), which
+    // the map's debug view shows
+    keeps_refs: bool = false,
     // a built-in object's internal storage (an SplObjectStorage's elements),
     // which php keeps inside the object: the cycle collector frees it with
     // the object without counting it as garbage of its own

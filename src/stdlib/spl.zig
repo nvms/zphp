@@ -396,7 +396,11 @@ fn weakMapProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_prope
         if (!data.contains(.{ .int = id })) continue;
         const pair = try ctx.vm.allocArray();
         try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("key") }, entry.value);
-        try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("value") }, data.get(.{ .int = id }));
+        const value_key: PhpArray.Key = .{ .string = Value.String.borrowed("value") };
+        try pair.set(ctx.allocator, value_key, data.get(.{ .int = id }));
+        // the pair holds the element itself (Z_TRY_ADDREF), so a reference
+        // stays one
+        if (data.getPtr(.{ .int = id })) |src| if (src.ref) |cell| if (pair.getPtr(value_key)) |dst| ctx.vm.setEntryRef(dst, cell);
         try table.append(ctx.allocator, .{ .array = pair });
     }
     return table;
@@ -1576,6 +1580,7 @@ pub fn weakMapRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: ?Value) Ru
     // php 8.6 adds a missing key as null for the write, as a reference to
     // it (`$map[$o] = &$x`, `$map[$o][] = 1`) needs
     const arr = try ensureData(ctx, obj);
+    arr.keeps_refs = true;
     if (!arr.contains(.{ .int = key })) {
         _ = try wmOffsetSetOn(ctx, obj, &.{ offset.?, .null });
     }

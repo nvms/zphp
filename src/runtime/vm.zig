@@ -2052,6 +2052,7 @@ pub const VM = struct {
         const t = list.items[0];
         if (t != .array) return;
         const arr = t.array.array;
+        if (arr.keeps_refs) return;
         const key = t.array.key;
         if (arr.getPtr(key)) |ep| {
             if (ep.ref == c_old) self.setEntryRef(ep, null);
@@ -2079,6 +2080,7 @@ pub const VM = struct {
         var git = self.globals_cells.valueIterator();
         while (git.next()) |c| if (c.* == cell) return;
         const t = list.items[0];
+        if (t == .array and t.array.array.keeps_refs) return;
         switch (t) {
             .array => |ab| {
                 if (ab.array.getPtr(ab.key)) |ep| {
@@ -9113,6 +9115,9 @@ pub const VM = struct {
                         var unwrap_dispatched = false;
                         var unwrap_failed = false;
                         var unwrap_steps: u8 = 0;
+                        // zend_weakmap_get_iterator hands out its elements
+                        // themselves, by reference too
+                        const weakmap_loop = isWeakMap(iterable.object);
                         unwrap: while (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator") and !self.isInstanceOf(iterable.object.class_name, "Iterator") and spl_iterator_classes.foreachDirect(self, iterable.object) == 0 and unwrap_steps < 8) {
                             // the iterator of a class whose get_iterator
                             // handler doesn't call getIterator() is no object
@@ -9148,7 +9153,7 @@ pub const VM = struct {
                         }
                         if (unwrap_dispatched) continue;
                         if (unwrap_failed) return error.RuntimeError;
-                        if (by_ref) if (self.foreachByRefRefusal(iterable)) |refusal| {
+                        if (by_ref and !weakmap_loop) if (self.foreachByRefRefusal(iterable)) |refusal| {
                             if (try self.throwBuiltinException(refusal.class, refusal.message)) continue;
                             return error.RuntimeError;
                         };
@@ -9468,6 +9473,13 @@ pub const VM = struct {
                             return err;
                         };
                         if (target) |t| try self.bindForeachElementRef(name, t.arr, t.key);
+                    } else if (src_val == .object and isWeakMap(src_val.object) and key_val == .object) {
+                        var ctx = self.makeContext(null);
+                        const t = @import("../stdlib/spl.zig").weakMapRefTarget(&ctx, src_val.object, key_val) catch |err| {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return err;
+                        };
+                        try self.bindForeachElementRef(name, t.arr, t.key);
                     } else if (src_val == .object and key_val == .string) {
                         // a hooked property (zho_declared_it_fetch_current with
                         // by_ref): only a get hook that returns by reference
