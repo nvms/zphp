@@ -4706,7 +4706,6 @@ pub const VM = struct {
         return @max(chunk, std.mem.alignForward(usize, bytes, chunk));
     }
 
-    // PHP guarantees every object still alive at request end has its
     // the script's error has been reported: zend_exception_error releases the
     // uncaught throwable before the shutdown functions run, and a fatal
     // error's bailout is over, so they catch what they throw. the objects
@@ -4723,6 +4722,7 @@ pub const VM = struct {
         self.drainPendingDestruct();
     }
 
+    // PHP guarantees every object still alive at request end has its
     // __destruct run during shutdown. refcounting fires most destructors at
     // the right time during the run; this sweep catches whatever is still
     // live (globals, refcount-inflated leftovers). walk newest-first; mark
