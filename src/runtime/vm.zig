@@ -7670,6 +7670,13 @@ pub const VM = struct {
                         } }
                         const arr_key = Value.toArrayKey(key);
                         const existing = arr_val.array.get(arr_key);
+                        if (op == .array_get_vivify_ref and existing != .array) {
+                            // FETCH_DIM_W for FE_RESET_RW: the element itself,
+                            // a missing one made null, which the loop refuses
+                            if (arr_val.array.getPtr(PhpArray.normalizeKey(arr_key)) == null) try self.arraySetOwned(arr_val.array, arr_key, .null);
+                            self.pushFetched(existing);
+                            continue;
+                        }
                         if (existing != .null) {
                             if (existing == .array) {
                                 // COW: this inner array is about to be mutated
