@@ -50,9 +50,14 @@ var signal_handlers: [MAX_SIG]Value = blk: {
 var async_enabled: bool = false;
 var last_errno: c_int = 0;
 
+// a signal arrived while pcntl_async_signals() is on: php's EG(vm_interrupt),
+// which the vm takes as an internal call returns (VM.invokeNative)
+pub var async_pending = std.atomic.Value(bool).init(false);
+
 fn cHandler(sig: posix.SIG) callconv(.c) void {
     const idx: usize = @intFromEnum(sig);
     if (idx < MAX_SIG) _ = pending_signals[idx].fetchAdd(1, .seq_cst);
+    if (async_enabled) async_pending.store(true, .seq_cst);
 }
 
 fn native_pcntl_fork(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -202,6 +207,13 @@ fn native_pcntl_signal_get_handler(_: *NativeContext, args: []const Value) Runti
 }
 
 fn native_pcntl_signal_dispatch(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    try dispatch(ctx);
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+// pcntl_signal_dispatch(): the handlers of the signals that arrived, called
+// from the running internal function
+pub fn dispatch(ctx: *NativeContext) RuntimeError!void {
     // no fiber switch inside a signal handler (zend_fiber_switch_block)
     ctx.vm.fiber_switch_blocked += 1;
     defer ctx.vm.fiber_switch_blocked -= 1;
@@ -225,12 +237,15 @@ fn native_pcntl_signal_dispatch(ctx: *NativeContext, _: []const Value) RuntimeEr
             continue;
         };
     }
-    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_pcntl_async_signals(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const prev = async_enabled;
     if (args.len > 0 and args[0] == .bool) async_enabled = args[0].bool;
+    // signals that arrived before are taken at the next interrupt point
+    if (async_enabled) for (&pending_signals) |*p| {
+        if (p.load(.seq_cst) != 0) async_pending.store(true, .seq_cst);
+    };
     return NativeResult.scalar(.{ .bool = prev });
 }
 

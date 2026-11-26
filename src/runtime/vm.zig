@@ -948,6 +948,8 @@ pub const NativeCall = struct {
 // a native call's argument slots and the holds it took on them: the values
 // it was given (retained) and the ones it runs with (stack-retained, the
 // same slots unless it separated or coerced some)
+const pcntl_async_pending = &@import("../stdlib/pcntl.zig").async_pending;
+
 pub const ByRefCall = struct { input: []Value, native: []Value };
 
 pub const NativeInvocation = struct {
@@ -30723,6 +30725,16 @@ pub const VM = struct {
         const result_or = native.call(ctx, native_args);
         self.byref_call = outer_byref_call;
         const result = try result_or;
+        // php's interrupt check as an internal call returns: signals that
+        // arrived under pcntl_async_signals() run their handlers, as called
+        // by this function
+        if (pcntl_async_pending.load(.monotonic)) {
+            pcntl_async_pending.store(false, .seq_cst);
+            @import("../stdlib/pcntl.zig").dispatch(ctx) catch |err| {
+                self.releaseValue(result.value);
+                return err;
+            };
+        }
         if (!self.headers_sent) self.noteTopLevelOutput() catch |err| {
             self.releaseValue(result.value);
             return err;
