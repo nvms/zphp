@@ -1811,6 +1811,22 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += op_bytes;
                     continue :dispatch next;
                 },
+                .reset_return_ref => {
+                    self.return_ref_fresh = false;
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
+                },
+                .vivify_returned_ref => {
+                    // only a call that returned a reference needs runLoop
+                    if (self.return_ref_fresh) {
+                        bailOut(self, frame, ip, sp);
+                        return;
+                    }
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
+                },
                 else => {
                     frame.ip = ip - op_bytes;
                     self.sp = sp;

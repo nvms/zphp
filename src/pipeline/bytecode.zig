@@ -681,6 +681,10 @@ pub const OpCode = enum(u16) {
     // (FETCH_DIM_W with ZEND_FETCH_DIM_REF): a string container is refused
     // as one whose offsets can't be referenced
     array_get_vivify_ref,
+    // the container of a write fetch is a call's result: a reference to
+    // null (or false) the callee returned becomes the array the write goes
+    // into, as FETCH_DIM_W vivifies the variable the VAR points at
+    vivify_returned_ref,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

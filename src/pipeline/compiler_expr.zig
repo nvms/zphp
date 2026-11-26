@@ -3213,6 +3213,11 @@ pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
     } else if (node.tag == .variable_variable) {
         try self.compileNode(node.data.lhs);
         try self.emitOp(.ensure_array_var_var);
+    } else if (node.tag == .call or node.tag == .method_call or node.tag == .nullsafe_method_call or node.tag == .static_call or node.tag == .dynamic_static_call) {
+        // a reference the call returns is the variable the write goes into
+        try self.emitOp(.reset_return_ref);
+        try self.compileNode(node_idx);
+        try self.emitOp(.vivify_returned_ref);
     } else {
         try self.compileNode(node_idx);
     }

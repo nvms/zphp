@@ -10396,6 +10396,16 @@ pub const VM = struct {
                     }
                 },
                 .reset_return_ref => self.return_ref_fresh = false,
+                .vivify_returned_ref => {
+                    const cell = self.returnedRefHere(self.currentFrame().ip - bytecode.op_bytes) orelse continue;
+                    const top = self.stack[self.sp - 1];
+                    const is_false = top == .bool and !top.bool;
+                    if ((top != .null and !is_false) or !sameReferent(cell.*, top)) continue;
+                    if (is_false) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
+                    try self.writeReference(cell, .{ .array = try self.allocArray() });
+                    self.sp -= 1;
+                    self.pushFetched(cell.*);
+                },
                 .bind_ref_from_return => {
                     const by_ref_function = self.returnedRefValueHere(self.currentFrame().ip - bytecode.op_bytes);
                     const dst_idx = self.readU16();
