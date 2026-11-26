@@ -2947,6 +2947,18 @@ fn emitCallableTarget(self: *Compiler, callee_idx: u32, ref_tok: u32) Error!void
         // expression (its initializer is named with a leading nul) names
         // its own class
         const class_node = self.ast.nodes[callee.data.lhs];
+        if (class_node.tag == .variable) {
+            // `$class::m(...)`: the variable's value names the class (an
+            // object, its class)
+            try self.emitOp(.array_new);
+            try compileClassRefValue(self, callee.data.lhs);
+            try self.emitOp(.array_push);
+            const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(callee.main_token)) });
+            try self.emitOp(.constant);
+            try self.emitU16(method_idx);
+            try self.emitOp(.array_push);
+            return;
+        }
         const written = self.ast.tokenSlice(class_node.main_token);
         const in_initializer = self.current_function.len > 0 and self.current_function[0] == 0;
         const relative = class_node.tag != .qualified_name and !(in_initializer and !self.in_trait) and (std.ascii.eqlIgnoreCase(written, "self") or std.ascii.eqlIgnoreCase(written, "parent") or std.ascii.eqlIgnoreCase(written, "static"));
@@ -3740,6 +3752,13 @@ fn compileClassRef(self: *Compiler, node_idx: u32) Error!void {
     try self.compileNode(node_idx);
     try self.emitOp(.class_ref_check);
     try self.emitByte(0);
+}
+
+// the same, kept as a class name: an object gives its class
+fn compileClassRefValue(self: *Compiler, node_idx: u32) Error!void {
+    try self.compileNode(node_idx);
+    try self.emitOp(.class_ref_check);
+    try self.emitByte(1);
 }
 
 // a static call on a class only known at run time, its arguments in an array:
