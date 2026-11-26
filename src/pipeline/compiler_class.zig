@@ -431,6 +431,14 @@ fn extractAttributes(self: *Compiler, main_token: u32, target: AttrTarget) Error
     return all_attrs.toOwnedSlice(self.allocator);
 }
 
+// a property's attributes, whose arguments' __PROPERTY__ names it
+fn propertyAttributes(self: *Compiler, token: u32, prop_name: []const u8) Error![]const ParsedAttr {
+    const outer = self.current_property;
+    self.current_property = prop_name;
+    defer self.current_property = outer;
+    return extractAttributes(self, token, AttrTarget.property);
+}
+
 // a function's or method's attributes, read with it as the function being
 // compiled: a closure among the arguments is named after it
 fn extractAttributesOf(self: *Compiler, token: u32, target: AttrTarget, function: []const u8) Error![]const ParsedAttr {
@@ -3700,11 +3708,11 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     defer props_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property or member.tag == .static_class_property) {
-            const pattrs = try extractAttributes(self, member.main_token, AttrTarget.property);
+        if (member.tag == .class_property or member.tag == .static_class_property or member.tag == .class_property_hooks) {
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const pattrs = try propertyAttributes(self, member.main_token, prop_name);
             if (pattrs.len > 0) {
-                var prop_name = self.ast.tokenSlice(member.main_token);
-                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
                 try props_with_attrs.append(self.allocator, .{
                     .name = prop_name,
                     .attrs = pattrs,
@@ -3810,6 +3818,9 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
                 const param_nodes = self.ast.extraSlice(hook.params);
                 if (param_nodes.len == 0) continue;
                 const pnode = self.ast.nodes[param_nodes[0]];
+                const outer_property = self.current_property;
+                self.current_property = it.prop;
+                defer self.current_property = outer_property;
                 const pattrs = try extractAttributes(self, pnode.main_token, AttrTarget.parameter);
                 if (pattrs.len == 0) continue;
                 var pname = self.ast.tokenSlice(pnode.main_token);
@@ -4473,11 +4484,11 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     defer props_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property or member.tag == .static_class_property) {
-            const pattrs = try extractAttributes(self, member.main_token, AttrTarget.property);
+        if (member.tag == .class_property or member.tag == .static_class_property or member.tag == .class_property_hooks) {
+            var prop_name = self.ast.tokenSlice(member.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            const pattrs = try propertyAttributes(self, member.main_token, prop_name);
             if (pattrs.len > 0) {
-                var prop_name = self.ast.tokenSlice(member.main_token);
-                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
                 try props_with_attrs.append(self.allocator, .{
                     .name = prop_name,
                     .attrs = pattrs,
@@ -5190,6 +5201,7 @@ fn compileInitializer(self: *Compiler, name: []const u8, scope: InitializerScope
         .current_class = class_name,
         .current_parent = self.current_parent,
         .current_function = self.current_function,
+        .current_property = self.current_property,
         .class_body_function = self.class_body_function,
         .in_trait = self.in_trait,
         .relative_const_classes = true,
@@ -5293,9 +5305,11 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
         const member = self.ast.nodes[member_idx];
         if (!isDeferredDefault(self.ast, member)) continue;
         if (first_tok == 0) first_tok = member.main_token;
-        try sub.compileNode(propertyDefault(self.ast, member));
         var p_name = self.ast.tokenSlice(member.main_token);
         if (p_name.len > 0 and p_name[0] == '$') p_name = p_name[1..];
+        sub.current_property = p_name;
+        try sub.compileNode(propertyDefault(self.ast, member));
+        sub.current_property = "";
         const p_idx = try sub.addConstant(.{ .string = Value.String.borrowed(p_name) });
         try sub.emitOp(if (member.tag == .static_class_property) .set_static_prop_default else .set_prop_default);
         try sub.emitU16(cname_idx);
@@ -5343,6 +5357,11 @@ const HookKind = enum { get, set };
 fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []const u8, body_idx: u32, kind: HookKind, hook_flags: u32, set_param_tok: u32, member: Ast.Node, trait_name: ?[]const u8) Error!void {
     const is_short = (hook_flags & 1) != 0;
     const is_generator = (hook_flags & 2) != 0;
+    // the hook's attributes are read here first: __PROPERTY__ in them names
+    // the property
+    const outer_property = self.current_property;
+    self.current_property = prop_name;
+    defer self.current_property = outer_property;
     const suffix = if (kind == .get) "$hook_get" else "$hook_set";
     const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}{s}", .{ class_name, prop_name, suffix });
     try self.string_allocs.append(self.allocator, full_name);

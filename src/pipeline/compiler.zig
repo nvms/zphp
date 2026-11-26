@@ -544,6 +544,9 @@ pub const Compiler = struct {
     // inside a property hook: the property and whether it is the set hook,
     // for parent::$prop::get()/set()
     hook_property: []const u8 = "",
+    // the property whose default, attributes or hooks' attributes are being
+    // compiled, which __PROPERTY__ names there
+    current_property: []const u8 = "",
     // the declared return type of the function being compiled, for
     // zend_compile_return's checks
     declared_return: []const u8 = "",
@@ -1502,7 +1505,15 @@ pub const Compiler = struct {
         if (std.mem.eql(u8, magic, "__PROPERTY__")) {
             // a property hook is named $prop::get / $prop::set
             const f = self.current_function;
-            const val = if (f.len > 1 and f[0] == '$' and (std.mem.endsWith(u8, f, "::get") or std.mem.endsWith(u8, f, "::set"))) f[1 .. f.len - 5] else "";
+            // and its method "prop$hook_get" while its attributes compile
+            const val = if (self.current_property.len > 0)
+                self.current_property
+            else if (f.len > 1 and f[0] == '$' and (std.mem.endsWith(u8, f, "::get") or std.mem.endsWith(u8, f, "::set")))
+                f[1 .. f.len - 5]
+            else if (std.mem.indexOf(u8, f, "$hook_")) |at|
+                (if (std.mem.lastIndexOf(u8, f[0..at], "::")) |sep| f[sep + 2 .. at] else f[0..at])
+            else
+                "";
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(val) });
             try self.emitConstant(idx);
             return;
