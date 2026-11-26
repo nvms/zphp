@@ -441,6 +441,13 @@ fn functionView(ctx: *NativeContext, this: *PhpObject) FnView {
     }
     const instance = this.get("__closure").closureName();
     view.is_closure = instance != null or boolProp(this, "__from_closure");
+    // a closure of a method prints as the method it runs
+    if (stringProp(this, "__function")) |function| if (std.mem.indexOf(u8, function, "::")) |sep| {
+        if (vm.findMethodInfo(function[0..sep], function[sep + 2 ..])) |found| {
+            view.scope = found.defining;
+            view.info = found.info;
+        }
+    };
     if (instance) |name| {
         view.closure_instance = name;
         // a partial application prints as a method of the class it runs in

@@ -3311,8 +3311,8 @@ fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Val
 
 // the key a method's function is filed under: "Class::method", or for a
 // closure's __invoke the closure itself
-pub fn methodKey(this: *PhpObject, buf: []u8, declaring: []const u8, method_name: []const u8) []const u8 {
-    if (closureFunctionKey(buf, this.get("__closure"))) |key| return key;
+pub fn methodKey(vm: *VM, this: *PhpObject, buf: []u8, declaring: []const u8, method_name: []const u8) []const u8 {
+    if (closureFunctionKey(vm, buf, this.get("__closure"))) |key| return key;
     return class_names.memberKey(buf, declaring, method_name);
 }
 
@@ -3321,12 +3321,13 @@ pub fn methodKey(this: *PhpObject, buf: []u8, declaring: []const u8, method_name
 // the function a Closure made from a callable calls
 fn closureIdentity(vm: *VM, buf: []u8, closure: Value) []const u8 {
     if (closure.closureName()) |instance| return if (vm.functions.get(instance)) |func| func.name else instance;
-    return closureFunctionKey(buf, closure) orelse "";
+    return closureFunctionKey(vm, buf, closure) orelse "";
 }
 
 // the function a closure runs: a closure expression's instance, or the
-// function or method a Closure made from a callable calls
-fn closureFunctionKey(buf: []u8, closure: Value) ?[]const u8 {
+// function or method a Closure made from a callable calls, filed under the
+// class that declares it
+fn closureFunctionKey(vm: *VM, buf: []u8, closure: Value) ?[]const u8 {
     if (closure.closureName()) |instance| return instance;
     if (closure != .object) return null;
     switch (closure.object.fakeCallable()) {
@@ -3340,6 +3341,7 @@ fn closureFunctionKey(buf: []u8, closure: Value) ?[]const u8 {
                 .string => |cs| cs.bytes(),
                 else => return null,
             };
+            if (vm.findMethodInfo(class, method.string.bytes())) |found| return class_names.memberKey(buf, found.defining, found.info.name);
             return class_names.memberKey(buf, class, method.string.bytes());
         },
         else => {},
@@ -3360,7 +3362,7 @@ fn setClosureInvokeMethod(ctx: *NativeContext, obj: *PhpObject, closure: Value) 
     try obj.set(ctx.allocator, "__visibility", .{ .int = @backingInt(ClassDef.Visibility.public) });
     try obj.set(ctx.allocator, "__closure", if (closure == .null) .{ .bool = true } else closure);
     var key_buf: [256]u8 = undefined;
-    const key = closureFunctionKey(&key_buf, closure) orelse "";
+    const key = closureFunctionKey(ctx.vm, &key_buf, closure) orelse "";
     if (ctx.vm.functions.get(key)) |func| {
         try obj.set(ctx.allocator, "__arity", .{ .int = func.arity });
         try obj.set(ctx.allocator, "__required_params", .{ .int = func.required_params });
@@ -3414,7 +3416,7 @@ fn rmLookupFunc(ctx: *NativeContext) ?@TypeOf(ctx.vm.functions.get("").?) {
     const method_name = methodLookupName(this) orelse return null;
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return null;
     var buf: [256]u8 = undefined;
-    const key = methodKey(this, &buf, declaring, method_name);
+    const key = methodKey(ctx.vm, this, &buf, declaring, method_name);
     return ctx.vm.functions.get(key);
 }
 
@@ -3458,7 +3460,7 @@ fn rmGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
 
     var buf: [256]u8 = undefined;
-    const key = methodKey(this, &buf, declaring, method_name);
+    const key = methodKey(ctx.vm, this, &buf, declaring, method_name);
     const func = ctx.vm.functions.get(key) orelse {
         if (native_params.get(key)) |sig| return NativeResult.borrowed(try buildNativeParamArray(ctx, sig, key));
         return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -3522,7 +3524,7 @@ fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
 
     var buf: [256]u8 = undefined;
-    const key = methodKey(this, &buf, declaring, method_name);
+    const key = methodKey(ctx.vm, this, &buf, declaring, method_name);
     const return_type = if (methodTypeInfo(ctx.vm, key)) |ti| ti.return_type else nativeReturnType(ctx, key);
     if (return_type.len == 0) return NativeResult.scalar(.null);
 
@@ -3540,7 +3542,7 @@ fn rmHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
 
     var buf: [256]u8 = undefined;
-    const key = methodKey(this, &buf, declaring, method_name);
+    const key = methodKey(ctx.vm, this, &buf, declaring, method_name);
     const return_type = if (methodTypeInfo(ctx.vm, key)) |ti| ti.return_type else nativeReturnType(ctx, key);
     return NativeResult.scalar(.{ .bool = return_type.len > 0 });
 }
@@ -3559,7 +3561,7 @@ fn methodTentativeReturnType(ctx: *NativeContext, this: *PhpObject) []const u8 {
     const method_name = methodLookupName(this) orelse return "";
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return "";
     var buf: [256]u8 = undefined;
-    const key = methodKey(this, &buf, declaring, method_name);
+    const key = methodKey(ctx.vm, this, &buf, declaring, method_name);
     if (ctx.vm.functions.contains(key)) return "";
     const sig = native_params.get(key) orelse return "";
     return sig.tentative_returns;
@@ -4011,31 +4013,47 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(if (display.len > 0) display else "{closure}") });
     } else if (args[0] == .object and std.mem.eql(u8, args[0].object.class_name, "Closure")) {
         const callable = args[0].object.fakeCallable();
-        // a first-class callable reflects as a closure of the function
+        // a first-class callable reflects as a closure of the function,
+        // and the reflection keeps the closure alive, as php's does
         try this.set(ctx.allocator, "__from_closure", .{ .bool = true });
+        try this.set(ctx.allocator, "__held_closure", args[0]);
         if (callable == .string) {
             try this.set(ctx.allocator, "name", callable);
             if (std.mem.indexOf(u8, callable.string.bytes(), "::")) |sep| {
+                // a method's closure is named by the method alone; the
+                // function it runs is kept apart
+                try this.set(ctx.allocator, "__function", callable);
+                try this.setCopiedString(ctx.allocator, "name", callable.string.bytes()[sep + 2 ..]);
+                if (ctx.vm.classes.getKey(callable.string.bytes()[0..sep])) |declaring| try this.set(ctx.allocator, "__scope_class", .{ .string = Value.String.borrowed(declaring) });
                 const fake = args[0].object.fakeClosure();
                 const called = if (fake) |f| f.called_class orelse callable.string.bytes()[0..sep] else callable.string.bytes()[0..sep];
                 if (ctx.vm.classes.getKey(called)) |declared| try this.set(ctx.allocator, "__called_class", .{ .string = Value.String.borrowed(declared) });
             }
         } else if (callable == .array and callable.array.entries.items.len == 2 and callable.array.entries.items[1].value == .string) {
             const target = callable.array.entries.items[0].value;
-            const method = callable.array.entries.items[1].value.string.bytes();
-            const class_name = if (target == .object) target.object.class_name else if (target == .string) target.string.bytes() else "";
+            const called_method = callable.array.entries.items[1].value.string.bytes();
+            const called_class_name = if (target == .object) target.object.class_name else if (target == .string) target.string.bytes() else "";
+            // the closure's function is the method where it is declared,
+            // an ancestor's for an inherited one
+            const found = ctx.vm.findMethodInfo(called_class_name, called_method);
+            const class_name = if (found) |f| f.defining else called_class_name;
+            const method = if (found) |f| f.info.name else called_method;
             const full = std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ class_name, method }) catch return NativeResult.scalar(.null);
             defer ctx.allocator.free(full);
-            try this.setCopiedString(ctx.allocator, "name", full);
+            try this.setCopiedString(ctx.allocator, "__function", full);
+            try this.setCopiedString(ctx.allocator, "name", method);
             try this.set(ctx.allocator, "__is_method_ref", .{ .bool = true });
             if (target == .object) {
+                // scoped to the declaring class, called through the object's
                 try this.set(ctx.allocator, "__scope_class", .{ .string = Value.String.borrowed(class_name) });
+                try this.set(ctx.allocator, "__called_class", .{ .string = Value.String.borrowed(called_class_name) });
                 try this.set(ctx.allocator, "__closure_this", target);
             } else if (target == .string) {
+                try this.set(ctx.allocator, "__scope_class", .{ .string = Value.String.borrowed(class_name) });
                 // a static method's closure is called through the class it
                 // was made from (the closure's called_scope)
                 const fake = args[0].object.fakeClosure();
-                const called = if (fake) |f| f.called_class orelse class_name else class_name;
+                const called = if (fake) |f| f.called_class orelse called_class_name else called_class_name;
                 if (ctx.vm.classes.getKey(called)) |declared| try this.set(ctx.allocator, "__called_class", .{ .string = Value.String.borrowed(declared) });
             }
         } else return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
@@ -4070,6 +4088,8 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 // instance, else the function's name
 pub fn functionKey(this: *PhpObject) Value {
     if (this.get("__closure").closureName()) |instance| return .{ .string = Value.String.borrowed(instance) };
+    const function = this.get("__function");
+    if (function == .string) return function;
     return this.get("name");
 }
 
@@ -4384,7 +4404,7 @@ fn rmGetStaticVariables(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     const method_name = methodLookupName(this) orelse return NativeResult.borrowed(.{ .array = result });
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = result });
     var buf: [512]u8 = undefined;
-    const fn_name = methodKey(this, &buf, declaring, method_name);
+    const fn_name = methodKey(ctx.vm, this, &buf, declaring, method_name);
     const registered = ctx.vm.resolveMethod(declaring, method_name) catch null;
     try appendStaticVariables(ctx, result, registered orelse fn_name);
     return NativeResult.borrowed(.{ .array = result });
@@ -4417,6 +4437,9 @@ fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
     const attrs = ctx.vm.function_attributes.get(compile_name) orelse {
+        // a closure of a method has the method's attributes
+        if (std.mem.indexOf(u8, func_name, "::")) |sep| if (methodAttributes(ctx.vm, func_name[0..sep], func_name[sep + 2 ..])) |method_attrs|
+            return buildAttributeArrayWithFlags(ctx, method_attrs, filter, 2, flags, func_name[0..sep]);
         const tramp = trampolineMagic(ctx.vm, this, func_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
         return buildAttributeArrayWithFlags(ctx, tramp.attrs, filter, 2, flags, tramp.class);
     };
@@ -4464,6 +4487,11 @@ fn rfGetClosureThis(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
 
 fn rfIsStatic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    // a closure of a static method
+    if (this.get("__function") == .string) {
+        const func = ctx.vm.functions.get(this.get("__function").string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = func.is_static });
+    }
     // a closure declared `static`
     const instance = this.get("__closure").closureName() orelse return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(instance) orelse return NativeResult.scalar(.{ .bool = false });
@@ -6327,7 +6355,7 @@ fn rfGetClosure(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const closure = this.get("__closure");
     if (closure == .object) return NativeResult.share(closure);
-    const name = this.get("name");
+    const name = functionKey(this);
     if (name != .string) return NativeResult.scalar(.null);
     return wrapCallableClosure(ctx, name);
 }
@@ -6347,7 +6375,7 @@ fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     }
 
     var buf: [256]u8 = undefined;
-    const key = methodKey(this, &buf, declaring, method_name);
+    const key = methodKey(ctx.vm, this, &buf, declaring, method_name);
     if (ctx.vm.functions.get(key) == null and ctx.vm.native_fns.get(key) == null) return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = false });
 }
@@ -6366,7 +6394,7 @@ fn rmFullName(ctx: *NativeContext) ?[]const u8 {
     const method_name = methodLookupName(this) orelse return null;
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return null;
     var buf: [256]u8 = undefined;
-    const key = methodKey(this, &buf, declaring, method_name);
+    const key = methodKey(ctx.vm, this, &buf, declaring, method_name);
     const owned = Value.String.create(ctx.allocator, key) catch return null;
     return ctx.vm.transientOwned(owned).bytes();
 }
@@ -6434,9 +6462,33 @@ fn reflectionGetModifierNames(ctx: *NativeContext, args: []const Value) RuntimeE
     return NativeResult.borrowed(.{ .array = arr });
 }
 
+// the attributes of the function a closure's __invoke reflects: php copies
+// the closure's function into it (zend_get_closure_invoke_method)
+const ScopedAttributes = struct { attrs: []const AttributeDef, scope: []const u8 };
+fn closureInvokeAttributes(ctx: *NativeContext, this: *PhpObject) ?ScopedAttributes {
+    const closure = this.get("__closure");
+    if (closure.closureName()) |instance| {
+        const attrs = ctx.vm.function_attributes.get(compiledFunctionName(ctx.vm, instance)) orelse return null;
+        return .{ .attrs = attrs, .scope = ctx.vm.closureScopeByName(instance) orelse "" };
+    }
+    var buf: [512]u8 = undefined;
+    const key = closureFunctionKey(ctx.vm, &buf, closure) orelse return null;
+    if (std.mem.indexOf(u8, key, "::")) |sep| {
+        const attrs = methodAttributes(ctx.vm, key[0..sep], key[sep + 2 ..]) orelse return null;
+        return .{ .attrs = attrs, .scope = ctx.vm.classes.getKey(key[0..sep]) orelse "" };
+    }
+    return .{ .attrs = ctx.vm.function_attributes.get(compiledFunctionName(ctx.vm, key)) orelse return null, .scope = "" };
+}
+
 fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     try checkAttributeFilter(ctx, args, "ReflectionFunctionAbstract");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    if (this.get("__closure") == .object) {
+        const found = closureInvokeAttributes(ctx, this) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+        const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
+        const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+        return buildAttributeArrayWithFlags(ctx, found.attrs, filter, 4, flags, found.scope);
+    }
     const method_name = methodLookupName(this) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const attrs = methodAttributes(ctx.vm, declaring, method_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -7329,6 +7381,8 @@ fn rfIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (ctx.vm.native_fns.get(func_name)) |native| return NativeResult.scalar(.{ .bool = native.deprecated != null });
+    if (std.mem.indexOf(u8, func_name, "::")) |sep| if (methodAttributes(ctx.vm, func_name[0..sep], func_name[sep + 2 ..])) |method_attrs|
+        return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(method_attrs) });
     const attrs = ctx.vm.function_attributes.get(compiledFunctionName(ctx.vm, func_name)) orelse
         if (trampolineMagic(ctx.vm, this, func_name)) |tramp| tramp.attrs else return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
@@ -7339,9 +7393,16 @@ fn rmIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .bool = false });
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .bool = false });
+    if (this.get("__closure") == .object) {
+        var buf: [512]u8 = undefined;
+        const key = closureFunctionKey(ctx.vm, &buf, this.get("__closure")) orelse return NativeResult.scalar(.{ .bool = false });
+        if (ctx.vm.native_fns.get(key)) |native| return NativeResult.scalar(.{ .bool = native.deprecated != null or deprecations.functions.has(key) });
+        const found = closureInvokeAttributes(ctx, this) orelse return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(found.attrs) });
+    }
     if (cls.is_internal) {
         var buf: [256]u8 = undefined;
-        const key = methodKey(this, &buf, declaring, method_name);
+        const key = methodKey(ctx.vm, this, &buf, declaring, method_name);
         return NativeResult.scalar(.{ .bool = deprecations.functions.has(key) });
     }
     const attrs = cls.method_attributes.get(method_name) orelse return NativeResult.scalar(.{ .bool = false });
