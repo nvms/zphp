@@ -1318,6 +1318,10 @@ fn propertyToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
         try appendDynamicProperty(&w, name, "");
         return w.result();
     }
+    // php prints a default still naming a constant as its expression; zphp
+    // keeps no expression to print, so it evaluates the class's defaults
+    // first (one that can't be evaluated throws here)
+    if (ctx.vm.classes.contains(declaring.?)) try ctx.vm.resolveClassDefaults(declaring.?);
     const found = reflection.findPropertyDef(ctx.vm, declaring.?, name) orelse reflection.findPropertyDef(ctx.vm, class_name, name) orelse {
         try appendDynamicProperty(&w, name, "");
         return w.result();

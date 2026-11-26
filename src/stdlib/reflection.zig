@@ -2278,7 +2278,6 @@ fn rcGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    try ctx.vm.resolveClassDefaults(class_name);
     // ?int $filter: null lists every property, otherwise those with any of
     // the given modifiers
     const filter: ?i64 = if (args.len >= 1 and args[0] != .null) try zpp.long(ctx, "ReflectionClass::getProperties", args, 0, "filter", true) else null;
@@ -2390,7 +2389,6 @@ fn rcGetProperty(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const name = try zpp.str(ctx, "ReflectionClass::getProperty", args, 0, "name");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    try ctx.vm.resolveClassDefaults(class_name);
 
     if (visiblePropertyDef(ctx.vm, class_name, name)) |result| {
         const obj = try buildPropertyObjStatic(ctx, class_name, result.prop, result.declaring_class, result.is_static);
@@ -5291,7 +5289,8 @@ fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const class_arg = try zpp.objOrStr(ctx, label, args, 0, "class");
     const prop_name = try zpp.str(ctx, label, args, 1, "property");
     const class_name = try classArgument(ctx, class_arg);
-    try ctx.vm.resolveClassDefaults(class_name);
+    // reflection_property_factory evaluates nothing: a default naming a
+    // constant is evaluated when the default is asked for
     const found = visiblePropertyDef(ctx.vm, class_name, prop_name);
     if (found == null and !(args[0] == .object and findPropertyDef(ctx.vm, class_name, prop_name) == null and hasDynamicProperty(ctx.vm, args[0].object, prop_name))) {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name });
@@ -5838,6 +5837,17 @@ fn rpropGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     if (has_default != .bool or !has_default.bool) {
         try ctx.vm.raiseError(VM.E_DEPRECATED, "ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists");
         return NativeResult.scalar(.null);
+    }
+    // zval_update_constant_ex on a default still naming a constant
+    const declaring = this.get("__declaring_class");
+    const name = this.get("name");
+    if (declaring == .string and name == .string) {
+        try ctx.vm.resolveClassDefaults(declaring.string.bytes());
+        if (findPropertyDef(ctx.vm, declaring.string.bytes(), name.string.bytes())) |found| if (!found.prop.is_promoted) {
+            const d = found.prop.default;
+            if (d == .array) return NativeResult.borrowed(.{ .array = try ctx.vm.cloneArray(d.array) });
+            return NativeResult.share(d);
+        };
     }
     return NativeResult.share(this.get("__default_value"));
 }
