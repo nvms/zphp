@@ -309,7 +309,13 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(iter_name) }));
         }
     }
-    if (val_by_ref and !short_circuited and (iter_tag == .variable or iter_tag == .array_access)) {
+    if (val_by_ref and !short_circuited and iter_tag == .array_access) {
+        // the element iterated is fetched for a reference
+        const iter_node = self.ast.nodes[iter_n];
+        try compiler_expr.compileVivifyChain(self, iter_node.data.lhs);
+        try self.compileNode(iter_node.data.rhs);
+        try self.emitOp(.array_get_vivify_ref);
+    } else if (val_by_ref and !short_circuited and iter_tag == .variable) {
         try compiler_expr.compileVivifyChain(self, iter_n);
     } else if (val_by_ref and !short_circuited and try compiler_expr.compileSeparatedFetch(self, iter_n)) {
         // a property, static property or ${...} variable: its array is

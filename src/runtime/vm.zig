@@ -1605,6 +1605,9 @@ pub const VM = struct {
     // set by an argument guard whose callee takes that position by reference
     // or cannot be resolved yet; consumed by the fetch opcode right after it
     arg_capture_pending: bool = false,
+    // the call and argument position the last argument guard fed
+    arg_capture_call: usize = 0,
+    arg_capture_pos: u8 = 0,
     // the operand position and chunk of the property fetch a
     // check_rw_container last let through: that get_prop is a
     // read-modify-write (php's BP_VAR_RW), which creates a missing property
@@ -7207,6 +7210,15 @@ pub const VM = struct {
                     } else if (op == .array_get_list and arr_val != .object) {
                         if (arr_val != .null) self.warnListFromScalar(arr_val) catch if (try self.resumeRaised()) continue;
                         self.push(.null);
+                    } else if (arr_val == .string and capturing) {
+                        // a by-reference argument fetches for writing
+                        // (zend_wrong_string_offset): an offset of a string
+                        // variable or element can't be referenced, and a
+                        // string reached through an offset is no container
+                        const intermediate = self.argChainContinues(self.currentChunk().code.items, self.currentFrame().ip, self.arg_capture_call, self.arg_capture_pos);
+                        const msg = if (intermediate) "Cannot use string offset as an array" else "Cannot create references to/from string offsets";
+                        if (self.throwWrongStringOffset(key, msg) catch try self.resumeRaised()) continue;
+                        return error.RuntimeError;
                     } else if (arr_val == .string) {
                         const string = arr_val.string;
                         switch (try self.stringOffset(string.len, key, .read)) {
@@ -7531,7 +7543,7 @@ pub const VM = struct {
                         },
                     }
                 },
-                .array_get_vivify, .array_get_vivify_rw => {
+                .array_get_vivify, .array_get_vivify_rw, .array_get_vivify_ref => {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (op == .array_get_vivify_rw and arr_val == .null and key != .array and key != .object) {
@@ -7636,8 +7648,10 @@ pub const VM = struct {
                         };
                         try self.pushOverloadedElement(arr_val.object, result) orelse continue;
                     } else if (arr_val == .string) {
-                        // descending through a string offset as a container
-                        if (self.throwWrongStringOffset(key, "Cannot use string offset as an array") catch try self.resumeRaised()) continue;
+                        // descending through a string offset as a container,
+                        // or iterating one by reference
+                        const msg = if (op == .array_get_vivify_ref) "Cannot create references to/from string offsets" else "Cannot use string offset as an array";
+                        if (self.throwWrongStringOffset(key, msg) catch try self.resumeRaised()) continue;
                         return error.RuntimeError;
                     } else if (try self.refuseDimWrite(arr_val)) |handled| {
                         if (handled) continue;
@@ -13198,6 +13212,8 @@ pub const VM = struct {
                     const pos = self.readByte();
                     const operands: usize = if (op == .arg_guard_prop) 1 else 2;
                     self.arg_capture_pending = self.argNeedsCapture(self.currentChunk(), field, delta, pos, operands);
+                    self.arg_capture_call = field + delta;
+                    self.arg_capture_pos = pos;
                 },
                 .const_expr_dim_check => {
                     switch (self.stack[self.sp - 1]) {
@@ -25593,6 +25609,26 @@ pub const VM = struct {
     // must record lvalue provenance (by reference, or not resolvable without
     // side effects) or may run as a plain read. resolution never executes PHP
     // and never autoloads: an unregistered callee simply captures
+    // whether a fetch of a by-reference argument's chain is followed by
+    // another of the same argument before the call: an intermediate fetch
+    // (php's FETCH_DIM_W with ZEND_FETCH_DIM_DIM) rather than the last one
+    fn argChainContinues(_: *VM, code: []const u8, from: usize, call_ip: usize, pos: u8) bool {
+        var ip = from;
+        while (ip < call_ip and ip < code.len) {
+            const op = bytecode.opAt(code, ip) orelse return false;
+            switch (op) {
+                .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => {
+                    const field = ip + bytecode.op_bytes;
+                    const delta = (@as(usize, code[field]) << 8) | code[field + 1];
+                    if (field + delta == call_ip and code[field + 2] == pos) return true;
+                },
+                else => {},
+            }
+            ip += OpCode.widthAt(code, ip);
+        }
+        return false;
+    }
+
     pub fn argNeedsCapture(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8, operands: usize) bool {
         return self.resolveArgIntent(chunk, field, delta, pos, operands, false);
     }

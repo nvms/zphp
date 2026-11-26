@@ -677,6 +677,10 @@ pub const OpCode = enum(u16) {
     // u16 slot: set_local for a catch's variable (ZEND_CATCH), which
     // assigns strictly, whatever the file's strict_types
     catch_set_local,
+    // array_get_vivify for the element a by-reference foreach iterates
+    // (FETCH_DIM_W with ZEND_FETCH_DIM_REF): a string container is refused
+    // as one whose offsets can't be referenced
+    array_get_vivify_ref,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -849,6 +853,7 @@ pub const OpCode = enum(u16) {
             .array_get_empty,
             .array_get_vivify,
             .array_get_vivify_rw,
+            .array_get_vivify_ref,
             .get_prop_dynamic,
             .ensure_array_prop_dynamic,
             .get_prop_coalesce_dynamic,
