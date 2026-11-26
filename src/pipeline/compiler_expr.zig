@@ -1653,6 +1653,8 @@ fn compileArg(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
 
 fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
     const arg = self.ast.nodes[arg_idx];
+    // an argument the callee takes by value is php's plain read (SEND_VAR)
+    if (guard.by_value and (arg.tag == .array_access or arg.tag == .property_access) and try compileDelayedReadChain(self, arg)) return;
     switch (arg.tag) {
         .property_access => try compilePropertyFetch(self, arg, guard),
         .array_access => {
@@ -2997,6 +2999,7 @@ pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
         self.nullsafe_chain_jumps = null;
         local_jumps.deinit(self.allocator);
     };
+    if (try compileDelayedReadChain(self, node)) return;
     try self.compileNode(node.data.lhs);
     if (self.const_expr) try self.emitOp(.const_expr_dim_check);
     try compileOutsideChain(self, node.data.rhs);
@@ -3400,7 +3403,90 @@ pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compilePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
+    if (try compileDelayedReadChain(self, node)) return;
     try compilePropertyFetch(self, node, null);
+}
+
+// the key of a read chain's link that needs code of its own (php's TMP),
+// null for a static property name, a literal or a plain variable, which the
+// fetch reads as it runs
+fn delayedLinkKey(self: *Compiler, link: Ast.Node) ?u32 {
+    if (link.tag == .array_access) return if (pureOperand(self, link.data.rhs)) null else link.data.rhs;
+    if (link.main_token == 0 and !pureOperand(self, link.data.rhs)) return link.data.rhs;
+    return null;
+}
+
+// zend_delayed_compile_dim and zend_delayed_compile_prop for a read
+// (`$a[f()][g()]`, `$o->{f()}->p`): the keys that need code run first, in
+// order, and the fetches after them, from the base; a plain variable as the
+// base is read by the first fetch, so its undefined warning comes after the
+// keys and a key that reassigns it is seen. the keys wait under the base,
+// the first nearest it: [kn .. k1, base], and each fetch swaps its key up
+fn compileDelayedReadChain(self: *Compiler, top: Ast.Node) Error!bool {
+    if (self.const_expr) return false;
+    var links: [32]Ast.Node = undefined;
+    var count: usize = 0;
+    var delayed = false;
+    var cur = top;
+    while (true) {
+        const link_ok = (cur.tag == .array_access and cur.data.rhs != 0) or cur.tag == .property_access;
+        if (!link_ok) break;
+        if (count == links.len) return false;
+        links[count] = cur;
+        count += 1;
+        if (delayedLinkKey(self, cur) != null) delayed = true;
+        cur = self.ast.nodes[cur.data.lhs];
+    }
+    if (!delayed) return false;
+    const base_idx = links[count - 1].data.lhs;
+    const base = self.ast.nodes[base_idx];
+    // a base on a method or nullsafe chain keeps the chain's own order
+    switch (base.tag) {
+        .method_call, .nullsafe_method_call, .nullsafe_property_access => return false,
+        else => {},
+    }
+    const late_base = base.tag == .variable;
+    if (!late_base) try self.compileNode(base_idx);
+    var waiting: u8 = 0;
+    var i = count;
+    while (i > 0) {
+        i -= 1;
+        const key = delayedLinkKey(self, links[i]) orelse continue;
+        try compileOutsideChain(self, key);
+        const depth = if (late_base) waiting else waiting + 1;
+        if (depth > 0) {
+            try self.emitOp(.bury);
+            try self.emitByte(depth);
+        }
+        waiting += 1;
+    }
+    if (late_base) try self.compileNode(base_idx);
+    i = count;
+    while (i > 0) {
+        i -= 1;
+        const link = links[i];
+        const waited = delayedLinkKey(self, link) != null;
+        if (link.tag == .array_access) {
+            if (waited) try self.emitOp(.swap) else try compileOutsideChain(self, link.data.rhs);
+            try self.emitOp(.array_get);
+            continue;
+        }
+        if (!self.isDynamicProp(link)) {
+            const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(link)) });
+            try self.emitOp(.get_prop);
+            try self.emitU16(name_idx);
+            continue;
+        }
+        if (waited) {
+            try self.emitOp(.swap);
+        } else if (link.main_token == 0) {
+            try compileOutsideChain(self, link.data.rhs);
+        } else {
+            try self.emitGetVar(self.ast.tokenSlice(self.ast.nodes[link.data.rhs].main_token));
+        }
+        try self.emitOp(.get_prop_dynamic);
+    }
+    return true;
 }
 
 fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error!void {
