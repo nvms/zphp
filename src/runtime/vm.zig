@@ -9858,7 +9858,7 @@ pub const VM = struct {
                     try self.checkArgCell(source.cell.denial);
                     const cell = source.cell.value;
                     try self.resolveStaticDefaults(class_name);
-                    _ = try self.staticPropTarget(class_name, prop_name, .write);
+                    _ = try self.staticPropTarget(class_name, prop_name, .indirect);
                     try self.bindStaticPropToCell(class_name, prop_name, cell);
                     // php frees what the destination held before it reads the
                     // result, so a destructor's writes through the reference

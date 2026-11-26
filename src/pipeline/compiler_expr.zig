@@ -1008,6 +1008,14 @@ fn emitPlaceRead(self: *Compiler, place: Place, access: PlaceAccess) Error!void 
             try self.emitOp(.get_prop_dynamic);
         },
         .static_prop => |sp| {
+            // ASSIGN_STATIC_PROP_OP fetches the property for writing
+            // (BP_VAR_RW) before the operator runs: a property the scope
+            // may not modify is refused there
+            if (access == .assign_op) {
+                try self.emitOp(.separate_static_prop);
+                try self.emitU16(sp.class);
+                try self.emitU16(sp.prop);
+            }
             try self.emitOp(.get_static_prop);
             try self.emitU16(sp.class);
             try self.emitU16(sp.prop);
