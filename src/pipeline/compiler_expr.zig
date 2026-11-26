@@ -2979,6 +2979,16 @@ fn emitCallableTarget(self: *Compiler, callee_idx: u32, ref_tok: u32) Error!void
 }
 
 pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
+    // an element is a link of a nullsafe chain: `$a?->b['c']` skips the
+    // fetch of the element when $a is null
+    var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
+    const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
+    if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
+    defer if (owns_chain) {
+        for (local_jumps.items) |j| self.patchJump(j);
+        self.nullsafe_chain_jumps = null;
+        local_jumps.deinit(self.allocator);
+    };
     try self.compileNode(node.data.lhs);
     if (self.const_expr) try self.emitOp(.const_expr_dim_check);
     try compileOutsideChain(self, node.data.rhs);
@@ -3454,7 +3464,7 @@ pub fn compileStaticMemberOnChain(self: *Compiler, node: Ast.Node, comptime comp
 fn lhsIsChainLink(ast: anytype, node: Ast.Node) bool {
     const lhs = ast.nodes[node.data.lhs];
     return switch (lhs.tag) {
-        .property_access, .method_call, .nullsafe_property_access, .nullsafe_method_call => true,
+        .property_access, .method_call, .nullsafe_property_access, .nullsafe_method_call, .array_access => true,
         else => false,
     };
 }
