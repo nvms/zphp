@@ -61,6 +61,7 @@ fn parseSpec(ctx: *NativeContext, item: Value) RuntimeError!?Spec {
     if (item == .resource) {
         const fdv = item.resource.get("__fd");
         if (fdv != .int or fdv.int < 0) return null;
+        try filesystem.warnCastBufferLoss(ctx, item.resource);
         return .{ .redirect = fdv.int };
     }
     if (item != .array) {

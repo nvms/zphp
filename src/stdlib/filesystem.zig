@@ -5419,6 +5419,15 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
     return .{ .pid = pid, .pipe_fds = pipes };
 }
 
+// php_stream_cast to a descriptor for someone else (not CAST_INTERNAL): the
+// stream syncs its buffer, and what a pipe already read ahead never reaches
+// the descriptor's new user
+pub fn warnCastBufferLoss(ctx: *NativeContext, res: *PhpObject) RuntimeError!void {
+    const lost = try streams.syncForCast(ctx, res);
+    if (lost == 0) return;
+    try se.warnNt(ctx, .BufferedDataLost, se.streamLabel(ctx.vm, res), "{d} bytes of buffered data lost during stream conversion!", .{lost});
+}
+
 fn closeOpenedSpecs(specs: []const ProcDesc) void {
     for (specs) |spec| if (spec.action == .opened) sys.close(spec.action.opened);
 }
@@ -5441,6 +5450,7 @@ fn procDescriptors(ctx: *NativeContext, spec: *PhpArray, descs: *std.ArrayListUn
                 }
                 const fdv = res.get("__fd");
                 if (fdv != .int or fdv.int < 0) continue;
+                try warnCastBufferLoss(ctx, res);
                 break :blk .{ .redirect = @intCast(fdv.int) };
             },
             .array => |item| (try procDescriptorFromArray(ctx, item, descs.items)) orelse {

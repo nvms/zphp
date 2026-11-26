@@ -788,6 +788,21 @@ pub fn flush(ctx: *NativeContext, obj: *PhpObject, closing: bool) RuntimeError!b
     return rawFlush(ctx, obj);
 }
 
+// _php_stream_cast's buffer synchronization before handing out a descriptor
+// (not for select, poll or copy): flush, and a seekable stream moves its
+// descriptor back to the logical position and drops what it read ahead.
+// returns the bytes still buffered, which the descriptor's new user loses
+pub fn syncForCast(ctx: *NativeContext, obj: *PhpObject) RuntimeError!usize {
+    const s = get(obj) orelse return 0;
+    _ = try flush(ctx, obj, false);
+    if (hasSeek(obj) and !s.no_seek) {
+        _ = try rawSeek(ctx, obj, s, s.position, 0);
+        s.readpos = 0;
+        s.writepos = 0;
+    }
+    return s.writepos - s.readpos;
+}
+
 // --- positioning -------------------------------------------------------------
 
 pub fn tell(ctx: *NativeContext, obj: *PhpObject) RuntimeError!i64 {
