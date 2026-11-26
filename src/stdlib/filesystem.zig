@@ -2439,35 +2439,115 @@ fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     return NativeResult.borrowed(.{ .array = result });
 }
 
-fn globAppend(ctx: *NativeContext, result: *PhpArray, pattern: []const u8, flags: i64) !void {
+fn globAppend(ctx: *NativeContext, result: *PhpArray, pattern: []const u8, flags: i64) RuntimeError!void {
     // a pattern without wildcards names one path, found when it exists
     // ("..", "dir/", "/" included), as glob(3) checks it with lstat
-    if (pattern.len > 0 and std.mem.indexOfAny(u8, pattern, if (platform.is_windows) "*?[" else "*?[\\") == null) {
-        var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const os_path = bundle.osPath(&os_buf, pattern);
-        const is_dir = if (bundle.find(os_path)) |hit| hit == .dir else if (plainStat(os_path, true)) |st| blk: {
-            if (st.mode & 0o170000 == 0o120000) break :blk if (plainStat(os_path, false)) |target| target.mode & 0o170000 == 0o040000 else false;
-            break :blk st.mode & 0o170000 == 0o040000;
-        } else return;
-        if ((flags & 1073741824) != 0 and !is_dir) return;
-        if ((flags & 8) != 0 and is_dir and pattern[pattern.len - 1] != '/') {
-            const marked = try std.fmt.allocPrint(ctx.allocator, "{s}/", .{pattern});
-            defer ctx.allocator.free(marked);
-            return result.appendCopiedString(ctx.allocator, marked);
-        }
-        return result.appendCopiedString(ctx.allocator, pattern);
-    }
-    // a pattern without a directory matches in the working directory and
-    // names what it finds bare, as glob(3) does
+    if (pattern.len > 0 and !globHasMagic(pattern)) return globLiteral(ctx, result, pattern, flags);
     const dir_path = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[0..pos] else "";
+    // glob3: a directory component with wildcards matches directories, and
+    // the rest of the pattern is matched inside each of them
+    if (std.mem.indexOfAny(u8, dir_path, "*?[")) |magic| {
+        const comp_start = if (std.mem.lastIndexOfScalar(u8, pattern[0..magic], '/')) |s| s + 1 else 0;
+        const prefix = if (comp_start == 0) "" else if (comp_start == 1) "/" else pattern[0 .. comp_start - 1];
+        return globWalk(ctx, result, prefix, pattern[comp_start..], flags);
+    }
     const file_pattern = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[pos + 1 ..] else pattern;
     // "/x*" lists the root directory
-    const rooted = dir_path.len == 0 and std.mem.startsWith(u8, pattern, "/");
+    return globLeaf(ctx, result, dir_path, file_pattern, dir_path.len == 0 and std.mem.startsWith(u8, pattern, "/"), flags);
+}
+
+fn globHasMagic(pattern: []const u8) bool {
+    return std.mem.indexOfAny(u8, pattern, if (platform.is_windows) "*?[" else "*?[\\") != null;
+}
+
+fn globLiteral(ctx: *NativeContext, result: *PhpArray, path: []const u8, flags: i64) RuntimeError!void {
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const os_dir = bundle.osPath(&os_buf, if (dir_path.len == 0 and !std.mem.startsWith(u8, pattern, "/")) "." else if (dir_path.len == 0) "/" else dir_path);
+    const os_path = bundle.osPath(&os_buf, path);
+    const is_dir = if (bundle.find(os_path)) |hit| hit == .dir else if (plainStat(os_path, true)) |st| blk: {
+        if (st.mode & 0o170000 == 0o120000) break :blk if (plainStat(os_path, false)) |target| target.mode & 0o170000 == 0o040000 else false;
+        break :blk st.mode & 0o170000 == 0o040000;
+    } else return;
+    if ((flags & 1073741824) != 0 and !is_dir) return;
+    if ((flags & 8) != 0 and is_dir and path[path.len - 1] != '/') {
+        const marked = try std.fmt.allocPrint(ctx.allocator, "{s}/", .{path});
+        defer ctx.allocator.free(marked);
+        return result.appendCopiedString(ctx.allocator, marked);
+    }
+    return result.appendCopiedString(ctx.allocator, path);
+}
+
+// a path under a directory reached already: "" is the working directory
+fn globJoin(ctx: *NativeContext, prefix: []const u8, name: []const u8) ![]u8 {
+    if (prefix.len == 0) return ctx.allocator.dupe(u8, name);
+    if (prefix[prefix.len - 1] == '/') return std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ prefix, name });
+    return std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ prefix, name });
+}
+
+// glob3 over the components of `rest` below the directory `prefix`, which
+// is a path found already and never read as a pattern again
+fn globWalk(ctx: *NativeContext, result: *PhpArray, prefix: []const u8, rest: []const u8, flags: i64) RuntimeError!void {
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse {
+        if (rest.len == 0 or !globHasMagic(rest)) {
+            const path = try globJoin(ctx, prefix, rest);
+            defer ctx.allocator.free(path);
+            if (rest.len == 0 and (path.len == 0 or path[path.len - 1] != '/')) {
+                const dir = try std.fmt.allocPrint(ctx.allocator, "{s}/", .{path});
+                defer ctx.allocator.free(dir);
+                return globLiteral(ctx, result, dir, flags);
+            }
+            return globLiteral(ctx, result, path, flags);
+        }
+        const rooted = std.mem.eql(u8, prefix, "/");
+        return globLeaf(ctx, result, if (rooted) "" else prefix, rest, rooted, flags);
+    };
+    const comp = rest[0..slash];
+    const tail = rest[slash + 1 ..];
+    if (std.mem.indexOfAny(u8, comp, "*?[") == null) {
+        const next = try globJoin(ctx, prefix, comp);
+        defer ctx.allocator.free(next);
+        return globWalk(ctx, result, next, tail, flags);
+    }
+    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const os_dir = bundle.osPath(&os_buf, if (prefix.len == 0) "." else prefix);
+    var dir = std.Io.Dir.cwd().openDir(platform.io, os_dir, .{ .iterate = true }) catch return;
+    defer dir.close(platform.io);
+    // the matching directories, in readdir's order (the results are sorted
+    // at the end); . and .. are there for a component that starts with a dot
+    var names: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (names.items) |n| ctx.allocator.free(n);
+        names.deinit(ctx.allocator);
+    }
+    if (comp[0] == '.') for ([_][]const u8{ ".", ".." }) |dot| {
+        if (globMatchFlags(comp, dot, 4)) try names.append(ctx.allocator, try ctx.allocator.dupe(u8, dot));
+    };
+    var iter = dir.iterate();
+    while (iter.next(platform.io) catch null) |entry| {
+        if (!globMatchFlags(comp, entry.name, 4)) continue;
+        const is_dir = entry.kind == .directory or (entry.kind == .sym_link and blk: {
+            const st = dir.statFile(platform.io, entry.name, .{}) catch break :blk false;
+            break :blk st.kind == .directory;
+        });
+        if (is_dir) try names.append(ctx.allocator, try ctx.allocator.dupe(u8, entry.name));
+    }
+    for (names.items) |name| {
+        const next = try globJoin(ctx, prefix, name);
+        defer ctx.allocator.free(next);
+        try globWalk(ctx, result, next, tail, flags);
+    }
+}
+
+// the last component's matches in one directory
+fn globLeaf(ctx: *NativeContext, result: *PhpArray, dir_path: []const u8, file_pattern: []const u8, rooted: bool, flags: i64) RuntimeError!void {
+    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const os_dir = bundle.osPath(&os_buf, if (dir_path.len == 0 and !rooted) "." else if (dir_path.len == 0) "/" else dir_path);
     var dir_opt: ?std.Io.Dir = std.Io.Dir.cwd().openDir(platform.io, os_dir, .{ .iterate = true }) catch null;
     defer if (dir_opt) |*d| d.close(platform.io);
     if (dir_opt) |*dir| {
+        // readdir's . and .. are there for a pattern that starts with a dot
+        if (file_pattern.len > 0 and file_pattern[0] == '.') for ([_][]const u8{ ".", ".." }) |name| {
+            try globAppendEntry(ctx, result, .{ .dir_path = dir_path, .pattern = file_pattern, .name = name, .is_dir = true, .flags = flags, .rooted = rooted });
+        };
         var iter = dir.iterate();
         while (iter.next(platform.io) catch null) |entry| {
             try globAppendEntry(ctx, result, .{ .dir_path = dir_path, .pattern = file_pattern, .name = entry.name, .is_dir = entry.kind == .directory, .flags = flags, .rooted = rooted });
