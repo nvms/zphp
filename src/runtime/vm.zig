@@ -19159,6 +19159,13 @@ pub const VM = struct {
         if (self.user_error_handler == null) self.user_error_handler = handler else self.releaseValue(handler);
     }
 
+    // php_error_cb's record of the uncaught throwable it reports: the file
+    // is the throwable's, which is released before error_get_last() reads it
+    pub fn recordUncaughtError(self: *VM, level: i64, msg: []const u8, file: []const u8, line: i64) void {
+        const kept_file = self.internName(file) catch return;
+        self.recordLastError(level, msg, .{ .file = kept_file, .line = line });
+    }
+
     fn recordLastError(self: *VM, level: i64, msg: []const u8, at: SourcePosition) void {
         const kept = self.allocator.dupe(u8, msg) catch return;
         self.clearLastError();

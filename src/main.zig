@@ -1017,6 +1017,14 @@ fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
     if (vm.pending_exception == null) if (vm.error_msg) |msg| if (!error_format.hasFatalPrefix(msg)) {
         _ = vm.raiseFatal(msg) catch {};
     };
+    // a syntax error or compile-time fatal is reported by its message alone
+    const description = if (vm.pending_exception != null and uncaughtSeverity(vm) == 1) exceptions.uncaughtDescription(vm, allocator) else null;
+    defer if (description) |text| allocator.free(text);
+    // php_error_cb keeps what it was given for error_get_last(), reported or not
+    if (vm.pending_exception != null) if (error_format.uncaughtParts(allocator, vm, description)) |parts| {
+        defer allocator.free(parts.message);
+        vm.recordUncaughtError(parts.level, parts.message, parts.file, parts.line);
+    };
     if ((vm.error_reporting_level & uncaughtSeverity(vm)) == 0) return;
     if (vm.pending_exception == null) {
         const msg = error_format.formatRuntimeError(allocator, vm);
@@ -1024,9 +1032,6 @@ fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
         try writeStderr(if (msg.len > 0) msg else vm.error_msg orelse "runtime error\n");
         return;
     }
-    // a syntax error or compile-time fatal is reported by its message alone
-    const description = if (uncaughtSeverity(vm) == 1) exceptions.uncaughtDescription(vm, allocator) else null;
-    defer if (description) |text| allocator.free(text);
     if (vm.logErrorsEnabled()) {
         vm.flushOutputToStdout();
         vm.writeLog(error_format.formatUncaught(allocator, vm, .log, description));
