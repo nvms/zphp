@@ -25,6 +25,7 @@ const streams = @import("streams.zig");
 const stream_filters = @import("stream_filters.zig");
 const user_streams = @import("user_streams.zig");
 const se = @import("stream_errors.zig");
+const realpath_cache = @import("realpath_cache.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -151,6 +152,8 @@ const common_entries = .{
     .{ "stream_set_chunk_size", native_stream_set_chunk_size },
     .{ "stream_set_write_buffer", native_stream_set_buffer },
     .{ "clearstatcache", native_clearstatcache },
+    .{ "realpath_cache_size", native_realpath_cache_size },
+    .{ "realpath_cache_get", native_realpath_cache_get },
     .{ "tmpfile", native_tmpfile },
     .{ "fileperms", native_fileperms },
     .{ "readlink", native_readlink },
@@ -1744,7 +1747,11 @@ fn native_realpath(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = bundle.osPath(&os_buf, spelled);
     if (bundle.canonicalPath(&buf, path)) |packed_path| return NativeResult.copyString(ctx.allocator, packed_path);
-    const resolved = platform.realpath(spelled, &buf) catch return NativeResult.scalar(Value{ .bool = false });
+    var rp_buf: [realpath_cache.max_path]u8 = undefined;
+    const resolved = if (platform.is_windows)
+        platform.realpath(spelled, &buf) catch return NativeResult.scalar(Value{ .bool = false })
+    else
+        realpath_cache.realpath(ctx.vm, given, &rp_buf) orelse return NativeResult.scalar(Value{ .bool = false });
     if (open_basedir.setting(ctx.vm) != null and !try open_basedir.allows(ctx.vm, "realpath", resolved)) return NativeResult.scalar(Value{ .bool = false });
     return NativeResult.copyString(ctx.allocator, resolved);
 }
@@ -1827,6 +1834,7 @@ fn native_rmdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         try se.raise(ctx, .{ .code = .RmdirFailed, .wrapper = se.plainfile, .func = "rmdir" }, "{s}", .{errorText(err)});
         return NativeResult.scalar(.{ .bool = false });
     };
+    clearStatAndRealpathCache();
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -1861,6 +1869,7 @@ fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         try se.raise(ctx, .{ .code = .UnlinkFailed, .wrapper = se.plainfile, .func = "unlink" }, "{s}", .{errorText(err)});
         return NativeResult.scalar(.{ .bool = false });
     };
+    clearStatAndRealpathCache();
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -2814,6 +2823,12 @@ pub fn resetStreamState() void {
 pub fn clearStatCache() void {
     if (stat_cache_path) |p| stat_cache_allocator.?.free(p);
     stat_cache_path = null;
+}
+
+// php_clear_stat_cache(1, NULL, 0): what unlink, rename and rmdir do
+pub fn clearStatAndRealpathCache() void {
+    clearStatCache();
+    realpath_cache.clean();
 }
 
 // php_stat for a path a user wrapper serves: the cached stat of the same
@@ -4881,9 +4896,39 @@ fn native_stream_isatty(ctx: *NativeContext, args: []const Value) RuntimeError!N
     return NativeResult.scalar(.{ .bool = platform.isatty(fd_val.int) });
 }
 
-fn native_clearstatcache(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn native_clearstatcache(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const clear_realpath = args.len > 0 and args[0].isTruthy();
+    const filename: []const u8 = if (args.len > 1) try strArg(ctx, args, "clearstatcache", 1, "filename", true) else "";
     clearStatCache();
+    if (clear_realpath) {
+        // a filename given, even empty, drops only its own entry
+        if (args.len > 1) realpath_cache.del(filename) else realpath_cache.clean();
+    }
     return NativeResult.scalar(.null);
+}
+
+fn native_realpath_cache_size(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = realpath_cache.size() });
+}
+
+fn native_realpath_cache_get(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const result = try ctx.createArray();
+    var it: realpath_cache.Iterator = .{};
+    while (it.next()) |b| {
+        const e = try ctx.createArray();
+        // bucket->key is unsigned: a float past ZEND_LONG_MAX
+        const k: Value = if (b.key <= std.math.maxInt(i64)) .{ .int = @intCast(b.key) } else .{ .float = @floatFromInt(b.key) };
+        try e.set(ctx.allocator, .{ .string = Value.String.borrowed("key") }, k);
+        try e.set(ctx.allocator, .{ .string = Value.String.borrowed("is_dir") }, .{ .bool = b.is_dir });
+        const rp = try Value.String.create(ctx.allocator, b.realpath);
+        defer rp.release();
+        try e.set(ctx.allocator, .{ .string = Value.String.borrowed("realpath") }, .{ .string = rp });
+        try e.set(ctx.allocator, .{ .string = Value.String.borrowed("expires") }, .{ .int = b.expires });
+        const name = try Value.String.create(ctx.allocator, b.path);
+        defer name.release();
+        try result.set(ctx.allocator, .{ .string = name }, .{ .array = e });
+    }
+    return NativeResult.borrowed(.{ .array = result });
 }
 
 fn native_stream_supports_lock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

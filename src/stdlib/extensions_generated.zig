@@ -934,6 +934,8 @@ pub const functions = Map.initComptime(.{
     .{ "readfile", "standard" },
     .{ "readlink", "standard" },
     .{ "realpath", "standard" },
+    .{ "realpath_cache_get", "standard" },
+    .{ "realpath_cache_size", "standard" },
     .{ "register_shutdown_function", "standard" },
     .{ "register_tick_function", "standard" },
     .{ "rename", "standard" },

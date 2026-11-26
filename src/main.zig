@@ -921,6 +921,11 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     }
     try initCliServerVars(vm, allocator);
     try initArgv(vm, allocator, script_path, script_args);
+    // php's cli resolves the script's path, which fills the realpath cache
+    if (!platform.is_windows) {
+        var resolved: [@import("stdlib/realpath_cache.zig").max_path]u8 = undefined;
+        _ = @import("stdlib/realpath_cache.zig").realpath(vm, script_path, &resolved);
+    }
     vm.interpret(result) catch {
         if (vm.exit_requested) {
             const shutdown_failed = try runShutdown(allocator, vm);

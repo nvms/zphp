@@ -100,6 +100,8 @@ const zphp_only = std.StaticStringMap(Signature).initComptime(.{
 // zphp registered when it last ran, has not seen yet
 const php_stub = std.StaticStringMap(Signature).initComptime(.{
     .{ "hebrev", Signature{ .params = &[_]Param{ .{ .name = "string", .type = "string" }, .{ .name = "max_chars_per_line", .default = .{ .int = 0 }, .type = "int" } }, .returns = "string" } },
+    .{ "realpath_cache_get", Signature{ .params = &[_]Param{}, .returns = "array" } },
+    .{ "realpath_cache_size", Signature{ .params = &[_]Param{}, .returns = "int" } },
     .{ "get_meta_tags", Signature{ .params = &[_]Param{ .{ .name = "filename", .type = "string" }, .{ .name = "use_include_path", .default = .{ .bool = false }, .type = "bool" } }, .returns = "array|false" } },
     .{ "ReflectionEnumUnitCase::getEnum", Signature{ .params = &[_]Param{}, .returns = "ReflectionEnum" } },
     .{ "ArrayObject::__debugInfo", Signature{ .params = &[_]Param{}, .tentative_returns = "array" } },
