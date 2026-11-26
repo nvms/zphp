@@ -179,7 +179,31 @@ pub const NativeContext = struct {
         return self.vm.callMethod(obj, method, args);
     }
 
+    // php's ZEND_TRY_ASSIGN_REF_*: the old value is released as the native
+    // writes, so its destructor runs inside the call. an untyped variable
+    // holds null meanwhile (zval_ptr_safe_dtor); a typed reference takes
+    // the new value first
     pub fn setCallerVar(self: *NativeContext, arg_index: usize, arg_count: usize, value: Value) void {
+        const vm = self.vm;
+        const arg = self.byRefArg(arg_index, arg_count) orelse return self.writeCallerVar(arg_index, arg_count, value);
+        const old = self.readByRefArg(arg) orelse return self.writeCallerVar(arg_index, arg_count, value);
+        switch (old) {
+            .object, .array, .generator, .fiber => {},
+            else => return self.writeCallerVar(arg_index, arg_count, value),
+        }
+        const typed = switch (arg.source) {
+            .cell => |c| cellOf(c.value).typed,
+            .simple => |name| if (vm.frames[arg.frame].ref_slots.get(name)) |cell| cellOf(cell).typed else false,
+            .none => false,
+        };
+        if (!typed) self.writeCallerVar(arg_index, arg_count, .null);
+        if (old == .object) if (vm.byref_call) |call| vm.dropByRefArgHolds(call, arg_index, old.object);
+        if (vm.hasPendingReleases()) vm.drainPendingDestruct();
+        self.writeCallerVar(arg_index, arg_count, value);
+        if (typed and vm.hasPendingReleases()) vm.drainPendingDestruct();
+    }
+
+    fn writeCallerVar(self: *NativeContext, arg_index: usize, arg_count: usize, value: Value) void {
         const vm = self.vm;
         if (vm.pending_ref_args) |args| {
             if (arg_index < args.len) args[arg_index] = value;
@@ -205,7 +229,7 @@ pub const NativeContext = struct {
                 }
                 if (caller.ref_slots.get(var_name)) |cell| if (cellOf(cell).typed) {
                     const stored = vm.verifyRefAssignable(cell, value) catch return vm.refuseRefWrite();
-                    if (@intFromEnum(stored) != @intFromEnum(value) or !Value.identical(stored, value)) return self.setCallerVar(arg_index, arg_count, stored);
+                    if (@intFromEnum(stored) != @intFromEnum(value) or !Value.identical(stored, value)) return self.writeCallerVar(arg_index, arg_count, stored);
                 };
                 // the caller's variable is a durable holder: a named local and
                 // its vars entry share one reference, so retain once and drop
@@ -921,6 +945,11 @@ pub const NativeCall = struct {
     caller_frame: usize = 0,
 };
 
+// a native call's argument slots and the holds it took on them: the values
+// it was given (retained) and the ones it runs with (stack-retained, the
+// same slots unless it separated or coerced some)
+pub const ByRefCall = struct { input: []Value, native: []Value };
+
 pub const NativeInvocation = struct {
     args: []const Value,
     // what natives and by-reference bindings key off; null skips them
@@ -1397,6 +1426,9 @@ pub const VM = struct {
     // last used this frame slot
     pending_invoke_args: ?[]const Value = null,
     pending_ref_args: ?[]Value = null,
+    // the arguments of the native call running from user code with
+    // by-reference arguments (invokeNative)
+    byref_call: ?*ByRefCall = null,
     static_vars: std.ArrayListUnmanaged(StaticEntry) = .empty,
     global_vars: std.ArrayListUnmanaged(StaticEntry) = .empty,
     file_loader: ?*const FileLoader = null,
@@ -30682,7 +30714,15 @@ pub const VM = struct {
         // a native call_user_func makes is called by it; a user function it
         // calls resets this for what it calls in turn by adding a frame
         self.forwarding_depth = if (forwarder) self.frame_count else std.math.maxInt(usize);
-        const result = try native.call(ctx, native_args);
+        // a by-reference argument is a reference in php, which the call
+        // doesn't hold: what the native writes there releases the old value
+        // (NativeContext.setCallerVar drops the call's own holds on it)
+        var byref_call: ByRefCall = .{ .input = @constCast(input_args), .native = @constCast(native_args) };
+        const outer_byref_call = self.byref_call;
+        self.byref_call = if (self.native_call == &record and record.ref_sources.len > 0) &byref_call else null;
+        const result_or = native.call(ctx, native_args);
+        self.byref_call = outer_byref_call;
+        const result = try result_or;
         if (!self.headers_sent) self.noteTopLevelOutput() catch |err| {
             self.releaseValue(result.value);
             return err;
@@ -30701,6 +30741,19 @@ pub const VM = struct {
             return self.raisePendingOom();
         }
         return result.value;
+    }
+
+    // the call lets go of a by-reference argument's old value as the native
+    // writes the variable: its slots read null from then on
+    fn dropByRefArgHolds(self: *VM, call: *ByRefCall, i: usize, obj: *PhpObject) void {
+        if (i >= call.input.len or i >= call.native.len) return;
+        const in = call.input[i];
+        const nat = call.native[i];
+        if (in != .object or in.object != obj or nat != .object or nat.object != obj) return;
+        call.native[i] = .null;
+        self.stackRelease(nat);
+        call.input[i] = .null;
+        self.releaseValue(in);
     }
 
     pub fn refuseRefWrite(self: *VM) void {
@@ -34286,6 +34339,7 @@ pub const VM = struct {
         // a drain a destructor suspended in keeps its pass; others run theirs
         draining_destructors: bool,
         pending_ref_args: @FieldType(VM, "pending_ref_args"),
+        byref_call: @FieldType(VM, "byref_call"),
         forwarding_depth: usize,
         finished_frames: usize,
         fiber_switch_blocked: u32,
