@@ -121,8 +121,8 @@ pub fn printInfo(ctx: *NativeContext, flag: i64) RuntimeError!void {
         try out.row(&.{ "Virtual Directory Support", "disabled" });
         try out.row(&.{ "Configuration File (php.ini) Path", "" });
         try out.row(&.{ "Loaded Configuration File", ini_config.loadedFile() orelse "(none)" });
-        try out.row(&.{ "Scan this dir for additional .ini files", "(none)" });
-        try out.row(&.{ "Additional .ini files parsed", "(none)" });
+        try out.row(&.{ "Scan this dir for additional .ini files", ini_config.scannedPath() orelse "(none)" });
+        try out.row(&.{ "Additional .ini files parsed", ini_config.scannedFiles() orelse "(none)" });
         try out.row(&.{ "PHP API", api_version });
         try out.row(&.{ "PHP Extension", api_version });
         try out.row(&.{ "Zend Extension", "4" ++ api_version });

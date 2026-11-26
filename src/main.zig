@@ -156,7 +156,10 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
     if (skip_ini) {
         ini_config.define("display_errors=1");
         ini_config.define("log_errors=0");
-    } else ini_config.discover(ini_path);
+    } else {
+        ini_config.discover(ini_path);
+        ini_config.scanDirectories();
+    }
     for (defines.items) |d| ini_config.define(d);
     if (ini_config.get("short_open_tag")) |v| @import("pipeline/lexer.zig").short_open_tag = ini_config.iniBool(v);
     if (ini_config.get("zend.multibyte")) |v| @import("pipeline/compiler.zig").zend_multibyte = ini_config.iniBool(v);

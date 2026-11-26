@@ -50,6 +50,63 @@ pub fn discover(explicit: ?[]const u8) void {
     load("php.ini", false);
 }
 
+var scanned_path: ?[]const u8 = null;
+var scanned_files: ?[]const u8 = null;
+
+// php_ini_scanned_path: the PHP_INI_SCAN_DIR that was scanned
+pub fn scannedPath() ?[]const u8 {
+    return scanned_path;
+}
+
+// php_ini_scanned_files: each parsed file, ",\n"-separated, "\n" after the last
+pub fn scannedFiles() ?[]const u8 {
+    return scanned_files;
+}
+
+// php_init_config after the php.ini: every *.ini file in the directories
+// PHP_INI_SCAN_DIR lists (':'-separated, ';' on windows), each directory's
+// in name order. zphp is built without a default scan directory, so an
+// empty entry or an unset variable scans nothing
+pub fn scanDirectories() void {
+    const list = platform.getenv("PHP_INI_SCAN_DIR") orelse return;
+    if (list.len == 0) return;
+    scanned_path = persistent().dupe(u8, list) catch fail("out of memory", .{});
+    const separator: u8 = if (platform.is_windows) ';' else ':';
+    var files: std.ArrayListUnmanaged(u8) = .empty;
+    var dirs = std.mem.splitScalar(u8, list, separator);
+    while (dirs.next()) |dir_path| {
+        if (dir_path.len == 0) continue;
+        var dir = std.Io.Dir.cwd().openDir(platform.io, dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close(platform.io);
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        var it = dir.iterate();
+        while (it.next(platform.io) catch null) |entry| {
+            const dot = std.mem.lastIndexOfScalar(u8, entry.name, '.') orelse continue;
+            if (!std.mem.eql(u8, entry.name[dot..], ".ini")) continue;
+            names.append(persistent(), persistent().dupe(u8, entry.name) catch fail("out of memory", .{})) catch fail("out of memory", .{});
+        }
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+        const slash = dir_path[dir_path.len - 1] == '/' or (platform.is_windows and dir_path[dir_path.len - 1] == '\\');
+        for (names.items) |name| {
+            const sep: []const u8 = if (slash) "" else if (platform.is_windows) "\\" else "/";
+            const full = std.mem.concat(persistent(), u8, &.{ dir_path, sep, name }) catch fail("out of memory", .{});
+            const st = std.Io.Dir.cwd().statFile(platform.io, full, .{}) catch continue;
+            if (st.kind != .file) continue;
+            const bytes = std.Io.Dir.cwd().readFileAlloc(platform.io, full, persistent(), .limited(16 << 20)) catch continue;
+            parse(bytes, full);
+            if (files.items.len > 0) files.appendSlice(persistent(), ",\n") catch fail("out of memory", .{});
+            files.appendSlice(persistent(), full) catch fail("out of memory", .{});
+        }
+    }
+    if (files.items.len == 0) return;
+    files.append(persistent(), '\n') catch fail("out of memory", .{});
+    scanned_files = files.items;
+}
+
 pub fn load(path: []const u8, required: bool) void {
     const bytes = std.Io.Dir.cwd().readFileAlloc(platform.io, path, persistent(), .limited(16 << 20)) catch |err| {
         if (required) fail("ini file '{s}': {s}", .{ path, @errorName(err) });

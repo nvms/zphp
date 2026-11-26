@@ -819,9 +819,9 @@ fn native_php_ini_loaded_file(ctx: *NativeContext, _: []const Value) RuntimeErro
     return NativeResult.copyString(ctx.allocator, path);
 }
 
-fn native_php_ini_scanned_files(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    // PHP returns false when no additional ini directory was scanned
-    return NativeResult.scalar(.{ .bool = false });
+fn native_php_ini_scanned_files(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const files = @import("../ini_config.zig").scannedFiles() orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, files);
 }
 
 // php's dl() checks, before it would load anything: zphp loads extensions
