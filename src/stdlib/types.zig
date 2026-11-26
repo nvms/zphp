@@ -1206,6 +1206,15 @@ fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) Runtime
         const cells = try ctx.allocator.alloc(?*Value, items.len);
         defer ctx.allocator.free(cells);
         for (items, 0..) |e, i| cells[i] = e.ref;
+        // a __call or __callStatic trampoline receives the references
+        // themselves in its argument array
+        const callee = try ctx.vm.callbackCallee(args[0]);
+        if (callee == .magic) {
+            const outer = ctx.vm.native_caller;
+            ctx.vm.native_caller = .{ .name = ctx.call_name, .frames = ctx.vm.frame_count };
+            defer ctx.vm.native_caller = outer;
+            return NativeResult.share(try @import("../runtime/callables.zig").invokeMagicWithRefs(ctx.vm, callee.magic, values[0..items.len], cells));
+        }
         const result = try ctx.invokeCallableRefMask(args[0], values[0..items.len], is_ref[0..items.len]);
         for (cells, 0..) |maybe, i| if (maybe) |cell| try ctx.vm.writeReference(cell, values[i]);
         return NativeResult.share(result);

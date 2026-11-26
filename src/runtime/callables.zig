@@ -465,6 +465,24 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
     }
 }
 
+// a __call or __callStatic trampoline given arguments some of which are
+// references: zend_call_function keeps them references for a trampoline,
+// so the array the magic method receives holds them
+pub fn invokeMagicWithRefs(vm: *VM, m: anytype, args: []const Value, cells: []const ?*Value) RuntimeError!Value {
+    const packed_args = try vm.allocArray();
+    for (args, cells, 0..) |arg, maybe, i| {
+        if (maybe) |cell| {
+            vm.array_ref_active = true;
+            const key: PhpArray.Key = .{ .int = @intCast(i) };
+            try vm.arrayAddEntry(packed_args, key, .{ .key = key, .value = cell.* }, cell);
+        } else try packed_args.append(vm.allocator, arg);
+    }
+    const magic_args = [_]Value{ .{ .string = try vm.transientBytes(trampolineName(m.name)) }, .{ .array = packed_args } };
+    if (m.object) |obj| return vm.callTrampoline(obj, &magic_args);
+    const registered = try vm.resolveMethod(m.class, "__callStatic");
+    return vm.callByNameAs(registered, &magic_args, m.called orelse m.class);
+}
+
 // zend_get_call_trampoline_func: the method name __call and __callStatic
 // receive ends at its first NUL
 fn trampolineName(name: []const u8) []const u8 {
