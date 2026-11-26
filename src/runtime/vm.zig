@@ -4707,6 +4707,22 @@ pub const VM = struct {
     }
 
     // PHP guarantees every object still alive at request end has its
+    // the script's error has been reported: zend_exception_error releases the
+    // uncaught throwable before the shutdown functions run, and a fatal
+    // error's bailout is over, so they catch what they throw. the objects
+    // alive at a fatal error stay without their destructors
+    // (zend_objects_store_mark_destructed in php_error_cb)
+    pub fn settleReportedError(self: *VM) void {
+        if (self.uncatchable_fatal) {
+            for (self.objects.items) |o| if (!o.pooled) {
+                o.destructor_called = true;
+            };
+        }
+        self.discardPending();
+        self.uncatchable_fatal = false;
+        self.drainPendingDestruct();
+    }
+
     // __destruct run during shutdown. refcounting fires most destructors at
     // the right time during the run; this sweep catches whatever is still
     // live (globals, refcount-inflated leftovers). walk newest-first; mark
