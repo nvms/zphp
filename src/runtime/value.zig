@@ -1597,15 +1597,18 @@ pub const PhpObject = struct {
     pub fn setForScope(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value, scope: ?[]const u8) !void {
         if (self.storage() != self) return self.storage().setForScope(allocator, name, value, scope);
         retainStored(value);
-        self.clearUnset(allocator, name);
         if (self.slots) |s| {
             if (self.getSlotIndexForScope(name, scope)) |idx| {
+                self.clearUnset(allocator, name);
                 const old = s[idx];
                 s[idx] = value;
                 releaseReplaced(old);
                 return;
             }
         }
+        // a dynamic property of the same name as an ancestor's private slot
+        // the scope can't see leaves that slot unset
+        if (self.slots == null or self.getSlotIndex(name) == null) self.clearUnset(allocator, name);
         try self.putProperty(allocator, name, value);
     }
 };
