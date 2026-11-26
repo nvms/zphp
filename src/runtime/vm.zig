@@ -633,6 +633,11 @@ pub const ClassDef = struct {
     is_internal: bool = true,
     // its hidden initializer still has to install some instance defaults
     defaults_pending: bool = false,
+    // how many runs of that initializer are in progress: an instantiation
+    // during one (from an autoloader or a __toString the expression calls)
+    // evaluates the defaults again, as zend_update_class_constants does
+    // until the class is marked updated
+    defaults_running: u8 = 0,
     // constants whose expression waits for first access hold `.undef`
     lazy_constants: bool = false,
     // a user backed enum whose case values are checked (backing type,
@@ -15592,8 +15597,12 @@ pub const VM = struct {
                                     self.releaseValue(val);
                                     return err;
                                 };
+                                // a run of the defaults again (an instantiation
+                                // during the first one) replaces what it set
+                                const old = p.default;
                                 p.default = val;
                                 p.has_default = true;
+                                self.releaseValue(old);
                                 try self.settleTraitPropertyChecks(class_name, prop_name, val);
                                 break;
                             }
@@ -29022,8 +29031,8 @@ pub const VM = struct {
         if (self.lazy_constant_classes > 0) try self.updateClassConstants(class_name);
         const cls = self.classes.get(class_name) orelse return;
         if (cls.slot_layout) |layout| {
-            if (!layout.defaults_ready) try self.resolveClassDefaults(class_name);
-        } else if (cls.defaults_pending) try self.resolveClassDefaults(class_name);
+            if (!layout.defaults_ready) try self.resolveClassDefaultsAs(class_name, true);
+        } else if (cls.defaults_pending) try self.resolveClassDefaultsAs(class_name, true);
     }
 
     pub fn initObjectProperties(self: *VM, obj: *PhpObject, class_name: []const u8) RuntimeError!void {
@@ -29036,7 +29045,7 @@ pub const VM = struct {
         if (self.lazy_constant_classes > 0) try self.updateClassConstants(class_name);
         const cls = self.classes.get(class_name) orelse return false;
         if (cls.slot_layout) |layout| {
-            if (!layout.defaults_ready) try self.resolveClassDefaults(class_name);
+            if (!layout.defaults_ready) try self.resolveClassDefaultsAs(class_name, true);
             const slots = self.allocator.alloc(Value, layout.names.len) catch return error.RuntimeError;
             for (layout.defaults, 0..) |def_val, i| {
                 slots[i] = try self.copyDefault(def_val);
@@ -29048,7 +29057,7 @@ pub const VM = struct {
         }
         // fallback for classes without slot layout. their static defaults
         // are evaluated all the same (zend_update_class_constants)
-        if (cls.defaults_pending) try self.resolveClassDefaults(class_name);
+        if (cls.defaults_pending) try self.resolveClassDefaultsAs(class_name, true);
         if (cls.parent) |parent| _ = try self.initPropertyDefaults(obj, parent);
         for (cls.properties.items) |prop| {
             // a virtual property has no storage (with any backed property
@@ -29089,19 +29098,26 @@ pub const VM = struct {
     // initializers root first, then copies the resolved inherited defaults
     // into this class's layout
     pub fn resolveClassDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
+        return self.resolveClassDefaultsAs(class_name, false);
+    }
+
+    // instantiating: an object is made while the defaults are being
+    // evaluated, which evaluates them again; any other use (a static read
+    // inside the evaluation itself) takes them as they stand
+    fn resolveClassDefaultsAs(self: *VM, class_name: []const u8, instantiating: bool) RuntimeError!void {
         try self.updateClassConstants(class_name);
         const cls = self.classes.getPtr(class_name) orelse return;
         const layout = cls.slot_layout;
-        if (layout) |l| {
-            if (l.defaults_ready) return;
-            l.defaults_ready = true;
-        }
-        errdefer if (layout) |l| {
-            l.defaults_ready = false;
-        };
-        if (cls.parent) |parent| try self.resolveClassDefaults(parent);
+        if (layout) |l| if (l.defaults_ready) return;
+        if (cls.defaults_running > 0 and !instantiating) return;
+        const parent = cls.parent;
+        if (parent) |p| try self.resolveClassDefaultsAs(p, instantiating);
         try self.runDeferredDefaults(class_name);
-        if (layout) |l| self.inheritLayoutDefaults(class_name, l);
+        const l = layout orelse return;
+        self.inheritLayoutDefaults(class_name, l);
+        // the defaults are ready once every run in progress has finished
+        const after = self.classes.getPtr(class_name) orelse return;
+        if (after.defaults_running == 0) l.defaults_ready = true;
     }
 
     fn traitDefaultName(v: Value) ?[]const u8 {
@@ -29200,9 +29216,15 @@ pub const VM = struct {
 
     fn runDeferredDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
         const cls = self.classes.getPtr(class_name) orelse return;
-        if (!cls.defaults_pending) return;
-        cls.defaults_pending = false;
-        self.ic.?.pending_defaults -= 1;
+        if (!cls.defaults_pending and cls.defaults_running == 0) return;
+        if (cls.defaults_pending) {
+            cls.defaults_pending = false;
+            self.ic.?.pending_defaults -= 1;
+        }
+        cls.defaults_running += 1;
+        defer if (self.classes.getPtr(class_name)) |c| {
+            c.defaults_running -= 1;
+        };
         const name = try bytecode.propDefaultsInitializerName(self.allocator, class_name);
         defer self.allocator.free(name);
         const floor = self.handler_floor;
