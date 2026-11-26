@@ -18849,7 +18849,11 @@ pub const VM = struct {
     fn refuseRedeclaration(self: *VM, name: []const u8) RuntimeError!void {
         const msg = try self.redeclarationMessage(name) orelse return;
         defer self.allocator.free(msg);
-        return self.raiseFatal(msg);
+        // zend_class_redeclaration_error(E_COMPILE_ERROR), wherever the
+        // class is bound
+        try self.setPendingException("CompileError", msg);
+        self.uncatchable_fatal = true;
+        return error.RuntimeError;
     }
 
     // `global $name`: the variable becomes a reference to the global of that
