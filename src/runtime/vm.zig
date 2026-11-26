@@ -13657,7 +13657,10 @@ pub const VM = struct {
                         if (if (op == .set_prop) self.ic else null) |ic| {
                             const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                             const sp_entry = &ic.prop[sp_idx];
-                            if (sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(self.currentChunk()) and sp_entry.slot_index != 0xFFFF and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
+                            // an unset property goes to __set again (or
+                            // ArrayObject's storage) whatever the cache says
+                            const sp_magic = obj.unset_slots.count() != 0 and obj.isUnset(prop_name) and self.magicApplies(obj, prop_name, .set);
+                            if (!sp_magic and sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(self.currentChunk()) and sp_entry.slot_index != 0xFFFF and sp_entry.class_ptr == @intFromPtr(obj.class_name.ptr)) {
                                 if (obj.slots) |s| {
                                     // typed property: enforce/coerce before the
                                     // slot write (IC stores the declared type)

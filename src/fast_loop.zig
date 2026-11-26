@@ -1159,8 +1159,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         };
                         if (sp_typed_ok and sp_entry.key == sp_ip and sp_entry.chunk_key == @intFromPtr(frame.chunk) and sp_entry.class_ptr == @intFromPtr(sp_obj.class_name.ptr) and sp_entry.slot_index != 0xFFFF) {
                             if (sp_obj.slots) |s| {
-                                // every bail comes before the copy takes its reference
-                                if (self.obj_ref_active) {
+                                // every bail comes before the copy takes its reference.
+                                // a write to an unset property may go to __set
+                                if (self.obj_ref_active or sp_obj.unset_slots.count() != 0) {
                                     frame.ip = ip - op_bytes - 2;
                                     self.sp = sp;
                                     return;
