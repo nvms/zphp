@@ -16821,7 +16821,7 @@ pub const VM = struct {
     // what a trace shows as a frame's arguments: the ones the call passed, as
     // the parameters hold them now, a variadic parameter spread out, and
     // arguments past the declared ones as they were passed
-    fn appendPassedArgs(self: *VM, args: *PhpArray, frame_idx: usize, f: *const ObjFunction) !void {
+    pub fn appendPassedArgs(self: *VM, args: *PhpArray, frame_idx: usize, f: *const ObjFunction) !void {
         const frame = &self.frames[frame_idx];
         const declared = if (f.is_variadic) f.params.len - 1 else f.params.len;
         const passed: ?usize = if (self.ic) |ic| (if (ic.arg_counts[frame_idx] == unknown_arg_count) null else ic.arg_counts[frame_idx]) else null;

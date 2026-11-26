@@ -1151,6 +1151,10 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
                 const declared = if (func.is_variadic) func.params.len - 1 else func.params.len;
                 const sensitive = try vm.sensitiveParamMask(func);
                 for (func.params[0..declared], 0..) |pname, a| try args_arr.append(alloc, try vm.traceArgValue(@TypeOf(vm.*).frameParamValue(frame, func, pname), sensitive, a));
+            } else if (frame.func) |func| {
+                // zend_fetch_debug_backtrace reads the parameters as they
+                // are now, as an exception's trace does
+                try vm.appendPassedArgs(args_arr, i, func);
             } else if (vm.ic) |ic| {
                 const ac = ic.arg_counts[i];
                 if (ac != 0xFF) {
