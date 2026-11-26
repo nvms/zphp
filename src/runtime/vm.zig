@@ -21769,15 +21769,20 @@ pub const VM = struct {
         try self.linking.append(self.allocator, .{ .name = class_name, .def = &def });
         const linking_index = self.linking.items.len - 1;
         defer self.linking.shrinkRetainingCapacity(linking_index);
+        // the interfaces the class lists are its own before any loads
+        // (ce->interface_names): a variance check the loading runs sees them
+        const iface_count = self.readByte();
+        for (0..iface_count) |_| {
+            const iname_idx = self.readU16();
+            try def.interfaces.append(self.allocator, self.declaredClassName(self.currentChunk().constants.items[iname_idx].string.bytes()));
+        }
         // the parent loads before the interfaces; one it can't find is
         // reported once the class is past its own checks
         if (def.parent) |parent_name| if (!self.classes.contains(parent_name) and self.linkingClass(parent_name) == null) {
             self.tryAutoload(parent_name) catch |err| return self.unrecoverableLoadFailure(linking_index, err);
         };
-        const iface_count = self.readByte();
-        for (0..iface_count) |_| {
-            const iname_idx = self.readU16();
-            var iface = self.declaredClassName(self.currentChunk().constants.items[iname_idx].string.bytes());
+        for (def.interfaces.items) |*listed| {
+            var iface = listed.*;
             // zend_do_link_class loads every interface a class lists
             if (!self.interfaces.contains(iface) and !self.traits.contains(iface) and !self.classes.contains(iface) and self.linkingClass(iface) == null and !std.ascii.eqlIgnoreCase(iface, class_name)) {
                 try self.tryAutoload(iface);
@@ -21793,7 +21798,7 @@ pub const VM = struct {
             if (!self.interfaces.contains(iface) and (self.traits.contains(iface) or self.classes.contains(iface))) {
                 return self.traitRuleFatal("{s} cannot implement {s} - it is not an interface", .{ class_name, iface });
             }
-            try def.interfaces.append(self.allocator, iface);
+            listed.* = iface;
         }
         try self.checkDeclaredInterfaces(&def, class_name);
         try self.checkInterfacesImplemented(&def, class_name);
