@@ -1221,6 +1221,9 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
     }
 
     // natives the main script's code called
+    // a fiber's own natives below its first frame (the gc's
+    // gc_destructor_fiber) are still its frames
+    if (vm.trace_floor > 0 and i + 1 == vm.trace_floor) try appendNativeEntries(vm, result, natives[0..native_count], &next_native, i, ignore_args, provide_object, limit);
     if (i == 0 and vm.trace_floor == 0) try appendNativeEntries(vm, result, natives[0..native_count], &next_native, 0, ignore_args, provide_object, limit);
     return result;
 }

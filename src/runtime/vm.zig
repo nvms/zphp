@@ -16986,7 +16986,16 @@ pub const VM = struct {
                 }
             };
             try self.tryAppendRequireFrame(arr, i);
-            if (i == 0 or i <= self.trace_floor) break;
+            if (i == 0) break;
+            if (i <= self.trace_floor) {
+                // a fiber's own natives below its first frame (the gc's
+                // gc_destructor_fiber) are still its frames
+                while (next_native < native_count and natives[next_native].depth == i) : (next_native += 1) {
+                    if (natives[next_native].label.len == 0) continue;
+                    try arr.append(self.allocator, .{ .array = try self.nativeTraceEntry(natives[next_native], null, true) });
+                }
+                break;
+            }
         }
         return arr;
     }
@@ -34127,10 +34136,17 @@ pub const VM = struct {
         defer self.settleDrainException(in_flight);
         fiber.destroyed = true;
         // the engine resumes it: its frames read as called from an internal
-        // function
+        // function. a suspend left its bottom frame without a caller
+        // (stack_bottom->prev_execute_data = NULL) and zend_fiber_object_destroy
+        // doesn't set one, so its traces end with its own frames
         var engine = self.engineCall();
+        engine.outer = null;
+        const outer_call = self.native_call;
         self.native_call = &engine;
-        defer self.native_call = engine.outer;
+        defer self.native_call = outer_call;
+        const prev_floor = self.trace_floor;
+        if (fiber.native) |p| self.trace_floor = @as(*FiberNative, @ptrCast(@alignCast(p))).base.frame;
+        defer self.trace_floor = prev_floor;
         _ = self.resumeFiber(fiber, .{ .object = marker }, true) catch {};
         if (self.pending_exception) |ex| if (self.isUnwindMarker(ex)) {
             self.discardPending();
