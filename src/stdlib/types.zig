@@ -2848,7 +2848,8 @@ fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("collected") }, .{ .int = @intCast(ctx.vm.gc_collected) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("threshold") }, .{ .int = @intCast(ctx.vm.gc_threshold) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("buffer_size") }, .{ .int = 16384 });
-    const roots = ctx.vm.cycle_candidates.items.len + ctx.vm.cycle_array_candidates.items.len;
+    // generators and fibers are objects to php
+    const roots = ctx.vm.cycle_candidates.items.len + ctx.vm.cycle_array_candidates.items.len + ctx.vm.cycle_gen_candidates.items.len + ctx.vm.cycle_fiber_candidates.items.len;
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("roots") }, .{ .int = @intCast(roots) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("application_time") }, .{ .float = 0 });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("collector_time") }, .{ .float = 0 });

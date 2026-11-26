@@ -149,6 +149,9 @@ pub const PhpArray = struct {
     // a serve reset keeps it and whatever request data it would hold
     builtin: bool = false,
     cycle_queued: bool = false,
+    // its place in the collector's root buffer (VM.gcTakeSlot), 0 when not
+    // queued: php's GC_ADDRESS, which orders the garbage's destructors
+    gc_slot: u32 = 0,
     release_queued: bool = false,
     // a weak container (WeakMap key list): its entries hold no reference to
     // the objects they name, so freeing it releases nothing and the cycle
@@ -1061,6 +1064,9 @@ pub const Generator = struct {
     delegate_pending: bool = false,
     // in the collector's candidate list
     cycle_queued: bool = false,
+    // its place in the collector's root buffer (VM.gcTakeSlot), 0 when not
+    // queued: php's GC_ADDRESS, which orders the garbage's destructors
+    gc_slot: u32 = 0,
     // php's ZEND_GENERATOR_FORCED_CLOSE: destroyed while suspended, it runs
     // its finally blocks and may not yield again
     forced_close: bool = false,
@@ -1148,6 +1154,9 @@ pub const Fiber = struct {
     destroyed: bool = false,
     // in the collector's candidate list
     cycle_queued: bool = false,
+    // its place in the collector's root buffer (VM.gcTakeSlot), 0 when not
+    // queued: php's GC_ADDRESS, which orders the garbage's destructors
+    gc_slot: u32 = 0,
     // its own error_reporting while it is suspended (php's fiber vm state),
     // and the levels its open @ regions will restore
     saved_level: ?i64 = null,
@@ -1316,6 +1325,9 @@ pub const PhpObject = struct {
     // allocated before a serve worker's first request (see PhpArray.builtin)
     builtin: bool = false,
     cycle_queued: bool = false,
+    // its place in the collector's root buffer (VM.gcTakeSlot), 0 when not
+    // queued: php's GC_ADDRESS, which orders the garbage's destructors
+    gc_slot: u32 = 0,
     // a reference cell has targeted one of this object's properties; the
     // release path must detach those weak mirrors before the address is reused
     ref_mirrored: bool = false,

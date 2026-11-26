@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 zig build fast-loop-object >/dev/null
 obj=zig-out/fast_loop.o
 
-allowed='^(InlineCache\.(intentIndex|methodIndex|propIndex)|arrayRelease|arrayRetain|arrayUnpin|bindCell|clearArgStackFromSlow|countCellMap|currentFrame|dropDeferredRoot|dropN|extendTemporaryString|fiberRelease|fiberRetain|freeLocals|gcRecordZeroSite|gcVerifyDeadCell|genRelease|genRetain|getCaptureRange|objRelease|objRetain|queueArrayRelease|queueStringRelease|releaseArgSource|releaseClosureByName|markArgsUnsaved|restoreFrameArgsSp|retainArgSource|saveFrameArgs|setArgSource|setEntryRef|stringAllocator|unbindCell)$'
+allowed='^(InlineCache\.(intentIndex|methodIndex|propIndex)|arrayRelease|arrayRetain|arrayUnpin|bindCell|clearArgStackFromSlow|countCellMap|currentFrame|dropDeferredRoot|dropN|extendTemporaryString|fiberRelease|fiberRetain|freeLocals|gcFreeSlot|gcRecordZeroSite|gcTakeSlot|gcVerifyDeadCell|genRelease|genRetain|getCaptureRange|objRelease|objRetain|queueArrayRelease|queueStringRelease|releaseArgSource|releaseClosureByName|markArgsUnsaved|restoreFrameArgsSp|retainArgSource|saveFrameArgs|setArgSource|setEntryRef|stringAllocator|unbindCell)$'
 
 unexpected=$(nm "$obj" | awk '$2 ~ /^[tT]$/ {print $3}' | sed -n 's/^_\{0,1\}runtime\.vm\.VM\.//p' | grep -Ev "$allowed" || true)
 stdlib=$(nm "$obj" | awk '$2 ~ /^[tT]$/ {print $3}' | grep -E '^_?stdlib\.' || true)

@@ -950,6 +950,56 @@ pub const NativeCall = struct {
 // same slots unless it separated or coerced some)
 const pcntl_async_pending = &@import("../stdlib/pcntl.zig").async_pending;
 
+// a destructor call of a collection, keyed by its place in the buffer
+pub const GcDtorEntry = struct {
+    key: u64,
+    item: GcDtorItem,
+
+    fn lessThan(_: void, a: GcDtorEntry, b: GcDtorEntry) bool {
+        return a.key < b.key;
+    }
+};
+
+// what the collector buffers as a possible root, and the garbage whose
+// destructor (dtor_obj) it calls
+pub const GcRoot = union(enum) {
+    object: *PhpObject,
+    array: *PhpArray,
+    generator: *Generator,
+    fiber: *Fiber,
+
+    pub fn slot(r: GcRoot) *u32 {
+        return switch (r) {
+            inline else => |p| &p.gc_slot,
+        };
+    }
+
+    pub fn value(r: GcRoot) Value {
+        return switch (r) {
+            .object => |o| .{ .object = o },
+            .array => |a| .{ .array = a },
+            .generator => |g| .{ .generator = g },
+            .fiber => |f| .{ .fiber = f },
+        };
+    }
+
+    fn lessThan(_: void, a: GcRoot, b: GcRoot) bool {
+        return a.slot().* < b.slot().*;
+    }
+};
+
+pub const GcDtorItem = union(enum) {
+    object: *PhpObject,
+    generator: *Generator,
+    fiber: *Fiber,
+
+    pub fn slot(r: GcDtorItem) *u32 {
+        return switch (r) {
+            inline else => |p| &p.gc_slot,
+        };
+    }
+};
+
 pub const ByRefCall = struct { input: []Value, native: []Value };
 
 pub const NativeInvocation = struct {
@@ -1184,6 +1234,16 @@ pub const VM = struct {
     // cycle collector candidate roots whose refcount decremented without
     // hitting 0. arrays need their own roots so pure array cycles are visible
     cycle_candidates: std.ArrayListUnmanaged(*PhpObject) = .empty,
+    // php's root buffer, simulated for the order it gives the garbage's
+    // destructors: every queued candidate holds a slot (gc_slot); slots
+    // freed by values leaving the buffer are reused last in first out
+    // (GC_G(unused)), and a collection compacts them (gc_compact)
+    gc_slot_next: u32 = 1,
+    gc_slot_unused: std.ArrayListUnmanaged(u32) = .empty,
+    // what a collection's walk reached that may need a destructor call, in
+    // the order it was reached
+    cycle_dtor_order: std.ArrayListUnmanaged(GcDtorItem) = .empty,
+    cycle_record_order: bool = false,
     cycle_array_candidates: std.ArrayListUnmanaged(*PhpArray) = .empty,
     // arrays an internal function returned while dropping a reference of its
     // own (unserialize's table), each held by one counted reference that
@@ -1857,11 +1917,13 @@ pub const VM = struct {
                 .array => |arr| if (!arr.elements_released and !arr.cycle_queued) {
                     self.cycle_array_candidates.append(self.allocator, arr) catch return;
                     arr.cycle_queued = true;
+                    arr.gc_slot = self.gcTakeSlot();
                     self.noteRootAdded(.array);
                 },
                 .object => |obj| if (!obj.destructed and !obj.cycle_queued) {
                     self.cycle_candidates.append(self.allocator, obj) catch return;
                     obj.cycle_queued = true;
+                    obj.gc_slot = self.gcTakeSlot();
                     self.noteRootAdded(.object);
                 },
                 else => {},
@@ -4178,6 +4240,8 @@ pub const VM = struct {
         for (self.trait_method_stale.items) |copy| self.allocator.destroy(copy);
         self.trait_method_stale.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
+        self.gc_slot_unused.deinit(self.allocator);
+        self.cycle_dtor_order.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
         self.deferred_roots.deinit(self.allocator);
         self.cycle_gen_candidates.deinit(self.allocator);
@@ -4419,6 +4483,7 @@ pub const VM = struct {
         // dropped without reading them
         self.cycle_gen_candidates.clearRetainingCapacity();
         self.cycle_fiber_candidates.clearRetainingCapacity();
+        self.forgetGcSlots();
         self.captures.clearRetainingCapacity();
         self.capture_index.clearRetainingCapacity();
         self.interned_names.clearRetainingCapacity();
@@ -4675,11 +4740,86 @@ pub const VM = struct {
         if (self.memory) |account| if (account.refused != null and !account.reporting and !self.exit_requested) return self.reportMemoryExhausted(error.OutOfMemory);
     }
 
+    pub fn gcTakeSlot(self: *VM) u32 {
+        if (self.gc_slot_unused.pop()) |slot| return slot;
+        const slot = self.gc_slot_next;
+        self.gc_slot_next += 1;
+        return slot;
+    }
+
+    pub fn gcFreeSlot(self: *VM, slot: *u32) void {
+        if (slot.* == 0) return;
+        if (self.gc_slot_unused.items.len < self.gc_slot_unused.capacity) {
+            self.gc_slot_unused.appendAssumeCapacity(slot.*);
+        } else self.gc_slot_unused.append(self.allocator, slot.*) catch {};
+        slot.* = 0;
+    }
+
+    // php's gc_compact: the roots past the count fill the holes before it,
+    // the last one into the first hole. what a reset left doubled is put in
+    // order instead
+    fn gcCompactSlots(self: *VM, roots: []GcRoot) void {
+        const n: u32 = @intCast(roots.len);
+        self.gc_slot_unused.clearRetainingCapacity();
+        self.gc_slot_next = n + 1;
+        if (n == 0) return;
+        std.mem.sort(GcRoot, roots, {}, GcRoot.lessThan);
+        var doubled = false;
+        for (roots[1..], 0..) |r, i| {
+            if (r.slot().* == roots[i].slot().*) doubled = true;
+        }
+        if (doubled) {
+            for (roots, 1..) |r, i| r.slot().* = @intCast(i);
+            return;
+        }
+        // the roots past n, last first, into the holes below it, in order
+        var b: usize = 0;
+        while (b < roots.len and roots[b].slot().* <= n) b += 1;
+        var p: usize = 0;
+        var hole: u32 = 1;
+        var m: usize = roots.len;
+        while (m > b) {
+            while (p < b and roots[p].slot().* == hole) {
+                p += 1;
+                hole += 1;
+            }
+            m -= 1;
+            roots[m].slot().* = hole;
+            hole += 1;
+        }
+    }
+
+    // the compaction that ends a run, over every candidate the buffer holds
+    fn gcCompactQueued(self: *VM) void {
+        var roots: std.ArrayListUnmanaged(GcRoot) = .empty;
+        defer roots.deinit(self.allocator);
+        for (self.cycle_candidates.items) |c| if (c.gc_slot != 0) roots.append(self.allocator, .{ .object = c }) catch {};
+        for (self.cycle_array_candidates.items) |c| if (c.gc_slot != 0) roots.append(self.allocator, .{ .array = c }) catch {};
+        for (self.cycle_gen_candidates.items) |g| if (g.gc_slot != 0) roots.append(self.allocator, .{ .generator = g }) catch {};
+        for (self.cycle_fiber_candidates.items) |f| if (f.gc_slot != 0) roots.append(self.allocator, .{ .fiber = f }) catch {};
+        self.gcCompactSlots(roots.items);
+    }
+
+    fn gcRootIsGarbage(self: *VM, r: GcRoot) bool {
+        return switch (r) {
+            .object => |o| o.scratch_rc == 0 and !o.destructed,
+            .array => |a| a.scratch_rc == 0 and !a.elements_released,
+            .generator => |g| if (self.cycle_gens.get(g)) |scratch| scratch == 0 else false,
+            .fiber => |f| if (self.cycle_fibers.get(f)) |scratch| scratch == 0 else false,
+        };
+    }
+
+    fn forgetGcSlots(self: *VM) void {
+        self.gc_slot_next = 1;
+        self.gc_slot_unused.clearRetainingCapacity();
+    }
+
     fn forgetCycleCandidates(self: *VM) void {
         for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
         self.cycle_array_candidates.clearRetainingCapacity();
         for (self.cycle_candidates.items) |obj| obj.cycle_queued = false;
         self.cycle_candidates.clearRetainingCapacity();
+        self.forgetGcSlots();
     }
 
     fn noteMemoryRefused(owner: *anyopaque) void {
@@ -5627,12 +5767,17 @@ pub const VM = struct {
         // fastLoop may bail in a descendant, not just the constructor frame.
         if (self.frame_count > base_frame) try self.runUntilFrame(base_frame);
         _ = self.pop(); // only a normally returned constructor has a result
-        // php's constructor call lets go of the object with OBJ_RELEASE as
-        // it returns, which makes it a possible root. the new expression
-        // takes its reference next, so it is counted by the next collection
+        self.noteConstructorReleased(obj);
+    }
+
+    // php's constructor call lets go of the object with OBJ_RELEASE as it
+    // returns, which makes it a possible root. the new expression takes its
+    // reference next, so it is counted by the next collection
+    fn noteConstructorReleased(self: *VM, obj: *PhpObject) void {
         if (!obj.destructed and !obj.cycle_queued) {
             self.cycle_candidates.append(self.allocator, obj) catch return;
             obj.cycle_queued = true;
+            obj.gc_slot = self.gcTakeSlot();
             self.noteRootAdded(.object);
         }
     }
@@ -12891,6 +13036,14 @@ pub const VM = struct {
                             },
                             else => {},
                         }
+                        // the constructor call lets go of it as it returns,
+                        // which makes it a possible root (as for any object)
+                        fiber.cycle_queued = true;
+                        fiber.gc_slot = self.gcTakeSlot();
+                        self.cycle_fiber_candidates.append(self.allocator, fiber) catch {
+                            fiber.cycle_queued = false;
+                            fiber.gc_slot = 0;
+                        };
                         self.push(.{ .fiber = fiber });
                         continue;
                     }
@@ -13032,6 +13185,7 @@ pub const VM = struct {
                             }
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
+                            self.noteConstructorReleased(obj);
                         } else if (self.functions.get(cn)) |func| {
                             if (try self.checkParamTypes(cn, arg_count)) continue;
                             if (ac < func.required_params) {
@@ -13283,6 +13437,7 @@ pub const VM = struct {
                             }
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
+                            self.noteConstructorReleased(obj);
                         } else if (self.functions.get(cn)) |func| {
                             if (try self.checkParamTypes(cn, arg_count)) continue;
                             var new_vars = self.acquireFrameVars();
@@ -30551,7 +30706,7 @@ pub const VM = struct {
         // the arguments live until the call returns, as on php's call stack,
         // even when the native runs php code that frees what it can
         for (input_args) |arg| retainValue(arg);
-        defer for (input_args) |arg| self.releaseValue(arg);
+        defer for (input_args) |arg| self.releaseCallArg(arg);
         const name = call.name;
         // the call is on the native stack while it runs, so a trace made
         // inside it shows it and user code it calls back is called by an
@@ -35639,6 +35794,7 @@ pub const VM = struct {
             if (!obj.destructed and !obj.cycle_queued) {
                 self.cycle_candidates.append(self.allocator, obj) catch return;
                 obj.cycle_queued = true;
+                obj.gc_slot = self.gcTakeSlot();
                 self.noteRootAdded(.object);
             }
             return;
@@ -35832,6 +35988,7 @@ pub const VM = struct {
                 if (!obj.cycle_queued) {
                     self.cycle_candidates.append(self.allocator, obj) catch {};
                     obj.cycle_queued = true;
+                    obj.gc_slot = self.gcTakeSlot();
                 }
             }
             return;
@@ -35982,6 +36139,7 @@ pub const VM = struct {
                             break;
                         }
                     }
+                    self.gcFreeSlot(&arr.gc_slot);
                     arr.cycle_queued = false;
                 }
                 self.clearArgArraySources(arr);
@@ -36000,6 +36158,7 @@ pub const VM = struct {
                             break;
                         }
                     }
+                    self.gcFreeSlot(&obj.gc_slot);
                     obj.cycle_queued = false;
                 }
                 obj.deinit(self.allocator);
@@ -36212,7 +36371,19 @@ pub const VM = struct {
             }
         }
         // as php's gc does, the garbage's destructors run first, while all of
-        // it is intact
+        // it is intact: the roots in the order of the buffer, then what they
+        // reached
+        if (dtors.items.len > 1) {
+            var order: std.ArrayListUnmanaged(GcDtorEntry) = .empty;
+            defer order.deinit(self.allocator);
+            for (dtors.items, 1..) |obj, i| {
+                const key: u64 = if (obj.cycle_queued and obj.gc_slot != 0) obj.gc_slot else (@as(u64, 1) << 32) + i;
+                order.append(self.allocator, .{ .key = key, .item = .{ .object = obj } }) catch break;
+            } else {
+                std.mem.sort(GcDtorEntry, order.items, {}, GcDtorEntry.lessThan);
+                for (order.items, 0..) |e, i| dtors.items[i] = e.item.object;
+            }
+        }
         for (dtors.items) |obj| {
             if (obj.destructed or obj.destructor_called) continue;
             obj.destructor_called = true;
@@ -36281,8 +36452,7 @@ pub const VM = struct {
             else => false,
         };
         if (key.scratch_rc != 0 or !value_dead) return false;
-        // the key's destructor first, then the rest of the garbage in the
-        // order it was reached
+        // the key, then the rest of the garbage in the order it was reached
         self.queueGarbageDestructor(key, dtors);
         for (visited_objs.keys()) |obj| {
             if (obj != key and obj.scratch_rc == 0) self.queueGarbageDestructor(obj, dtors);
@@ -36298,6 +36468,7 @@ pub const VM = struct {
     }
 
     fn collectCyclesPass(self: *VM, rerun_needed: *bool, first: bool) usize {
+        _ = first;
         if (self.draining_destructors or self.collecting_cycles) return 0;
         if (self.deferred_roots.items.len > 0) self.settleDeferredRoots();
         self.collecting_cycles = true;
@@ -36321,13 +36492,6 @@ pub const VM = struct {
         }
         for (self.ref_cells.items) |cell| cell.visited = false;
 
-        // every closure is a possible root: a captured variable is an edge
-        // the candidate list never sees being dropped
-        var closure_ranges = self.capture_index.valueIterator();
-        while (closure_ranges.next()) |range| {
-            if (range.object) |obj| self.cycleVisit(obj, &visited_objs, &visited_arrs);
-        }
-
         // roots added from here on (by destructors this pass runs) are the
         // next run's, as php's root buffer keeps them. the lists may be
         // reordered as freed values leave them, so the pass's own roots are
@@ -36339,23 +36503,43 @@ pub const VM = struct {
         for (self.cycle_candidates.items) |c| own_objects.put(self.allocator, c, {}) catch {};
         for (self.cycle_array_candidates.items) |c| own_arrays.put(self.allocator, c, {}) catch {};
 
-        // pass 1: BFS from candidates, init scratch_rc on first visit
+        // gc_mark_roots compacts the buffer first; the walk goes from the
+        // roots in its order, then from the candidates php doesn't buffer
+        var roots: std.ArrayListUnmanaged(GcRoot) = .empty;
+        defer roots.deinit(self.allocator);
+        var unbuffered: std.ArrayListUnmanaged(GcRoot) = .empty;
+        defer unbuffered.deinit(self.allocator);
         for (self.cycle_candidates.items) |c| {
             if (c.destructed) continue;
-            self.cycleVisit(c, &visited_objs, &visited_arrs);
+            (if (c.gc_slot != 0) &roots else &unbuffered).append(self.allocator, .{ .object = c }) catch {};
         }
         for (self.cycle_array_candidates.items) |c| {
             if (c.elements_released) continue;
-            self.cycleVisitArr(c, &visited_objs, &visited_arrs);
+            (if (c.gc_slot != 0) &roots else &unbuffered).append(self.allocator, .{ .array = c }) catch {};
         }
         for (self.cycle_gen_candidates.items) |g| {
             if (g.pooled or g.refcount == 0) continue;
-            self.cycleVisitChild(.{ .generator = g }, &visited_objs, &visited_arrs);
+            (if (g.gc_slot != 0) &roots else &unbuffered).append(self.allocator, .{ .generator = g }) catch {};
         }
         for (self.cycle_fiber_candidates.items) |f| {
             if (f.pooled or f.refcount == 0) continue;
-            self.cycleVisitChild(.{ .fiber = f }, &visited_objs, &visited_arrs);
+            (if (f.gc_slot != 0) &roots else &unbuffered).append(self.allocator, .{ .fiber = f }) catch {};
         }
+        self.gcCompactSlots(roots.items);
+        std.mem.sort(GcRoot, roots.items, {}, GcRoot.lessThan);
+
+        // pass 1: walk from the roots, init scratch_rc on first visit
+        self.cycle_dtor_order.clearRetainingCapacity();
+        self.cycle_record_order = true;
+        for (roots.items) |r| self.cycleVisitChild(r.value(), &visited_objs, &visited_arrs);
+        for (unbuffered.items) |r| self.cycleVisitChild(r.value(), &visited_objs, &visited_arrs);
+        // every closure is a possible root: a captured variable is an edge
+        // the candidate list never sees being dropped
+        var closure_ranges = self.capture_index.valueIterator();
+        while (closure_ranges.next()) |range| {
+            if (range.object) |obj| self.cycleVisit(obj, &visited_objs, &visited_arrs);
+        }
+        self.cycle_record_order = false;
 
         // pass 2: walk every visited node, decrement child scratch_rc for
         // each internal edge
@@ -36395,136 +36579,171 @@ pub const VM = struct {
         // exact zero is garbage, anything else is a live root
         self.cyclePropagateAlive(&visited_objs, &visited_arrs);
 
-        // php's gc runs the destructors of garbage that has one first and
-        // leaves it, and what only it reaches, out of this run: a generator
-        // not finished (its finally blocks, then its variables go, as php's
-        // zend_generator_dtor_storage closes it) and a suspended fiber. a
-        // second run then collects what is still garbage
-        var pending_gens: std.ArrayListUnmanaged(*Generator) = .empty;
-        defer pending_gens.deinit(self.allocator);
-        for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, *scratch| {
-            if (scratch.* != 0 or g.refcount == 0 or g.state == .completed or g.state == .running) continue;
-            scratch.* = 1;
-            // one on the path of a delegate running in a suspended fiber
-            // is closed when the fiber is destroyed
-            if (generatorRunningInFiber(g)) {
-                g.forced_close = true;
-                continue;
-            }
-            pending_gens.append(self.allocator, g) catch continue;
+        // gc_collect_roots: the roots that aren't garbage leave the buffer,
+        // which is compacted, and the garbage they didn't hold follows them
+        var garbage_roots: usize = 0;
+        for (roots.items) |r| {
+            if (self.gcRootIsGarbage(r)) {
+                roots.items[garbage_roots] = r;
+                garbage_roots += 1;
+            } else r.slot().* = 0;
         }
-        if (pending_gens.items.len > 0) self.cyclePropagateAlive(&visited_objs, &visited_arrs);
-        var pending_fibers: std.ArrayListUnmanaged(*Fiber) = .empty;
-        defer pending_fibers.deinit(self.allocator);
-        for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, *scratch| {
-            if (scratch.* != 0 or f.refcount == 0 or f.state != .suspended) continue;
-            pending_fibers.append(self.allocator, f) catch continue;
-            scratch.* = 1;
-        }
-        // a garbage root a suspended fiber reaches has its destructor called
-        // before the fiber is destroyed, as php calls the destructors of all
-        // the garbage roots in one pass
-        var fiber_dtor_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
-        defer fiber_dtor_objs.deinit(self.allocator);
-        if (pending_fibers.items.len > 0) {
-            if (first and self.current_fiber == null) {
-                for (self.cycle_candidates.items) |obj| {
-                    if (!visited_objs.contains(obj)) continue;
+        roots.shrinkRetainingCapacity(garbage_roots);
+        self.gcCompactSlots(roots.items);
+
+        // the garbage that has a destructor to run (php's DTOR_GARBAGE): an
+        // object whose __destruct wasn't called, a generator not finished
+        // (its finally blocks run, then its variables go, as
+        // zend_generator_dtor_storage closes it) and a suspended fiber. they
+        // run first, in the order of php's root buffer, while all the garbage
+        // is intact; what they reach is left out of this run
+        // (gc_remove_nested_data_from_buffer) and a second run collects what
+        // is still garbage
+        var dtor_items: std.ArrayListUnmanaged(GcDtorEntry) = .empty;
+        defer dtor_items.deinit(self.allocator);
+        var appended: u64 = 0;
+        for (self.cycle_dtor_order.items) |item| {
+            switch (item) {
+                .object => |obj| {
                     if (obj.scratch_rc != 0 or obj.destructed or obj.destructor_called or !obj.ownsDestructor()) continue;
                     if (!self.hasMethod(obj.class_name, "__destruct")) continue;
-                    fiber_dtor_objs.append(self.allocator, obj) catch continue;
-                }
+                },
+                .generator => |g| {
+                    const scratch = self.cycle_gens.getPtr(g) orelse continue;
+                    if (scratch.* != 0 or g.refcount == 0 or g.state == .completed or g.state == .running) continue;
+                    // one on the path of a delegate running in a suspended
+                    // fiber is closed when the fiber is destroyed
+                    if (generatorRunningInFiber(g)) {
+                        g.forced_close = true;
+                        scratch.* = 1;
+                        continue;
+                    }
+                },
+                .fiber => |f| {
+                    const scratch = self.cycle_fibers.getPtr(f) orelse continue;
+                    if (scratch.* != 0 or f.refcount == 0 or f.state != .suspended) continue;
+                },
             }
-            self.cyclePropagateAlive(&visited_objs, &visited_arrs);
+            const slot = item.slot().*;
+            const key: u64 = if (slot != 0) slot else blk: {
+                appended += 1;
+                break :blk (@as(u64, 1) << 32) + appended;
+            };
+            dtor_items.append(self.allocator, .{ .key = key, .item = item }) catch continue;
         }
+        std.mem.sort(GcDtorEntry, dtor_items.items, {}, GcDtorEntry.lessThan);
+        // the garbage gc_add_garbage put after the roots: those with a
+        // destructor stay in the buffer at their places, as roots of the
+        // second run
+        var next_slot: u32 = @intCast(garbage_roots + 1);
+        // the objects among them, with their places
+        var dtor_objects: std.AutoHashMapUnmanaged(*PhpObject, u32) = .{};
+        defer dtor_objects.deinit(self.allocator);
+        for (dtor_items.items) |e| {
+            if (e.item.slot().* == 0) {
+                e.item.slot().* = next_slot;
+                next_slot += 1;
+            }
+            if (e.item == .object) dtor_objects.put(self.allocator, e.item.object, e.item.slot().*) catch {};
+        }
+        self.gc_slot_next = next_slot;
+        var pending_gens: std.ArrayListUnmanaged(*Generator) = .empty;
+        defer pending_gens.deinit(self.allocator);
+        var pending_fibers: std.ArrayListUnmanaged(*Fiber) = .empty;
+        defer pending_fibers.deinit(self.allocator);
+        var dtor_count: usize = 0;
+        for (dtor_items.items) |e| switch (e.item) {
+            .object => dtor_count += 1,
+            .generator => |g| pending_gens.append(self.allocator, g) catch {},
+            .fiber => |f| pending_fibers.append(self.allocator, f) catch {},
+        };
 
         if (self.debug_gc_verify) self.gcVerifyCollected(&visited_objs, &visited_arrs);
 
         // pass 4: collect the unreachable ones. queue them for normal
         // destruct pipeline so __destruct runs and properties release cleanly
         var collected: usize = 0;
-        // the destructors first, while the garbage is intact; one whose
-        // generator ends up unreferenced has freed it
-        for (pending_gens.items) |g| {
-            g.refcount += 1;
-            self.closeGenerator(g, self.frame_count) catch {};
-            self.releaseGeneratorVars(g);
-            g.state = .completed;
-            g.refcount -= 1;
-            if (g.refcount == 0) {
-                self.pending_gen_release.append(self.allocator, g) catch {};
-                collected += 1;
-            } else if (!g.cycle_queued) {
-                g.cycle_queued = true;
-                self.cycle_gen_candidates.append(self.allocator, g) catch {
-                    g.cycle_queued = false;
-                };
-            }
-        }
-        for (fiber_dtor_objs.items) |obj| {
-            if (obj.destructed or obj.destructor_called) continue;
-            obj.destructor_called = true;
-            objRetain(obj);
-            self.callGarbageDestructor(obj);
-            if (obj.refcount > 0) obj.refcount -= 1;
-        }
-        for (pending_fibers.items) |f| {
-            f.refcount += 1;
-            self.destroyFiber(f);
-            f.refcount -= 1;
-            if (f.refcount == 0) {
-                self.pending_fiber_release.append(self.allocator, f) catch {};
-                collected += 1;
-            } else if (!f.cycle_queued) {
-                f.cycle_queued = true;
-                self.cycle_fiber_candidates.append(self.allocator, f) catch {
-                    f.cycle_queued = false;
-                };
-            }
-        }
-        // php's gc calls the garbage's destructors while all of it is
-        // intact, and frees it in a second run: a destructor may use any of
-        // it (a closure the object holds, bug73989). inside a fiber the
-        // drain still runs them in the gc destructor fiber as it frees
-        var dtor_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
-        defer dtor_objs.deinit(self.allocator);
-        if (self.current_fiber == null) {
-            var dt_it = visited_objs.iterator();
-            while (dt_it.next()) |kv| {
-                const obj = kv.key_ptr.*;
-                if (obj.scratch_rc != 0 or obj.destructed or obj.destructor_called or !obj.ownsDestructor()) continue;
-                if (!self.hasMethod(obj.class_name, "__destruct")) continue;
-                dtor_objs.append(self.allocator, obj) catch continue;
-            }
-        }
-        // gc_remove_nested_data_from_buffer: the objects whose destructors
-        // run, and the garbage they reach, are left for the rerun (a
-        // destructor may keep any of it); the rest is freed now
         var nested_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
         defer nested_objs.deinit(self.allocator);
         var nested_arrs: std.ArrayListUnmanaged(*PhpArray) = .empty;
         defer nested_arrs.deinit(self.allocator);
-        if (dtor_objs.items.len > 0) {
+        if (dtor_items.items.len > 0) {
             var garbage_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
             defer garbage_objs.deinit(self.allocator);
             var garbage_arrs: std.ArrayListUnmanaged(*PhpArray) = .empty;
             defer garbage_arrs.deinit(self.allocator);
             for (visited_objs.keys()) |obj| if (obj.scratch_rc == 0 and !obj.destructed) garbage_objs.append(self.allocator, obj) catch {};
             for (visited_arrs.keys()) |arr| if (arr.scratch_rc == 0 and !arr.elements_released) garbage_arrs.append(self.allocator, arr) catch {};
-            for (dtor_objs.items) |obj| obj.scratch_rc = 1;
+            for (dtor_items.items) |e| switch (e.item) {
+                .object => |obj| obj.scratch_rc = 1,
+                .generator => |g| if (self.cycle_gens.getPtr(g)) |scratch| {
+                    scratch.* = 1;
+                },
+                .fiber => |f| if (self.cycle_fibers.getPtr(f)) |scratch| {
+                    scratch.* = 1;
+                },
+            };
             self.cyclePropagateAlive(&visited_objs, &visited_arrs);
             for (garbage_objs.items) |obj| if (obj.scratch_rc != 0) nested_objs.append(self.allocator, obj) catch {};
             for (garbage_arrs.items) |arr| if (arr.scratch_rc != 0) nested_arrs.append(self.allocator, arr) catch {};
+            // the roots among it without a destructor leave the buffer
+            // before the destructors run, which may reuse their places
+            for (nested_objs.items) |obj| {
+                if (!obj.cycle_queued or dtor_objects.contains(obj)) continue;
+                self.gcFreeSlot(&obj.gc_slot);
+            }
+            for (nested_arrs.items) |arr| if (arr.cycle_queued) self.gcFreeSlot(&arr.gc_slot);
         }
-        for (dtor_objs.items) |obj| {
-            if (obj.destructed or obj.destructor_called) continue;
-            obj.destructor_called = true;
-            objRetain(obj);
-            self.callGarbageDestructor(obj);
-            // gc_call_destructors drops its hold without freeing: an object
-            // nothing else holds now is the rerun's garbage, counted there
-            if (obj.refcount > 0) obj.refcount -= 1;
-        }
+        for (dtor_items.items) |e| switch (e.item) {
+            .object => |obj| {
+                if (obj.destructed or obj.destructor_called) continue;
+                obj.destructor_called = true;
+                objRetain(obj);
+                self.callGarbageDestructor(obj);
+                // gc_call_destructors drops its hold without freeing: an
+                // object nothing else holds now is the rerun's garbage,
+                // counted there
+                if (obj.refcount > 0) obj.refcount -= 1;
+            },
+            .generator => |g| {
+                g.refcount += 1;
+                self.closeGenerator(g, self.frame_count) catch {};
+                self.releaseGeneratorVars(g);
+                g.state = .completed;
+                // what only its frame held is freed as php frees it, its
+                // destructor called there and not as garbage
+                if (self.hasPendingReleases()) self.drainPendingDestruct();
+                g.refcount -= 1;
+                if (g.refcount == 0) {
+                    self.gcFreeSlot(&g.gc_slot);
+                    self.pending_gen_release.append(self.allocator, g) catch {};
+                    collected += 1;
+                } else if (!g.cycle_queued) {
+                    g.cycle_queued = true;
+                    self.cycle_gen_candidates.append(self.allocator, g) catch {
+                        g.cycle_queued = false;
+                        g.gc_slot = 0;
+                    };
+                }
+            },
+            .fiber => |f| {
+                f.refcount += 1;
+                self.destroyFiber(f);
+                if (self.hasPendingReleases()) self.drainPendingDestruct();
+                f.refcount -= 1;
+                if (f.refcount == 0) {
+                    self.gcFreeSlot(&f.gc_slot);
+                    self.pending_fiber_release.append(self.allocator, f) catch {};
+                    collected += 1;
+                } else if (!f.cycle_queued) {
+                    f.cycle_queued = true;
+                    self.cycle_fiber_candidates.append(self.allocator, f) catch {
+                        f.cycle_queued = false;
+                        f.gc_slot = 0;
+                    };
+                }
+            },
+        };
         var coll_it = visited_objs.iterator();
         while (coll_it.next()) |kv| {
             const obj = kv.key_ptr.*;
@@ -36560,11 +36779,12 @@ pub const VM = struct {
             self.pending_fiber_release.append(self.allocator, f) catch {};
             collected += 1;
         }
-        if (dtor_objs.items.len > 0) {
+        if (dtor_count > 0) {
             var kept_objects: usize = 0;
             for (self.cycle_candidates.items) |obj| {
                 if (own_objects.contains(obj)) {
                     obj.cycle_queued = false;
+                    obj.gc_slot = 0;
                     continue;
                 }
                 self.cycle_candidates.items[kept_objects] = obj;
@@ -36575,6 +36795,7 @@ pub const VM = struct {
             for (self.cycle_array_candidates.items) |arr| {
                 if (own_arrays.contains(arr)) {
                     arr.cycle_queued = false;
+                    arr.gc_slot = 0;
                     continue;
                 }
                 self.cycle_array_candidates.items[kept_arrays] = arr;
@@ -36582,23 +36803,34 @@ pub const VM = struct {
             }
             self.cycle_array_candidates.shrinkRetainingCapacity(kept_arrays);
         } else {
-            for (self.cycle_candidates.items) |obj| obj.cycle_queued = false;
-            for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
+            for (self.cycle_candidates.items) |obj| {
+                obj.cycle_queued = false;
+                obj.gc_slot = 0;
+            }
+            for (self.cycle_array_candidates.items) |arr| {
+                arr.cycle_queued = false;
+                arr.gc_slot = 0;
+            }
             self.cycle_candidates.clearRetainingCapacity();
             self.cycle_array_candidates.clearRetainingCapacity();
         }
-        // what the destructors left is the second run's to free
+        // what the destructors left is the second run's to free. those whose
+        // destructor ran keep their places in the buffer; the rest php
+        // finds from them, so they hold none
         for (nested_objs.items) |obj| {
             if (obj.destructed or obj.cycle_queued) continue;
             // freed by refcounting while the destructors ran
             if (obj.refcount == 0 and !obj.destructor_called) continue;
+            obj.gc_slot = dtor_objects.get(obj) orelse 0;
             obj.cycle_queued = true;
             self.cycle_candidates.append(self.allocator, obj) catch {
                 obj.cycle_queued = false;
+                obj.gc_slot = 0;
             };
         }
         for (nested_arrs.items) |arr| {
             if (arr.elements_released or arr.cycle_queued or arr.refcount == 0) continue;
+            arr.gc_slot = 0;
             arr.cycle_queued = true;
             self.cycle_array_candidates.append(self.allocator, arr) catch {
                 arr.cycle_queued = false;
@@ -36606,7 +36838,7 @@ pub const VM = struct {
         }
         // generators and fibers whose destructor ran stay candidates for the
         // second run
-        const rerun = dtor_objs.items.len > 0 or pending_gens.items.len > 0 or pending_fibers.items.len > 0;
+        const rerun = dtor_items.items.len > 0;
         var gi: usize = 0;
         while (gi < self.cycle_gen_candidates.items.len) {
             const g = self.cycle_gen_candidates.items[gi];
@@ -36614,6 +36846,7 @@ pub const VM = struct {
             if (keep) {
                 gi += 1;
             } else {
+                g.gc_slot = 0;
                 g.cycle_queued = false;
                 _ = self.cycle_gen_candidates.swapRemove(gi);
             }
@@ -36625,6 +36858,7 @@ pub const VM = struct {
             if (keep) {
                 fi += 1;
             } else {
+                f.gc_slot = 0;
                 f.cycle_queued = false;
                 _ = self.cycle_fiber_candidates.swapRemove(fi);
             }
@@ -36634,6 +36868,8 @@ pub const VM = struct {
         self.gc_dtors_in_fiber = self.current_fiber != null;
         self.drainPendingDestruct();
         self.gc_dtors_in_fiber = prev_in_fiber;
+        // the run ends compacting the buffer (gc_compact)
+        self.gcCompactQueued();
         // php counts what it freed: an object its destructor revived stays
         collected -|= self.gc_revived;
         self.gc_revived = 0;
@@ -37112,24 +37348,33 @@ pub const VM = struct {
             }
         }
         self.gc_full_at = null;
+        // they go into the buffer after the run
+        for (held_objs.items) |obj| obj.gc_slot = 0;
+        for (held_arrs.items) |arr| arr.gc_slot = 0;
         const collected = self.collectCycles();
         for (held_objs.items) |obj| {
             if (obj.destructed or obj.pooled or obj.refcount == 0) {
+                self.gcFreeSlot(&obj.gc_slot);
                 obj.cycle_queued = false;
                 continue;
             }
             obj.cycle_queued = true;
+            obj.gc_slot = self.gcTakeSlot();
             self.cycle_candidates.append(self.allocator, obj) catch {
+                self.gcFreeSlot(&obj.gc_slot);
                 obj.cycle_queued = false;
             };
         }
         for (held_arrs.items) |arr| {
             if (arr.elements_released or arr.pooled or arr.refcount == 0) {
+                self.gcFreeSlot(&arr.gc_slot);
                 arr.cycle_queued = false;
                 continue;
             }
             arr.cycle_queued = true;
+            arr.gc_slot = self.gcTakeSlot();
             self.cycle_array_candidates.append(self.allocator, arr) catch {
+                self.gcFreeSlot(&arr.gc_slot);
                 arr.cycle_queued = false;
             };
         }
@@ -37180,6 +37425,7 @@ pub const VM = struct {
                         if (vo.contains(obj)) continue;
                         vo.put(self.allocator, obj, {}) catch return;
                         obj.scratch_rc = @intCast(obj.refcount);
+                        if (self.cycle_record_order and !obj.destructor_called and !obj.destructed and obj.ownsDestructor()) self.cycle_dtor_order.append(self.allocator, .{ .object = obj }) catch {};
                         // a closure's captures and statics are its edges
                         if (obj.closureName()) |name| if (self.capture_index.get(name)) |range| {
                             for (self.captures.items[range.start..][0..range.len]) |capture| {
@@ -37222,11 +37468,13 @@ pub const VM = struct {
                     .generator => |g| {
                         if (self.cycle_gens.contains(g) or g.pooled) continue;
                         self.cycle_gens.put(self.allocator, g, @intCast(g.refcount)) catch return;
+                        if (self.cycle_record_order and g.state != .completed) self.cycle_dtor_order.append(self.allocator, .{ .generator = g }) catch {};
                         _ = self.cycleGeneratorEdges(g, .{ .visit = work }, vo, va);
                     },
                     .fiber => |f| {
                         if (self.cycle_fibers.contains(f) or f.pooled) continue;
                         self.cycle_fibers.put(self.allocator, f, @intCast(f.refcount)) catch return;
+                        if (self.cycle_record_order and f.state == .suspended) self.cycle_dtor_order.append(self.allocator, .{ .fiber = f }) catch {};
                         _ = self.cycleFiberEdges(f, .{ .visit = work }, vo, va);
                     },
                     else => {},
@@ -37620,6 +37868,7 @@ pub const VM = struct {
             if (!arr.elements_released and !arr.cycle_queued) {
                 self.cycle_array_candidates.append(self.allocator, arr) catch return;
                 arr.cycle_queued = true;
+                arr.gc_slot = self.gcTakeSlot();
                 self.noteRootAdded(.array);
             }
             return;
@@ -37859,7 +38108,9 @@ pub const VM = struct {
         if (gen.refcount != 0) {
             if (!gen.cycle_queued) {
                 gen.cycle_queued = true;
+                gen.gc_slot = self.gcTakeSlot();
                 self.cycle_gen_candidates.append(self.allocator, gen) catch {
+                    self.gcFreeSlot(&gen.gc_slot);
                     gen.cycle_queued = false;
                 };
             }
@@ -37878,7 +38129,9 @@ pub const VM = struct {
         if (fiber.refcount != 0) {
             if (!fiber.cycle_queued) {
                 fiber.cycle_queued = true;
+                fiber.gc_slot = self.gcTakeSlot();
                 self.cycle_fiber_candidates.append(self.allocator, fiber) catch {
+                    self.gcFreeSlot(&fiber.gc_slot);
                     fiber.cycle_queued = false;
                 };
             }
@@ -37958,9 +38211,34 @@ pub const VM = struct {
             // call result consumed by a native); queue it so the drain frees
             // it unless a root or container still reaches it
             .array => |arr| if (arr.refcount == 0) self.queueArrayRelease(arr) else if (arr.deferred_root) self.dropDeferredRoot(arr),
-            .generator => self.genRelease(v.generator),
-            .fiber => self.fiberRelease(v.fiber),
+            // generators and fibers are objects to php
+            .generator => |g| if (g.refcount > 1) {
+                g.refcount -= 1;
+            } else self.genRelease(g),
+            .fiber => |f| if (f.refcount > 1) {
+                f.refcount -= 1;
+            } else self.fiberRelease(f),
             else => {},
+        }
+    }
+
+    // zend_vm_stack_free_args: a call's arguments are let go of with
+    // zval_ptr_dtor_nogc, which makes no possible root
+    fn releaseCallArg(self: *VM, v: Value) void {
+        switch (v) {
+            .object, .resource => |o| if (o.refcount > 1) {
+                o.refcount -= 1;
+            } else self.objRelease(o),
+            .generator => |g| if (g.refcount > 1) {
+                g.refcount -= 1;
+            } else self.genRelease(g),
+            .fiber => |f| if (f.refcount > 1) {
+                f.refcount -= 1;
+            } else self.fiberRelease(f),
+            .array => |a| if (a.refcount > 1) {
+                a.refcount -= 1;
+            } else self.arrayRelease(a),
+            else => self.releaseValue(v),
         }
     }
 
@@ -37971,6 +38249,7 @@ pub const VM = struct {
             .object => |obj| if (!obj.destructed and !obj.cycle_queued and obj.refcount > 0) {
                 self.cycle_candidates.append(self.allocator, obj) catch return;
                 obj.cycle_queued = true;
+                obj.gc_slot = self.gcTakeSlot();
                 self.noteRootAdded(.object);
             },
             .array => |arr| if (!arr.elements_released and arr.entries.items.len > 0) {
@@ -37978,6 +38257,7 @@ pub const VM = struct {
                     if (arr.cycle_queued) return;
                     self.cycle_array_candidates.append(self.allocator, arr) catch return;
                     arr.cycle_queued = true;
+                    arr.gc_slot = self.gcTakeSlot();
                     self.noteRootAdded(.array);
                     return;
                 }
