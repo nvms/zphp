@@ -1015,10 +1015,16 @@ fn native_get_meta_tags(ctx: *NativeContext, args: []const Value) RuntimeError!N
     const filename = try strArg(ctx, args, "get_meta_tags", 0, "filename", true);
     const use_include_path = args.len > 1 and args[1].isTruthy();
     const path = try includePathLookup(ctx, filename, use_include_path);
-    const content = (try readPathAs(ctx, path, "get_meta_tags")) orelse return NativeResult.scalar(.{ .bool = false });
-    defer content.release();
+    if (path.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
+    // php reads the stream a character at a time and stops where the head
+    // ends, so a stream is read only as far as the tags go
+    const opened = (try openStreamValue(ctx, path, "rb", null)) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = opened.resource;
+    fh.retain();
+    defer ctx.vm.releaseValue(opened);
+    defer _ = closeStream(ctx, fh) catch {};
     const result = try ctx.createArray();
-    var tz = MetaTokenizer{ .data = content.bytes() };
+    var tz = MetaTokenizer{ .ctx = ctx, .stream = fh };
     var in_tag = false;
     var done = false;
     var looking_for_val = false;
@@ -1107,6 +1113,7 @@ fn native_get_meta_tags(ctx: *NativeContext, args: []const Value) RuntimeError!N
         }
         tok_last = tok;
     }
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
     return NativeResult.borrowed(.{ .array = result });
 }
 
@@ -1121,28 +1128,27 @@ const MetaToken = enum { eof, opentag, closetag, slash, equal, space, id, string
 // php_next_meta_token over the file's bytes: a NUL ends the reading as
 // php's getc loop does, and the token buffer holds at most 8192 bytes
 const MetaTokenizer = struct {
-    data: []const u8,
-    pos: usize = 0,
+    ctx: *NativeContext,
+    stream: *PhpObject,
     // php's ungetc: a character to read again
     pending: ?i32 = null,
     in_meta: bool = false,
     token: []const u8 = "",
     buf: [8192]u8 = undefined,
-    read_past: bool = false,
+    // a read that failed (or threw) ends the input
+    failed: bool = false,
 
     fn eof(self: *const MetaTokenizer) bool {
-        return self.pos >= self.data.len and self.read_past;
+        if (self.failed) return true;
+        return streams.eof(self.ctx, self.stream) catch true;
     }
 
-    // php_stream_getc: EOF (-1) once the bytes run out, which also makes
-    // php_stream_eof true
+    // php_stream_getc: EOF (-1) once the stream runs out
     fn getc(self: *MetaTokenizer) i32 {
-        if (self.pos >= self.data.len) {
-            self.read_past = true;
+        const c = streams.getc(self.ctx, self.stream) catch {
+            self.failed = true;
             return -1;
-        }
-        const c = self.data[self.pos];
-        self.pos += 1;
+        } orelse return -1;
         return c;
     }
 
