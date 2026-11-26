@@ -7886,6 +7886,10 @@ pub const VM = struct {
                         continue;
                     }
                     if (existing == .null or (existing == .bool and !existing.bool)) {
+                        if (hook_cell == null and !try self.propArrayAssignable(obj, pname)) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
                         if (existing == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                         // vivifying a property nothing declares creates it, as
                         // ensure_array_prop does
@@ -8376,6 +8380,10 @@ pub const VM = struct {
                     }
 
                     if (cur == .null or (cur == .bool and !cur.bool)) {
+                        if (ref_cell) |cell| if (!try self.refArrayAssignable(cell)) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                         const new_arr = try self.allocArray();
                         const arr_val = Value{ .array = new_arr };
@@ -8523,6 +8531,10 @@ pub const VM = struct {
                         self.pushFetched(cur);
                         continue;
                     }
+                    if (self.slotRefCell(frame, slot)) |cell| if (!try self.refArrayAssignable(cell)) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const new_arr = try self.allocArray();
                     const new_val = Value{ .array = new_arr };
@@ -8635,6 +8647,10 @@ pub const VM = struct {
                         if (!separate_only) self.pushFetched(cur);
                         continue;
                     }
+                    if (frame.ref_slots.get(name)) |cell| if (!try self.refArrayAssignable(cell)) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const new_arr = try self.allocArray();
                     const new_val = Value{ .array = new_arr };
@@ -8868,6 +8884,10 @@ pub const VM = struct {
                     {
                         if (try self.checkDynamicProperty(eap_obj, prop_name, 1)) continue;
                     }
+                    if (hook_cell == null and !try self.propArrayAssignable(eap_obj, prop_name)) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const new_arr = try self.allocArray();
                     // obj.set retains -> refcount 1 (the property slot owns it)
@@ -8935,6 +8955,10 @@ pub const VM = struct {
                         if (cur == .string) {
                             self.pushFetched(cur);
                             continue;
+                        }
+                        if (!try self.staticPropArrayAssignable(self.staticPropDeclaringClass(class_name, prop_name) orelse class_name, prop_name)) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
                         }
                         if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                         const new_arr = try self.allocArray();
@@ -32159,6 +32183,51 @@ pub const VM = struct {
 
     fn markTypedSource(self: *VM, cell: *Value, target: BindingTarget) void {
         if (self.propertySource(target) != null) cellOf(cell).typed = true;
+    }
+
+    // check_type_array_assignable
+    fn typeAllowsArray(self: *VM, type_str: []const u8, decl_class: []const u8) RuntimeError!bool {
+        if (type_str.len == 0) return true;
+        const t = php_types.parse(self.allocator, type_str, decl_class, null) catch return error.OutOfMemory;
+        defer t.deinit(self.allocator);
+        return t.mask & php_types.ARRAY != 0;
+    }
+
+    // zend_verify_ref_array_assignable: an array may only be made inside a
+    // reference whose typed properties all allow one. raises the TypeError
+    // as pending; false when it did
+    pub fn refArrayAssignable(self: *VM, cell: *Value) RuntimeError!bool {
+        var buf: [8]TypeSource = undefined;
+        for (self.refTypeSources(cell, &buf)) |src| {
+            if (try self.typeAllowsArray(src.type_str, src.class)) continue;
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot auto-initialize an array inside a reference held by property {s}::${s} of type {s}", .{ self.declaredClassName(src.class), src.prop, try self.propertyTypeText(src.type_str, src.class) });
+            defer self.allocator.free(msg);
+            try self.setPendingException("TypeError", msg);
+            return false;
+        }
+        return true;
+    }
+
+    // zend_handle_fetch_obj_flags(ZEND_FETCH_DIM_WRITE): a typed property a
+    // dimension write would make an array must allow one, whether or not a
+    // reference holds it. raises the TypeError as pending; false when it did
+    fn propArrayAssignable(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!bool {
+        const decl = self.propertyDeclaration(obj.class_name, prop_name);
+        if (!decl.declared or decl.type_str.len == 0) return true;
+        if (try self.typeAllowsArray(decl.type_str, decl.defining_class)) return true;
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot auto-initialize an array inside property {s}::${s} of type {s}", .{ self.declaredClassName(decl.defining_class), prop_name, try self.propertyTypeText(decl.type_str, decl.defining_class) });
+        defer self.allocator.free(msg);
+        try self.setPendingException("TypeError", msg);
+        return false;
+    }
+
+    fn staticPropArrayAssignable(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError!bool {
+        const src = self.propertySource(.{ .static = .{ .class_name = class_name, .prop_name = prop_name } }) orelse return true;
+        if (try self.typeAllowsArray(src.type_str, src.class)) return true;
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot auto-initialize an array inside property {s}::${s} of type {s}", .{ self.declaredClassName(src.class), prop_name, try self.propertyTypeText(src.type_str, src.class) });
+        defer self.allocator.free(msg);
+        try self.setPendingException("TypeError", msg);
+        return false;
     }
 
     fn throwRefTypeError(self: *VM, src: TypeSource, val: Value) RuntimeError {
