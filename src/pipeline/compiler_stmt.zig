@@ -801,6 +801,9 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
 
             if (catch_node.main_token != 0) {
                 const var_name = self.ast.tokenSlice(catch_node.main_token);
+                // ZEND_CATCH is on the catch's line: the value it replaces
+                // is destructed there
+                self.current_source_offset = self.ast.tokens[catch_node.main_token].start;
                 try self.emitSetVar(var_name);
             }
             try self.emitOp(.pop); // remove exc
@@ -815,6 +818,9 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
             // untyped catch-all
             if (catch_node.main_token != 0) {
                 const var_name = self.ast.tokenSlice(catch_node.main_token);
+                // ZEND_CATCH is on the catch's line: the value it replaces
+                // is destructed there
+                self.current_source_offset = self.ast.tokens[catch_node.main_token].start;
                 try self.emitSetVar(var_name);
             }
             try self.emitOp(.pop);
