@@ -2063,8 +2063,8 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
         }
     } else if (callee.tag == .identifier) {
         // a call is on the line of its name, wherever its arguments start
-        const call_offset = self.ast.tokens[callee.main_token].start;
         const raw_name = self.ast.tokenSlice(callee.main_token);
+        const call_offset = if (std.ascii.eqlIgnoreCase(raw_name, "eval") and args.len == 1) argumentOffset(self, args[0]) else self.ast.tokens[callee.main_token].start;
         const name = try self.callTargetName(raw_name, self.resolveFunctionName(raw_name));
         for (args, 0..) |arg, i| {
             const arg_node = self.ast.nodes[arg];
@@ -4134,6 +4134,18 @@ fn firstToken(self: *Compiler, idx: u32) u32 {
     var i = idx;
     while (self.ast.nodes[i].main_token == 0 and self.ast.nodes[i].data.lhs != 0) i = self.ast.nodes[i].data.lhs;
     return self.ast.nodes[i].main_token;
+}
+
+// where php's ast puts an expression that is a node's first child (the
+// line ZEND_AST_INCLUDE_OR_EVAL takes): a heredoc or nowdoc literal is its
+// body, which starts on the line after its opener
+fn argumentOffset(self: *Compiler, idx: u32) u32 {
+    const tok = self.ast.tokens[firstToken(self, idx)];
+    if (tok.tag == .heredoc or tok.tag == .nowdoc) {
+        const text = self.ast.source[tok.start..tok.end];
+        if (std.mem.indexOfScalar(u8, text, '\n')) |nl| return tok.start + @as(u32, @intCast(nl)) + 1;
+    }
+    return tok.start;
 }
 
 // zend_compile_method_call / zend_compile_static_call: a method named by a
