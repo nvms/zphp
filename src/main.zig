@@ -1024,6 +1024,15 @@ fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
     if (vm.pending_exception != null) if (error_format.uncaughtParts(allocator, vm, description)) |parts| {
         defer allocator.free(parts.message);
         vm.recordUncaughtError(parts.level, parts.message, parts.file, parts.line);
+        // a fatal error (not an uncaught exception) keeps the stack it was
+        // reported with, as php's error_get_last() lists it
+        if (vm.pending_exception.? == .object and vm.fatalErrorBacktraces()) {
+            const exc = vm.pending_exception.?.object;
+            const compile = std.mem.eql(u8, exc.class_name, "CompileError");
+            if ((compile or vm.uncatchable_fatal) and exc.get("__no_trace") != .bool) {
+                vm.recordFatalTrace(exc.getForScope("trace", vm.exceptionTraceScope(exc)));
+            }
+        }
     };
     if ((vm.error_reporting_level & uncaughtSeverity(vm)) == 0) return;
     if (vm.pending_exception == null) {

@@ -1462,6 +1462,9 @@ pub const VM = struct {
     last_error_message: []const u8 = "",
     last_error_file: []const u8 = "",
     last_error_line: i64 = 0,
+    // EG(last_fatal_error_backtrace): the stack a fatal error stopped on,
+    // which error_get_last() lists while fatal_error_backtraces is on
+    last_fatal_trace: Value = .null,
     prev_error_handler: ?Value = null,
     error_reporting_level: i64 = 30719,
     ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .empty,
@@ -19368,7 +19371,17 @@ pub const VM = struct {
         self.last_error_line = at.line;
     }
 
+    // the trace a fatal error is reported with, for error_get_last()
+    pub fn recordFatalTrace(self: *VM, trace: Value) void {
+        if (trace != .array) return;
+        retainValue(trace);
+        self.releaseValue(self.last_fatal_trace);
+        self.last_fatal_trace = trace;
+    }
+
     pub fn clearLastError(self: *VM) void {
+        self.releaseValue(self.last_fatal_trace);
+        self.last_fatal_trace = .null;
         if (self.last_error_message.len > 0) self.allocator.free(self.last_error_message);
         self.last_error_type = 0;
         self.last_error_message = "";

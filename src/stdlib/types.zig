@@ -3043,6 +3043,7 @@ fn native_error_get_last(ctx: *NativeContext, _: []const Value) RuntimeError!Nat
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("message") }, .{ .string = message });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(ctx.vm.last_error_file) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = ctx.vm.last_error_line });
+    if (ctx.vm.last_fatal_trace == .array) try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("trace") }, ctx.vm.last_fatal_trace);
     return NativeResult.borrowed(.{ .array = arr });
 }
 
