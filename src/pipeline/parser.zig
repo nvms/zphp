@@ -906,7 +906,7 @@ const Parser = struct {
 
         const init = if (self.peek() != .semicolon) try self.parseForExprList() else @as(u32, 0);
         _ = try self.expect(.semicolon);
-        const cond = if (self.peek() != .semicolon) try self.parseExpression() else @as(u32, 0);
+        const cond = if (self.peek() != .semicolon) try self.parseForCondList() else @as(u32, 0);
         _ = try self.expect(.semicolon);
         const update = if (self.peek() != .r_paren) try self.parseForExprList() else @as(u32, 0);
         _ = try self.expect(.r_paren);
@@ -936,6 +936,29 @@ const Parser = struct {
             _ = self.advance();
             try exprs.append(self.allocator, try self.parseVoidableExpression());
         }
+        const extra = try self.addExtraList(exprs.items);
+        return self.addNode(.{ .tag = .expr_list, .main_token = 0, .data = .{ .lhs = extra } });
+    }
+
+    // a for loop's condition (php's for_cond_exprs): expressions whose
+    // values are thrown away, which may be (void) casts, then the one tested
+    fn parseForCondList(self: *Parser) Error!u32 {
+        var exprs = std.ArrayListUnmanaged(u32).empty;
+        defer exprs.deinit(self.allocator);
+        while (true) {
+            const void_at = self.pos;
+            const is_void = self.peek() == .l_paren and self.isCastExpr() and std.ascii.eqlIgnoreCase(self.lexemeAt(1), "void");
+            try exprs.append(self.allocator, try self.parseVoidableExpression());
+            if (self.peek() != .comma) {
+                if (is_void) {
+                    try self.addErrorAt(void_at, .void_cast_misplaced);
+                    return error.ParseError;
+                }
+                break;
+            }
+            _ = self.advance();
+        }
+        if (exprs.items.len == 1) return exprs.items[0];
         const extra = try self.addExtraList(exprs.items);
         return self.addNode(.{ .tag = .expr_list, .main_token = 0, .data = .{ .lhs = extra } });
     }

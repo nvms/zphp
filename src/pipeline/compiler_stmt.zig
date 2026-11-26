@@ -139,6 +139,18 @@ fn tryLessLocalsCond(self: *Compiler, cond_n: u32) ?struct { slot_a: u16, slot_b
     return .{ .slot_a = slot_a, .slot_b = slot_b };
 }
 
+// a for header's expressions (zend_compile_for_expr_list): each one's value
+// but the last is freed as a statement's is, which #[\NoDiscard] sees
+fn compileForExprs(self: *Compiler, idx: u32) Error!void {
+    const node = self.ast.nodes[idx];
+    if (node.tag != .expr_list) return self.compileNode(idx);
+    const exprs = self.ast.extraSlice(node.data.lhs);
+    for (exprs, 0..) |expr, i| {
+        if (i > 0) try self.emitOp(.pop_boundary);
+        try self.compileNode(expr);
+    }
+}
+
 pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     const init_n = self.ast.extra_data[node.data.lhs];
     const cond_n = self.ast.extra_data[node.data.lhs + 1];
@@ -155,7 +167,7 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     try self.pushJumpScope(false);
 
     if (init_n != 0) {
-        try self.compileNode(init_n);
+        try compileForExprs(self, init_n);
         try self.emitOp(.pop_boundary);
     }
 
@@ -174,7 +186,7 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
             exit_jump = self.chunk.offset();
             try self.emitU16(0xffff);
         } else {
-            try self.compileNode(cond_n);
+            try compileForExprs(self, cond_n);
             exit_jump = try self.emitJump(.jump_if_false);
             try self.emitOp(.pop_boundary);
         }
@@ -190,7 +202,7 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(if (us.is_inc) .inc_local else .dec_local);
             try self.emitU16(us.slot);
         } else {
-            try self.compileNode(update_n);
+            try compileForExprs(self, update_n);
             try self.emitOp(.pop_boundary);
         }
     }
