@@ -1134,6 +1134,8 @@ pub const Fiber = struct {
     pooled: bool = false,
     // php's ZEND_FIBER_FLAG_THREW: it ended with an exception
     threw: bool = false,
+    // php's ZEND_FIBER_FLAG_BAILOUT: it ended with a fatal error
+    bailed: bool = false,
     // php's ZEND_FIBER_FLAG_DESTROYED: it is being force-closed
     destroyed: bool = false,
     // in the collector's candidate list

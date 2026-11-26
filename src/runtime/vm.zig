@@ -33400,7 +33400,7 @@ pub const VM = struct {
         self.current_fiber = prev_fiber;
         self.handler_floor = prev_floor;
         if (raised) {
-            fiber.threw = true;
+            self.noteFiberFailed(fiber);
             return error.RuntimeError;
         }
         return .null;
@@ -33484,7 +33484,7 @@ pub const VM = struct {
             },
             .getReturn => {
                 const reason = switch (fiber.state) {
-                    .terminated => if (fiber.threw) "The fiber threw an exception" else return fiber.return_value,
+                    .terminated => if (fiber.threw) "The fiber threw an exception" else if (fiber.bailed) "The fiber exited with a fatal error" else return fiber.return_value,
                     .created => "The fiber has not been started",
                     else => "The fiber has not returned",
                 };
@@ -33521,6 +33521,12 @@ pub const VM = struct {
             self.discardPending();
             fiber.threw = false;
         };
+    }
+
+    // a fiber that ended with something pending: an exception, or a fatal
+    // error's bailout
+    fn noteFiberFailed(self: *VM, fiber: *Fiber) void {
+        if (self.uncatchable_fatal) fiber.bailed = true else fiber.threw = true;
     }
 
     fn fiberError(self: *VM, msg: []const u8) RuntimeError {
@@ -33560,7 +33566,7 @@ pub const VM = struct {
         defer self.handler_floor = prev_floor;
         const pushed = self.pushFiberEntryFrame(fiber, args) catch |err| {
             fiber.state = .terminated;
-            fiber.threw = self.pending_exception != null;
+            if (self.pending_exception != null) self.noteFiberFailed(fiber);
             return err;
         };
         if (!pushed or self.frame_count == fb) {
@@ -34408,7 +34414,7 @@ pub const VM = struct {
             self.error_reporting_level = outer_level;
         }
         _ = self.executeFiber(fiber, fb, sb, hb) catch |err| {
-            if (fiber.state == .terminated and self.pending_exception != null) fiber.threw = true;
+            if (fiber.state == .terminated and self.pending_exception != null) self.noteFiberFailed(fiber);
             return err;
         };
         return fiber.suspend_value;
