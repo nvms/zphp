@@ -1049,6 +1049,11 @@ pub const VM = struct {
     // first-class callable got this request, by its registered name; each
     // holds a reference, dropped in reset()
     fcc_cache: std.StringHashMapUnmanaged(*PhpObject) = .{},
+    // the function a first-class callable site found for an unqualified
+    // name in a namespace by falling back to the global one, by site: php's
+    // runtime cache slot keeps it even after the namespaced function is
+    // declared (INIT_NS_FCALL_BY_NAME). cleared in reset()
+    fcc_fallback_sites: std.AutoHashMapUnmanaged(usize, struct { written: []const u8, registered: []const u8 }) = .{},
     // SplObjectStorage::getHash() calls running (spl_object_storage_get_hash_depth)
     spl_get_hash_depth: u32 = 0,
     // php 8.6's partial applications: the compiled closure (its compile
@@ -3955,6 +3960,7 @@ pub const VM = struct {
     pub fn deinit(self: *VM) void {
         self.sensitive_params.deinit(self.allocator);
         self.fcc_cache.deinit(self.allocator);
+        self.fcc_fallback_sites.deinit(self.allocator);
         self.pfa_cache.deinit(self.allocator);
         self.lambda_cache.deinit(self.allocator);
         self.stream_errors.deinit(self);
@@ -4229,6 +4235,7 @@ pub const VM = struct {
         var fcc_it = self.fcc_cache.valueIterator();
         while (fcc_it.next()) |closure| self.releaseValue(.{ .object = closure.* });
         self.fcc_cache.clearRetainingCapacity();
+        self.fcc_fallback_sites.clearRetainingCapacity();
         self.spl_get_hash_depth = 0;
         self.pfa_cache.clearRetainingCapacity();
         for (self.partial_attrs.items) |entry| {
@@ -11410,6 +11417,7 @@ pub const VM = struct {
                 },
 
                 .callable_closure, .callable_closure_cached => {
+                    const fcc_site = @intFromPtr(self.currentChunk()) ^ ((self.currentFrame().ip - bytecode.op_bytes) *% 0x9E3779B97F4A7C15);
                     var callable = self.pop();
                     // a closure's first-class callable is the closure itself
                     if (callable == .object and std.mem.eql(u8, callable.object.class_name, "Closure")) {
@@ -11439,7 +11447,16 @@ pub const VM = struct {
                     var held_pair: ?*PhpArray = null;
                     var function: ?[]const u8 = null;
                     var forwarded: ?[]const u8 = null;
-                    switch (self.callableClosureCheck(callable, &held_pair, &function, &forwarded) catch {
+                    // an unqualified name in a namespace: the site keeps what
+                    // it first found
+                    const fallback_name: ?[]const u8 = if (callable == .string) nsFallbackName(callable.string.bytes()) else null;
+                    const site_hit: ?[]const u8 = if (fallback_name) |written| if (self.fcc_fallback_sites.get(fcc_site)) |hit|
+                        (if (std.mem.eql(u8, hit.written, written)) hit.registered else null)
+                    else
+                        null else null;
+                    if (site_hit) |registered| {
+                        function = registered;
+                    } else switch (self.callableClosureCheck(callable, &held_pair, &function, &forwarded) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     }) {
@@ -11449,6 +11466,11 @@ pub const VM = struct {
                             return error.RuntimeError;
                         },
                     }
+                    if (site_hit == null) if (fallback_name) |written| if (function) |registered| {
+                        // found by the fallback: the namespaced name isn't it
+                        if (!std.ascii.eqlIgnoreCase(registered, written))
+                            try self.fcc_fallback_sites.put(self.allocator, fcc_site, .{ .written = written, .registered = registered });
+                    };
                     if (held_pair) |pair| callable = .{ .array = pair };
                     if (function) |registered| callable = .{ .string = Value.String.borrowed(registered) };
                     // php 8.6 makes one Closure per function named in the code
@@ -24252,6 +24274,15 @@ pub const VM = struct {
     }
 
     pub const CallableCheck = union(enum) { ok, failed: callables.Failure };
+
+    // a function name that may fall back to the global function: written
+    // unqualified in a namespace (the compiler marks a qualified one with a
+    // leading backslash)
+    fn nsFallbackName(name: []const u8) ?[]const u8 {
+        if (name.len == 0 or name[0] == '\\') return null;
+        if (std.mem.indexOfScalar(u8, name, '\\') == null or std.mem.indexOf(u8, name, "::") != null) return null;
+        return name;
+    }
 
     // a first-class callable's target, resolved as a dynamic call would be.
     // `Class::method(...)` of an instance method from inside an instance of
