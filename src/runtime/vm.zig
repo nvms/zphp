@@ -27500,7 +27500,6 @@ pub const VM = struct {
     fn propertyWriteStore(self: *VM, obj: *PhpObject, prop_name: []const u8, val: *Value, vr: VisResult, action: MutationAction, base_frame: usize) RuntimeError!PropWriteOutcome {
         // a readonly property is written again only through a reinit window
         // (__clone, clone()'s properties), whatever the action
-        _ = action;
         if (!vr.declared) {
             const silent = self.hasMethod(obj.class_name, "__set");
             const kind = self.staticAsInstance(obj, prop_name, silent) catch {
@@ -27561,7 +27560,18 @@ pub const VM = struct {
         // (matches PHP weak/strict mode)
         if (obj.ref_mirrored and val.* == .float) val.* = try self.checkTypedPropStep(obj, prop_name, val.*);
         if (vr.type_str.len > 0) {
+            // an object coerced to the type runs __toString, which may drop
+            // the last holder of the object being written (set_prop's pin is
+            // all that is left): zend_std_write_property refuses the write
+            const held = obj.refcount;
+            const runs_code = val.* == .object;
             if (try self.checkPropertyType(val, vr.type_str, vr.defining_class, prop_name)) return .dispatched;
+            if (runs_code and action == .write and obj.refcount < held and obj.refcount <= 1) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Object was released while assigning to property {s}::${s}", .{ obj.class_name, prop_name });
+                defer self.allocator.free(msg);
+                if (try self.throwBuiltinException("Error", msg)) return .dispatched;
+                return error.RuntimeError;
+            }
         }
         if (obj.ref_mirrored) val.* = try self.checkTypedPropWrite(obj, prop_name, val.*);
         // overwrite-release: drop the object the property previously held
