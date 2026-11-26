@@ -194,6 +194,9 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
     } else if (std.mem.eql(u8, cmd, "-i") or std.mem.eql(u8, cmd, "--info")) {
         // php_print_info(PHP_INFO_ALL & ~PHP_INFO_CREDITS)
         try runCode(allocator, "phpinfo(~INFO_CREDITS);", &.{});
+    } else if (std.mem.eql(u8, cmd, "--ri") or std.mem.eql(u8, cmd, "--rextinfo")) {
+        try requireArg(args, 3, "usage: zphp --ri <extension>\n");
+        try printExtensionInfo(allocator, args[2]);
     } else if (std.mem.eql(u8, cmd, "-m") or std.mem.eql(u8, cmd, "--modules")) {
         // the cli's print_modules: each list sorted by name, in any case
         try runCode(allocator,
@@ -1186,6 +1189,32 @@ fn compileDiskEntry(allocator: std.mem.Allocator, entry: []const u8) !CompileRes
 
 // the script's remaining output. a write the reader refused (a closed pipe)
 // is php's aborted connection: no message, and the run ends with 255
+// the cli's --ri: php_info_print_module for a loaded extension (named in
+// any case), display_ini_entries(NULL) for "main"
+fn printExtensionInfo(allocator: std.mem.Allocator, name: []const u8) !void {
+    const vm = VM.initOnHeap(allocator) catch {
+        try writeStderr("vm init error\n");
+        std.process.exit(1);
+    };
+    defer {
+        vm.deinit();
+        allocator.destroy(vm);
+    }
+    var ctx = vm.makeContext(null);
+    const phpinfo = @import("stdlib/phpinfo.zig");
+    var status: u8 = 0;
+    if (@import("stdlib/reflection.zig").extensionName(name)) |module| {
+        try phpinfo.printModule(&ctx, module);
+    } else if (std.mem.eql(u8, name, "main")) {
+        try phpinfo.printMainIni(&ctx);
+    } else {
+        try vm.output.print(allocator, "Extension '{s}' not present.\n", .{name});
+        status = 1;
+    }
+    _ = flushScriptOutput(vm);
+    if (status != 0) std.process.exit(status);
+}
+
 fn flushScriptOutput(vm: *@import("runtime/vm.zig").VM) bool {
     if (vm.output.items.len == 0) return true;
     platform.writeAll(std.Io.File.stdout(), vm.output.items) catch return false;
