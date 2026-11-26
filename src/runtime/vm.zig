@@ -14935,9 +14935,7 @@ pub const VM = struct {
                                 }
                             }
                             // a parameter the named arguments skipped takes its default
-                            for (0..pos) |i| {
-                                if (!slots.assigned[i] and i < func2.defaults.len) resolved[i] = try self.resolveParamDefault(func2, i);
-                            }
+                            try self.fillSkippedDefaults(func2, resolved[0..pos], slots.assigned[0..pos]);
                             for (0..pos) |i| {
                                 self.push(resolved[i]);
                                 self.setArgSource(self.sp - 1, resolved_sources[i]);
@@ -17983,6 +17981,7 @@ pub const VM = struct {
                         if (std.mem.eql(u8, pname, entry.key.string.bytes()) or std.mem.eql(u8, p, entry.key.string.bytes())) {
                             resolved[pi] = entry.value;
                             resolved_sources[pi] = self.argArraySource(arr, entry.key);
+                            slots.assigned[pi] = true;
                             if (pi >= pos) pos = pi + 1;
                             break true;
                         }
@@ -17996,15 +17995,12 @@ pub const VM = struct {
                 } else {
                     resolved[pos] = entry.value;
                     resolved_sources[pos] = self.argArraySource(arr, entry.key);
+                    slots.assigned[pos] = true;
                     pos += 1;
                 }
             }
             const count = @max(pos, func.required_params);
-            for (0..count) |i| {
-                if (resolved[i] == .null and i < func.defaults.len) {
-                    resolved[i] = try self.resolveParamDefault(func, i);
-                }
-            }
+            try self.fillSkippedDefaults(func, resolved[0..count], slots.assigned[0..count]);
             for (0..count) |i| {
                 self.push(resolved[i]);
                 self.setArgSource(self.sp - 1, resolved_sources[i]);
@@ -30612,6 +30608,40 @@ pub const VM = struct {
         // type once evaluated (RECV_INIT)
         if (raw == .string and raw.string.len > 0 and raw.string.bytes()[0] == 0) return self.checkEvaluatedDefault(func, index, value);
         return value;
+    }
+
+    // the defaults of the parameters named arguments skipped, in order
+    // (zend_handle_undef_args): php evaluates them in the callee's frame, so
+    // an error's trace shows the arguments so far, a skipped one as NULL
+    fn fillSkippedDefaults(self: *VM, func: *const ObjFunction, args: []Value, assigned: []const bool) RuntimeError!void {
+        for (args, assigned) |*arg, set| if (!set) {
+            arg.* = .null;
+        };
+        const saved = self.showDefaultArgs(func, args);
+        defer self.restoreDefaultArgs(saved);
+        for (args, assigned, 0..) |*arg, set, i| {
+            if (!set and i < func.defaults.len) arg.* = try self.resolveParamDefault(func, i);
+        }
+    }
+
+    pub const DefaultArgs = struct { args: []const Value, func: ?*const ObjFunction, depth: usize };
+
+    // the arguments a trace shows for func's frame while its defaults are
+    // resolved, until restoreDefaultArgs
+    pub fn showDefaultArgs(self: *VM, func: *const ObjFunction, args: []const Value) DefaultArgs {
+        const ic = self.ic.?;
+        const saved: DefaultArgs = .{ .args = ic.default_args, .func = ic.default_args_func, .depth = ic.default_args_depth };
+        ic.default_args = args;
+        ic.default_args_func = func;
+        ic.default_args_depth = self.frame_count;
+        return saved;
+    }
+
+    pub fn restoreDefaultArgs(self: *VM, saved: DefaultArgs) void {
+        const ic = self.ic.?;
+        ic.default_args = saved.args;
+        ic.default_args_func = saved.func;
+        ic.default_args_depth = saved.depth;
     }
 
     pub const DefaultHold = struct { value: Value, depth: usize };

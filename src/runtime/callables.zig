@@ -747,7 +747,11 @@ pub fn bindNamed(vm: *VM, name: []const u8, func: *const @import("../pipeline/by
         try extras.?.set(vm.allocator, entry.key, ev);
     }
     // a skipped parameter before the last one passed takes its default; one
-    // before a required parameter has none (its default is ignored)
+    // before a required parameter has none (its default is ignored). php
+    // evaluates them in the callee's frame (zend_handle_undef_args), whose
+    // trace entry shows the arguments so far
+    const saved = vm.showDefaultArgs(func, values[0..count]);
+    defer vm.restoreDefaultArgs(saved);
     for (0..count) |i| {
         if (origins[i] != null) continue;
         if (i < func.defaults.len and i >= func.required_params) {
