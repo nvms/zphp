@@ -13063,7 +13063,16 @@ pub const VM = struct {
                     const sent = self.stack[self.sp - 1];
                     // array_multisort and extract prefer a reference, and take values
                     // quietly (ZEND_ARG_SEND_PREFER_REF)
-                    const callee = self.argCalleeName(chunk, call_ip, args_base) orelse continue;
+                    const callee = self.argCalleeName(chunk, call_ip, args_base, pos) orelse continue;
+                    // an argument of a call carried in an array: its position
+                    // is the array's count, or the parameter its name binds
+                    // (zend_handle_named_arg), and the call itself reports
+                    // a name nothing takes
+                    const at_pos: u8 = if (pos == arg_pos_spread or pos == arg_pos_named)
+                        (self.carriedArgPosition(callee, pos) orelse continue)
+                    else
+                        pos;
+                    if (at_pos != pos and (self.callSiteByValue(chunk, call_ip, at_pos, args_base) orelse true)) continue;
                     if (std.ascii.eqlIgnoreCase(callee, "array_multisort") or std.ascii.eqlIgnoreCase(callee, "extract")) continue;
                     if (op == .arg_call_result) {
                         // SEND_VAR_NO_REF: a call that returned a reference
@@ -13088,7 +13097,7 @@ pub const VM = struct {
                         continue;
                     }
                     // SEND_VAL_EX: a value where the callee must take a reference
-                    const msg = try self.cannotPassByReference(callee, pos);
+                    const msg = try self.cannotPassByReference(callee, at_pos);
                     defer self.allocator.free(msg);
                     if (try self.throwBuiltinException("Error", msg)) continue;
                     return error.RuntimeError;
@@ -17318,7 +17327,7 @@ pub const VM = struct {
 
     // the 0-based argument position a named element sent by reference takes
     fn unpackNamedRefPosition(self: *VM, site: UnpackSite, name: []const u8) ?usize {
-        const callee = self.argCalleeName(site.chunk, site.call_ip, site.args_base) orelse return null;
+        const callee = self.argCalleeName(site.chunk, site.call_ip, site.args_base, 0) orelse return null;
         const func = self.functions.get(callee) orelse return null;
         const fixed = if (func.is_variadic) func.params.len - 1 else func.params.len;
         for (func.params[0..fixed], 0..) |param, i| {
@@ -17359,7 +17368,7 @@ pub const VM = struct {
                 const positional = !call_args and PhpArray.normalizeKey(.{ .string = k }) == .int;
                 if (!positional) {
                     if (site) |st| if (self.unpackNamedRefPosition(st, k.bytes())) |pos| {
-                        const callee = self.argCalleeName(st.chunk, st.call_ip, st.args_base) orelse "";
+                        const callee = self.argCalleeName(st.chunk, st.call_ip, st.args_base, 0) orelse "";
                         const msg = try std.fmt.allocPrint(self.allocator, "Cannot pass by-reference argument {d} of {s}() by unpacking a Traversable, passing by-value instead", .{ pos + 1, callee });
                         defer self.allocator.free(msg);
                         try self.emitWarning(msg);
@@ -17375,7 +17384,7 @@ pub const VM = struct {
         if (site) |st| {
             const pos = target.entries.items.len;
             if (self.unpackSendsRef(st, pos, 1)) {
-                const callee = self.argCalleeName(st.chunk, st.call_ip, st.args_base) orelse "";
+                const callee = self.argCalleeName(st.chunk, st.call_ip, st.args_base, 0) orelse "";
                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot pass by-reference argument {d} of {s}() by unpacking a Traversable, passing by-value instead", .{ pos + 1, callee });
                 defer self.allocator.free(msg);
                 try self.emitWarning(msg);
@@ -25539,7 +25548,7 @@ pub const VM = struct {
     fn guardSlots(code: []const u8, call_ip: usize) u8 {
         const call_op = bytecode.opAt(code, call_ip) orelse return 0;
         return switch (call_op) {
-            .method_call, .method_call_spread, .static_call_dynamic, .new_obj_dynamic, .call_indirect, .static_call_dyn_method => 1,
+            .method_call, .method_call_spread, .static_call_dynamic, .new_obj_dynamic, .call_indirect, .call_indirect_spread, .static_call_dyn_method => 1,
             .method_call_dynamic, .method_call_dynamic_spread, .static_call_dyn_both, .static_call_dyn_both_spread => 2,
             .static_call, .static_call_spread => 3,
             else => 0,
@@ -25600,7 +25609,7 @@ pub const VM = struct {
         const call_op = bytecode.opAt(code, call_ip) orelse return null;
         return switch (call_op) {
             .call, .call_spread => self.functionByValue(consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes(), pos),
-            .call_indirect => self.callableByValue(self.stack[args_base - 1], pos),
+            .call_indirect, .call_indirect_spread => self.callableByValue(self.stack[args_base - 1], pos),
             .method_call, .method_call_spread => self.methodByValue(self.stack[args_base - 1], consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes(), pos),
             .method_call_dynamic, .method_call_dynamic_spread => blk: {
                 const name = self.stack[args_base - 1];
@@ -25655,9 +25664,59 @@ pub const VM = struct {
         return self.stack[args_base - npos - 1];
     }
 
+    // the parameter an argument carried in a call's array binds: the array's
+    // count for a positional one (nothing positional follows an unpack), the
+    // parameter of that name for a named one, or the variadic that collects
+    // an unknown name. null when the name binds nothing
+    fn carriedArgPosition(self: *VM, callee: []const u8, pos: u8) ?u8 {
+        if (pos == arg_pos_spread) {
+            const carrier = self.stack[self.sp - 2];
+            if (carrier != .array) return null;
+            const n: usize = @intCast(carrier.array.length());
+            return if (n <= ArgPos_max) @intCast(n) else null;
+        }
+        const name_val = self.stack[self.sp - 2];
+        if (name_val != .string) return null;
+        const name = name_val.string.bytes();
+        var found: ?usize = null;
+        var count: usize = 0;
+        var variadic = false;
+        if (self.functions.get(callee)) |func| {
+            variadic = func.is_variadic;
+            count = func.params.len - @intFromBool(func.is_variadic);
+            for (func.params[0..count], 0..) |p, i| {
+                const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
+                if (std.mem.eql(u8, pn, name)) {
+                    found = i;
+                    break;
+                }
+            }
+        } else {
+            var lower_buf: [256]u8 = undefined;
+            if (callee.len > lower_buf.len) return null;
+            const signatures = @import("../stdlib/native_params_generated.zig").map;
+            const sig = signatures.get(callee) orelse signatures.get(std.ascii.lowerString(&lower_buf, callee)) orelse return null;
+            for (sig.params, 0..) |p, i| {
+                if (p.variadic) {
+                    variadic = true;
+                    break;
+                }
+                count = i + 1;
+                if (std.mem.eql(u8, p.name, name)) {
+                    found = i;
+                    break;
+                }
+            }
+        }
+        const at = found orelse (if (variadic) count else return null);
+        return if (at <= ArgPos_max) @intCast(at) else null;
+    }
+
+    const ArgPos_max: usize = 0xFD;
+
     // the registered name of the callee a call site will call, as far as it
     // can be known before the call: a function, or "Class::method"
-    fn argCalleeName(self: *VM, chunk: *const Chunk, call_ip: usize, args_base: usize) ?[]const u8 {
+    fn argCalleeName(self: *VM, chunk: *const Chunk, call_ip: usize, args_base: usize, pos: u8) ?[]const u8 {
         const code = chunk.code.items;
         const consts = chunk.constants.items;
         if (call_ip >= code.len) return null;
@@ -25686,13 +25745,44 @@ pub const VM = struct {
                 return self.resolveMethod(class_name, "__construct") catch null;
             },
             // $f(...): a closure by the function it runs, a function name
-            .call_indirect, .partial_closure => {
-                const callee = if (call_op == .partial_closure) (self.partialCallable(chunk, call_ip, 0, args_base) orelse return null) else self.stack[args_base - 1];
-                if (callee.closureName()) |name| return self.functions.getKey(name);
-                if (callee != .string or std.mem.indexOf(u8, callee.string.bytes(), "::") != null) return null;
-                const raw = callee.string.bytes();
+            .call_indirect, .call_indirect_spread, .partial_closure => {
+                const callee = if (call_op == .partial_closure) (self.partialCallable(chunk, call_ip, pos, args_base) orelse return null) else self.stack[args_base - 1];
+                return self.callableCalleeName(callee);
+            },
+            else => return null,
+        }
+    }
+
+    // the registered name a callable value calls, as callableByValue reads
+    // it: a closure, a closure made from a callable, a function name,
+    // "Class::method" or [target, method]
+    fn callableCalleeName(self: *VM, callee: Value) ?[]const u8 {
+        switch (callee) {
+            .object => |o| {
+                if (o.closureName()) |name| return self.functions.getKey(name);
+                if (o.fakeClosure()) |state| return self.callableCalleeName(state.callable);
+                return self.resolveMethod(o.class_name, "__invoke") catch null;
+            },
+            .string => |s| {
+                const raw = s.bytes();
+                if (std.mem.indexOf(u8, raw, "::")) |sep| {
+                    const class_name = self.intentClassName(raw[0..sep]) orelse return null;
+                    return self.resolveMethod(class_name, raw[sep + 2 ..]) catch null;
+                }
                 const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
                 return self.functions.getKey(name) orelse self.native_fns.getKey(name) orelse self.functionNamedIgnoringCase(name);
+            },
+            .array => |a| {
+                if (a.entries.items.len != 2) return null;
+                const target = a.entries.items[0].value;
+                const method = a.entries.items[1].value;
+                if (method != .string) return null;
+                const class_name = switch (target) {
+                    .object => |o| o.class_name,
+                    .string => |t| self.intentClassName(t.bytes()) orelse return null,
+                    else => return null,
+                };
+                return self.resolveMethod(class_name, method.string.bytes()) catch null;
             },
             else => return null,
         }

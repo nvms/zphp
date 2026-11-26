@@ -1730,10 +1730,10 @@ fn isTemporaryContainer(self: *Compiler, idx: u32) bool {
 }
 
 // a guard for an argument that can't be a reference, unless the compiler
-// knows the callee takes it by value (php's SEND_VAL) or the position is
-// a spread or named one, which the guard can't place
+// knows the callee takes it by value (php's SEND_VAL). one carried in a
+// call's array (named, or after a spread) finds its position when it runs
 fn emitValueGuard(self: *Compiler, guard: ArgGuard, op: OpCode) Error!void {
-    if (guard.by_value or guard.pos >= ArgPos.named) return;
+    if (guard.by_value) return;
     try emitArgGuard(self, guard, op);
 }
 
@@ -2027,10 +2027,12 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
             var guards = try emitSpreadArgs(self, args);
             try emitCallOp(self, &guards, .static_call_dyn_both_spread, .{});
         } else {
-            // the callable is evaluated after its argument array, matching
-            // call_indirect_spread's pop order
-            var guards = try emitSpreadArgs(self, args);
+            // the callable is evaluated before its arguments (php's
+            // INIT_DYNAMIC_CALL), so their guards find it below the array,
+            // and goes on top for call_indirect_spread's pop order
             try self.compileNode(node.data.lhs);
+            var guards = try emitSpreadArgs(self, args);
+            try self.emitOp(.swap);
             try emitCallOp(self, &guards, .call_indirect_spread, .{});
         }
     } else if (callee.tag == .identifier) {
