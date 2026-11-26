@@ -61,7 +61,16 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             else => false,
         };
         if (rhs_call and listHasRef(self, node.data.lhs)) try self.emitOp(.reset_return_ref);
-        try self.compileNode(node.data.rhs);
+        // zend_compile_list_assign fetches a variable source for writing
+        // when the list binds references: its array is separated from
+        // other holders, and an undefined one becomes an array
+        const rhs_node = self.ast.nodes[node.data.rhs];
+        const write_source = listHasRef(self, node.data.lhs) and switch (rhs_node.tag) {
+            .variable => !std.mem.eql(u8, self.ast.tokenSlice(rhs_node.main_token), "$this"),
+            .array_access, .property_access => true,
+            else => false,
+        };
+        if (write_source) try compileVivifyChain(self, node.data.rhs) else try self.compileNode(node.data.rhs);
         if (rhs_call and listHasRef(self, node.data.lhs)) try self.emitOp(.list_ref_source);
         try self.compileDestructure(target);
         return;
