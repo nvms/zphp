@@ -136,10 +136,12 @@ fn findAttrRangeForToken(attr_ranges: []const ast_mod.AttrRange, tokens: []const
 // php refuses at compile time
 const CallAttrs = struct { no_discard: ?[]const u8 = null, deprecated: ?[]const u8 = null };
 
-fn callAttributes(self: *Compiler, main_token: u32, return_type: []const u8, comptime kind: []const u8) Error!CallAttrs {
+// function names the function or method the attributes are on, which a
+// closure among their arguments is named after ("" for none)
+fn callAttributes(self: *Compiler, main_token: u32, return_type: []const u8, comptime kind: []const u8, function: []const u8) Error!CallAttrs {
     var out: CallAttrs = .{};
     if (self.ast.attr_ranges.len == 0) return out;
-    const attrs = try extractAttributes(self, main_token, .unchecked);
+    const attrs = if (function.len > 0) try extractAttributesOf(self, main_token, .unchecked, function) else try extractAttributes(self, main_token, .unchecked);
     defer freeParsedAttrs(self.allocator, attrs);
     for (attrs) |pa| {
         const name = if (pa.name.len > 0 and pa.name[0] == '\\') pa.name[1..] else pa.name;
@@ -219,7 +221,7 @@ pub fn emitConstantAttributes(self: *Compiler, main_token: u32, name_idx: u16) E
 // what a #[\Deprecated] on the declaration at main_token adds after "is
 // deprecated" (" since 2.0, use X", or ""), null without the attribute
 pub fn deprecationOfDecl(self: *Compiler, main_token: u32) Error!?[]const u8 {
-    return (try callAttributes(self, main_token, "", "constant")).deprecated;
+    return (try callAttributes(self, main_token, "", "constant", "")).deprecated;
 }
 
 // a string attribute argument by position or name
@@ -2336,7 +2338,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
 
     // a generator's body only runs once it is iterated, so its call can't be
     // checked from inside it
-    const call_attrs = try callAttributes(self, node.main_token, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), "function");
+    const call_attrs = try callAttributes(self, node.main_token, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), "function", name);
     if (call_attrs.deprecated != null and !gen) try sub.emitOp(.check_deprecated);
     if (call_attrs.no_discard != null and !gen) try sub.emitOp(.check_nodiscard);
     const body_idx = node.data.rhs & 0x3FFFFFFF;
@@ -2564,7 +2566,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     // of unused objects and fire their __destruct late
     if (is_arrow) sub.arrow_parent = self;
 
-    const call_attrs = try callAttributes(self, node.main_token, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), "function");
+    const call_attrs = try callAttributes(self, node.main_token, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), "function", "");
     if (call_attrs.deprecated != null and !gen) try sub.emitOp(.check_deprecated);
     if (call_attrs.no_discard != null and !gen) try sub.emitOp(.check_nodiscard);
     try sub.compileNode(body_node);
@@ -4878,7 +4880,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         if (ref_flags[i]) continue;
         _ = sub.getOrCreateSlot(param_names[i]);
     }
-    const call_attrs = try callAttributes(self, member.main_token, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), "method");
+    const call_attrs = try callAttributes(self, member.main_token, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), "method", method_name);
     if (call_attrs.deprecated != null and !method_gen) try sub.emitOp(.check_deprecated);
     if (call_attrs.no_discard != null and !method_gen) try sub.emitOp(.check_nodiscard);
 
@@ -5452,7 +5454,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         var it = hookIterator(self, member);
         while (it.next()) |hook| {
             if (!std.mem.endsWith(u8, hook.method, suffix)) continue;
-            deprecated = (try callAttributes(self, hook.token, "", "method")).deprecated;
+            deprecated = (try callAttributes(self, hook.token, "", "method", "")).deprecated;
             doc_comment = docCommentForToken(self, hook.token);
         }
     }
@@ -5627,7 +5629,9 @@ fn hasOp(chunk: *const Chunk, op: OpCode) bool {
 // the scope being the enclosing closure's name, `Class::method()`, `func()`,
 // or the file at the top level
 pub fn closureDisplayName(self: *Compiler, line: u32) ![]const u8 {
-    const f = self.current_function;
+    // an initializer zphp compiles for a constant expression (property
+    // defaults, "\x00...") is no function: such a closure is the file's
+    const f = if (std.mem.startsWith(u8, self.current_function, "\x00")) "" else self.current_function;
     const name = if (std.mem.startsWith(u8, f, "{closure:"))
         try std.fmt.allocPrint(self.allocator, "{{closure:{s}:{d}}}", .{ f, line })
     else if (f.len > 0 and self.current_class.len > 0)
