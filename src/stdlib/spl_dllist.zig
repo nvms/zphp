@@ -671,7 +671,12 @@ fn serializeM(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         try w.raw(":");
         // a __serialize that removes the next element ends the walk there
         const next_id: i64 = if (i + 1 < l.len()) l.idAt(i + 1) else 0;
-        try w.value(l.at(i));
+        // the element is held while it is written (ZVAL_COPY), so a
+        // __serialize that removes it from the list doesn't free it
+        const data = l.at(i);
+        VM.retainValue(data);
+        defer ctx.vm.releaseValue(data);
+        try w.value(data);
         if (next_id == 0) break;
         l = try listOf(ctx, obj);
         i = l.indexOf(next_id, @intCast(i + 1)) orelse break;
