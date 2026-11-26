@@ -923,35 +923,40 @@ pub fn compileStaticVar(self: *Compiler, node: Ast.Node) Error!void {
     if (std.mem.eql(u8, var_name, "$this")) return self.fail(node.main_token, "Cannot use $this as static variable");
     try self.noteStaticVar(var_name, node.data.lhs, node.main_token);
 
-    // get_static pushes the current value (or null if uninitialized)
-    // VM derives the storage key from current function name + var name
-    try self.emitOp(.get_static);
-    try self.emitU16(var_idx);
-
-    // the first run binds the initial value; a bound static keeps whatever
-    // it holds, null included (ZEND_BIND_INIT_STATIC_OR_JMP)
+    // get_static binds the variable to the function's static and pushes its
+    // value (null if uninitialized); the VM derives the storage key from the
+    // current function name and the variable name
     if (node.data.lhs != 0) {
+        // the first run binds the initial value; a bound static keeps
+        // whatever it holds, null included (ZEND_BIND_INIT_STATIC_OR_JMP).
+        // the initializer runs before the variable is bound, so it reads
+        // the local variable of the same name (ZEND_BIND_STATIC)
         try self.emitOp(.jump_if_static_bound);
         try self.emitU16(var_idx);
         try self.emitU16(0xffff);
         const skip = self.chunk.offset() - 2;
-        try self.emitOp(.pop);
         try self.compileNode(node.data.lhs);
-        // ZEND_BIND_STATIC: an initializer that initialized the variable
-        // itself (a recursive call) leaves that value, and its own is dropped
+        // an initializer that initialized the variable itself (a recursive
+        // call) leaves that value, and its own is dropped
         try self.emitOp(.jump_if_static_bound);
         try self.emitU16(var_idx);
         try self.emitU16(0xffff);
         const initialized = self.chunk.offset() - 2;
         try self.emitOp(.static_bind);
         try self.emitU16(var_idx);
+        try self.emitOp(.get_static);
+        try self.emitU16(var_idx);
+        try self.emitOp(.pop);
         const done = try self.emitJump(.jump);
         self.patchJump(initialized);
         try self.emitOp(.pop);
+        self.patchJump(skip);
         try self.emitOp(.get_static);
         try self.emitU16(var_idx);
         self.patchJump(done);
-        self.patchJump(skip);
+    } else {
+        try self.emitOp(.get_static);
+        try self.emitU16(var_idx);
     }
 
     try self.emitOp(.set_var);
