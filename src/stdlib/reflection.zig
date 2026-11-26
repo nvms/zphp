@@ -4021,8 +4021,9 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(if (display.len > 0) display else "{closure}") });
     } else if (args[0] == .object and std.mem.eql(u8, args[0].object.class_name, "Closure")) {
         const callable = args[0].object.fakeCallable();
-        // a first-class callable reflects as a closure of the function,
-        // and the reflection keeps the closure alive, as php's does
+        // a first-class callable reflects as a closure of the function; the
+        // reflection keeps the closure alive, and invoking calls through it,
+        // so a method keeps its bound $this
         try this.set(ctx.allocator, "__from_closure", .{ .bool = true });
         try this.set(ctx.allocator, "__held_closure", args[0]);
         if (callable == .string) {
@@ -4107,6 +4108,8 @@ fn rfInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     var bound = try bindArguments(ctx, fn_name, fn_name, args, ctx.named_args);
     defer bound.deinit(ctx.allocator);
     try bound.warnValues(ctx, fn_name);
+    const fake = this.get("__held_closure");
+    if (fake == .object) return NativeResult.share(try ctx.invokeCallable(fake, bound.list.items));
     return NativeResult.share(try ctx.vm.callByName(fn_name, bound.list.items));
 }
 
@@ -4117,6 +4120,8 @@ fn rfInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     var bound = try bindArguments(ctx, fn_name, fn_name, &.{}, arr);
     defer bound.deinit(ctx.allocator);
     try bound.warnValues(ctx, fn_name);
+    const fake = this.get("__held_closure");
+    if (fake == .object) return NativeResult.share(try ctx.invokeCallable(fake, bound.list.items));
     return NativeResult.share(try ctx.vm.callByName(fn_name, bound.list.items));
 }
 
