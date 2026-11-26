@@ -1091,6 +1091,11 @@ pub fn paramDefaultInitializer(allocator: std.mem.Allocator, file_path: []const 
     return std.fmt.allocPrint(allocator, param_default_prefix ++ "{d}\x00{s}\x00{s}", .{ token, file_path, text });
 }
 
+// whether a function is a parameter default's initializer
+pub fn isParamDefaultInitializerName(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, param_default_prefix);
+}
+
 pub const ParamDefaultInitializer = struct { name: []const u8, text: []const u8 };
 
 pub fn paramDefaultInitializerParts(value: []const u8) ?ParamDefaultInitializer {

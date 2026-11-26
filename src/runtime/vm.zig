@@ -2275,8 +2275,14 @@ pub const VM = struct {
         // the function whose parameter default is being resolved, for the
         // location of the error an unresolvable default raises
         default_site: ?*const ObjFunction = null,
-        // the arguments the call passed, which its trace entry shows
+        // the arguments the call passed, which its trace entry shows, for
+        // the call to `default_args_func` at `default_args_depth`
         default_args: []const Value = &.{},
+        default_args_func: ?*const ObjFunction = null,
+        default_args_depth: usize = 0,
+        // the defaults being resolved, innermost first: a trace shows the
+        // initializer's frame as the function's own (RECV_INIT runs there)
+        default_chain: ?*const DefaultSite = null,
         // values ini_set and friends stored in ini_settings, owned here by
         // directive name; the file's and extensions' values are borrowed
         ini_values: std.StringHashMapUnmanaged([]u8) = .{},
@@ -16625,6 +16631,16 @@ pub const VM = struct {
                 // a generator running as a delegate was reached through the
                 // generators waiting in yield from, which php lists between
                 // it and the frame that resumed them
+                if (bytecode.isParamDefaultInitializerName(f.name)) if (self.defaultSiteAt(i)) |site| {
+                    const entry = try self.newTraceEntry(site.func, call_site);
+                    const entry_args = try self.traceArgs(entry);
+                    const sensitive = try self.sensitiveParamMask(site.func);
+                    for (site.args, 0..) |a, ai| try entry_args.append(self.allocator, try self.traceArgValue(a, sensitive, ai));
+                    try arr.append(self.allocator, .{ .array = entry });
+                    try self.tryAppendRequireFrame(arr, i);
+                    if (i == 0 or i <= self.trace_floor) break;
+                    continue;
+                };
                 const delegator = if (self.frames[i].generator) |g| g.delegator else null;
                 const entry = try self.newTraceEntry(f, if (delegator) |d| self.generatorPosition(d) else call_site);
                 // a closure's frame names the class of its scope, with the
@@ -19570,6 +19586,9 @@ pub const VM = struct {
             // expression with a scope, whose own file and line php reports
             // (EG(filename_override))
             if (isScopedConstExpr(func.name) and !isBareConstantInitializer(func)) break;
+            // a parameter default runs in its function (RECV_INIT), at the
+            // parameter's line
+            if (bytecode.isParamDefaultInitializerName(func.name)) break;
         }
         // an internal function the engine calls after the script ended
         // (a shutdown function): no user code is executing, and php's
@@ -30025,6 +30044,10 @@ pub const VM = struct {
         const saved = ic.default_site;
         ic.default_site = func;
         defer ic.default_site = saved;
+        const args = if (ic.default_args_func == func and ic.default_args_depth == self.frame_count) ic.default_args else &.{};
+        const site: DefaultSite = .{ .func = func, .args = args, .depth = self.frame_count, .outer = ic.default_chain };
+        ic.default_chain = &site;
+        defer ic.default_chain = site.outer;
         const raw = func.defaults[index];
         if (raw == .string) if (bytecode.paramDefaultInitializerParts(raw.string.bytes())) |pd| {
             const value = try self.evaluateParamDefault(func, pd.name);
@@ -30038,6 +30061,15 @@ pub const VM = struct {
     }
 
     pub const DefaultHold = struct { value: Value, depth: usize };
+
+    pub const DefaultSite = struct { func: *const ObjFunction, args: []const Value, depth: usize, outer: ?*const DefaultSite };
+
+    // the function whose default the initializer in frame `i` evaluates
+    fn defaultSiteAt(self: *const VM, i: usize) ?*const DefaultSite {
+        var site = (self.ic orelse return null).default_chain;
+        while (site) |s| : (site = s.outer) if (s.depth == i) return s;
+        return null;
+    }
 
     // resolveParamDefault for a call's own defaults: a value an initializer
     // returned is held until releaseDefaultHolds, as the stack holds an
@@ -30116,9 +30148,11 @@ pub const VM = struct {
     // catch as a type check's does: true means it did and the call is over
     fn fillDefaultLocals(self: *VM, func: *const ObjFunction, locals: []Value, bound: usize, offset: usize) RuntimeError!bool {
         const ic = self.ic.?;
-        const saved_args = ic.default_args;
+        const saved_args = .{ ic.default_args, ic.default_args_func, ic.default_args_depth };
         ic.default_args = locals[offset..][0..bound];
-        defer ic.default_args = saved_args;
+        ic.default_args_func = func;
+        ic.default_args_depth = self.frame_count;
+        defer ic.default_args, ic.default_args_func, ic.default_args_depth = saved_args;
         defer self.releaseDefaultHolds();
         for (bound..func.arity) |i| {
             if (i >= func.defaults.len) continue;
@@ -30139,9 +30173,11 @@ pub const VM = struct {
     // stays pending for the native's caller
     fn fillDefaultLocalsForCaller(self: *VM, func: *const ObjFunction, locals: []Value, bound: usize, offset: usize) RuntimeError!void {
         const ic = self.ic.?;
-        const saved_args = ic.default_args;
+        const saved_args = .{ ic.default_args, ic.default_args_func, ic.default_args_depth };
         ic.default_args = locals[offset..][0..bound];
-        defer ic.default_args = saved_args;
+        ic.default_args_func = func;
+        ic.default_args_depth = self.frame_count;
+        defer ic.default_args, ic.default_args_func, ic.default_args_depth = saved_args;
         defer self.releaseDefaultHolds();
         for (bound..func.arity) |i| {
             if (i >= func.defaults.len) continue;
@@ -30161,7 +30197,7 @@ pub const VM = struct {
         const at: ?SourcePosition = if (site) |func| .{ .file = func.file_path, .line = func.start_line } else null;
         const exc = try self.newBuiltinException("Error", msg, at);
         // php evaluates the default in the callee's frame (RECV_INIT)
-        if (site) |func| try self.prependCallToTrace(exc, func, self.ic.?.default_args);
+        if (self.ic.?.default_chain) |chain| try self.prependCallToTrace(exc, chain.func, chain.args) else if (site) |func| try self.prependCallToTrace(exc, func, &.{});
         self.raise(.{ .object = exc });
         return error.RuntimeError;
     }
@@ -30345,6 +30381,17 @@ pub const VM = struct {
     fn fillDefaults(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, arg_count: usize) !void {
         if (arg_count >= func.arity) return;
         defer self.releaseDefaultHolds();
+        // the passed arguments, for the trace of an error a default raises
+        const shown = @min(arg_count, func.params.len);
+        const passed = try self.allocator.alloc(Value, shown);
+        defer self.allocator.free(passed);
+        for (func.params[0..shown], passed) |pname, *p| p.* = vars.get(pname) orelse .null;
+        const ic = self.ic.?;
+        const saved_args = .{ ic.default_args, ic.default_args_func, ic.default_args_depth };
+        ic.default_args = passed;
+        ic.default_args_func = func;
+        ic.default_args_depth = self.frame_count;
+        defer ic.default_args, ic.default_args_func, ic.default_args_depth = saved_args;
         for (arg_count..func.arity) |i| {
             if (i < func.defaults.len) {
                 try vars.put(self.allocator, func.params[i], try self.resolveParamDefaultHeld(func, i));

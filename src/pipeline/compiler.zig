@@ -127,9 +127,13 @@ pub const CompileResult = struct {
             self.allocator.destroy(nd);
         }
         self.new_defaults.deinit(self.allocator);
-        // operands are tracked elsewhere (string_allocs / nested in this same
-        // list), so only the structs themselves need freeing
-        for (self.deferred_exprs.items) |de| self.allocator.destroy(de);
+        // string operands are tracked elsewhere (string_allocs / nested in
+        // this same list); array operands are each expression's own
+        for (self.deferred_exprs.items) |de| {
+            freeDefaultValue(self.allocator, de.lhs);
+            freeDefaultValue(self.allocator, de.rhs);
+            self.allocator.destroy(de);
+        }
         self.deferred_exprs.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
         if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
@@ -1894,6 +1898,14 @@ pub const Compiler = struct {
     // a compound const-expression default that can't be folded now (an operand
     // is a deferred constant sentinel) - heap a DeferredExpr and return its
     // sentinel; resolveDefault applies the op at call time
+    fn foldableNumber(v: Value) bool {
+        return switch (v) {
+            .int, .float => true,
+            .string => |str| str.len > 0 and str.bytes()[0] != 0 and Value.isNumericString(str.bytes()),
+            else => false,
+        };
+    }
+
     fn makeDeferredExpr(self: *Compiler, op: bytecode.DeferredExpr.Op, lhs: Value, rhs: Value) Value {
         const de = self.allocator.create(bytecode.DeferredExpr) catch return Value.null;
         de.* = .{ .op = op, .lhs = lhs, .rhs = rhs };
@@ -2036,6 +2048,14 @@ pub const Compiler = struct {
                     }
                     break :blk self.makeDeferredExpr(.concat, lhs, rhs);
                 }
+                // php folds arithmetic that can't raise anything
+                // (zend_binary_op_produces_error): numbers and numeric strings
+                if (foldableNumber(lhs) and foldableNumber(rhs)) switch (tok.tag) {
+                    .plus => break :blk Value.add(lhs, rhs),
+                    .minus => break :blk Value.subtract(lhs, rhs),
+                    .star => break :blk Value.multiply(lhs, rhs),
+                    else => {},
+                };
                 // a compound arithmetic/bitwise expression that didn't fold -
                 // an operand is a deferred constant. defer the whole op
                 const dop: ?bytecode.DeferredExpr.Op = switch (tok.tag) {

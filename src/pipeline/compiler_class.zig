@@ -2160,7 +2160,10 @@ fn sentinelDefault(ast: *const Ast, idx: u32) bool {
             else => false,
         },
         .binary_op => switch (ast.tokens[node.main_token].tag) {
-            .pipe, .amp, .caret, .plus, .minus, .star, .slash, .percent, .lt_lt, .gt_gt, .star_star, .dot => sentinelDefault(ast, node.data.lhs) and sentinelDefault(ast, node.data.rhs),
+            .dot => sentinelDefault(ast, node.data.lhs) and sentinelDefault(ast, node.data.rhs),
+            // the encoded form computes numbers only: arithmetic on a literal
+            // array or string runs as code, for php's errors and warnings
+            .pipe, .amp, .caret, .plus, .minus, .star, .slash, .percent, .lt_lt, .gt_gt, .star_star => numericSentinel(ast, node.data.lhs) and numericSentinel(ast, node.data.rhs),
             else => false,
         },
         .array_literal => for (ast.extraSlice(node.data.lhs)) |el_idx| {
@@ -2170,6 +2173,23 @@ fn sentinelDefault(ast: *const Ast, idx: u32) bool {
         } else true,
         else => false,
     };
+}
+
+fn numericSentinel(ast: *const Ast, idx: u32) bool {
+    const tag = ast.nodes[idx].tag;
+    if (tag == .array_literal) return false;
+    if (tag == .string_literal) return !isEncapsString(ast, ast.nodes[idx]) and Value.isNumericString(literalBody(ast.tokenSlice(ast.nodes[idx].main_token)));
+    if (tag == .grouped_expr) return numericSentinel(ast, ast.nodes[idx].data.lhs);
+    return sentinelDefault(ast, idx);
+}
+
+// a quoted literal's text without its quotes, or "" when it has escapes
+// (such a literal runs as code)
+fn literalBody(raw: []const u8) []const u8 {
+    if (raw.len < 2 or (raw[0] != '\'' and raw[0] != '"')) return "";
+    const inner = raw[1 .. raw.len - 1];
+    if (std.mem.indexOfScalar(u8, inner, '\\') != null) return "";
+    return inner;
 }
 
 fn isRelativeClassName(name: []const u8) bool {

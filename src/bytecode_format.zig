@@ -541,7 +541,11 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
     }
     var deferred_exprs = std.ArrayListUnmanaged(*bytecode.DeferredExpr).empty;
     errdefer {
-        for (deferred_exprs.items) |de| allocator.destroy(de);
+        for (deferred_exprs.items) |de| {
+            compiler.freeDefaultValue(allocator, de.lhs);
+            compiler.freeDefaultValue(allocator, de.rhs);
+            allocator.destroy(de);
+        }
         deferred_exprs.deinit(allocator);
     }
     var ctx = DeserCtx{
