@@ -459,20 +459,53 @@ fn dataOrEmpty(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
 // php's serialized forms of the SPL containers, each with the object's own
 // properties alongside its contents
 
-// object_properties_load: serialized properties back onto the object, a
-// new dynamic one deprecated as any other; zphp's own state is not among them
+// object_properties_load: serialized properties back onto the object. a
+// typed property takes only a value its type accepts strictly, a reference
+// stays a reference, a new dynamic one is deprecated as any other; zphp's
+// own state is not among them
 pub fn loadProperties(ctx: *NativeContext, obj: *PhpObject, members: *PhpArray) RuntimeError!void {
+    const serialize = @import("serialize.zig");
     for (members.entries.items) |entry| {
         var buf: [24]u8 = undefined;
         const key = tableKey(entry.key, &buf);
-        const name = if (key.len > 0 and key[0] == 0) if (std.mem.lastIndexOfScalar(u8, key[1..], 0)) |end| key[end + 2 ..] else key else key;
-        if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
-        if (!obj.properties.contains(name) and !ctx.vm.classDeclaresProperty(obj.class_name, name) and ctx.vm.dynamicPropertyRule(obj) == .deprecated) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, name });
-            defer ctx.allocator.free(msg);
-            try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+        const slot = try serialize.propertySlot(ctx, obj, key);
+        const shown = if (slot.declared) slot.name else slot.shown;
+        if (object_properties.isInternalState(ctx.vm, obj, shown)) continue;
+        if (slot.declared) {
+            if (slot.virtual) {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot unserialize value for virtual property {s}::${s}", .{ obj.class_name, slot.name });
+                defer ctx.allocator.free(msg);
+                try ctx.vm.setPendingException("Error", msg);
+                return error.RuntimeError;
+            }
+            if (slot.type_str.len > 0 and entry.ref == null and !try ctx.vm.unserializedPropertyFits(entry.value, slot.type_str, slot.defining)) {
+                const type_text = try ctx.vm.propertyTypeText(slot.type_str, slot.defining);
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ phpTypeName(entry.value), slot.defining, slot.name, type_text });
+                defer ctx.allocator.free(msg);
+                try ctx.vm.setPendingException("TypeError", msg);
+                return error.RuntimeError;
+            }
+        } else if (!obj.properties.contains(slot.name)) switch (ctx.vm.dynamicPropertyRule(obj)) {
+            .allowed => {},
+            .forbidden => {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot create dynamic property {s}::${s}", .{ obj.class_name, shown });
+                defer ctx.allocator.free(msg);
+                try ctx.vm.setPendingException("Error", msg);
+                return error.RuntimeError;
+            },
+            .deprecated => {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, shown });
+                defer ctx.allocator.free(msg);
+                try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+                if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            },
+        };
+        if (entry.ref) |cell| {
+            try ctx.vm.bindPropertyToCell(obj, slot.name, cell);
+        } else {
+            obj.clearUnset(ctx.allocator, slot.name);
+            try obj.setForScope(ctx.allocator, slot.name, entry.value, slot.scope);
         }
-        try obj.set(ctx.allocator, name, entry.value);
     }
 }
 

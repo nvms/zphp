@@ -726,7 +726,11 @@ pub fn memberTable(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*PhpArray 
     const arr = try ctx.vm.allocArray();
     for (listing.items.items) |p| switch (p.key) {
         .int => |i| try arr.set(ctx.allocator, .{ .int = i }, p.value),
-        .name => |n| try object_properties.setMangled(ctx.vm, arr, n, p.visibility, p.declaring, p.value),
+        .name => |n| {
+            const before = arr.entries.items.len;
+            try object_properties.setMangled(ctx.vm, arr, n, p.visibility, p.declaring, p.value);
+            if (arr.entries.items.len > before) try @import("serialize.zig").keepPropertyReference(ctx, obj, arr, n);
+        },
     };
     return arr;
 }

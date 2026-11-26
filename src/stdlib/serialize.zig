@@ -1424,7 +1424,7 @@ fn readCustomObject(ctx: *NativeContext, u: *UnserCtx, sc: *Scan, dest: Loc, cla
 // the slot a serialized property name stands for: a declared property of
 // the object's class (also when its visibility changed since), an
 // ancestor's private one by its mangled name, or a dynamic property
-const PropSlot = struct {
+pub const PropSlot = struct {
     name: []const u8,
     scope: ?[]const u8 = null,
     declared: bool = false,
@@ -1436,7 +1436,7 @@ const PropSlot = struct {
     virtual: bool = false,
 };
 
-fn propertySlot(ctx: *NativeContext, obj: *PhpObject, key: []const u8) RuntimeError!PropSlot {
+pub fn propertySlot(ctx: *NativeContext, obj: *PhpObject, key: []const u8) RuntimeError!PropSlot {
     var class_part: ?[]const u8 = null;
     var name = key;
     if (key.len > 0 and key[0] == 0) {
@@ -1898,7 +1898,18 @@ fn splMember(ctx: *NativeContext, obj: *PhpObject, members: *PhpArray, name: []c
     const vis = if (cls) |c| findPropertyVisibility(c, name) else .public;
     const key = try mangledName(ctx.allocator, name, vis, obj.class_name);
     defer ctx.allocator.free(key);
+    const before = members.entries.items.len;
     try members.setCopiedKey(ctx.allocator, key, val);
+    if (members.entries.items.len > before) try keepPropertyReference(ctx, obj, members, name);
+}
+
+// a property table php hands over (zend_std_get_properties) keeps a
+// reference a reference, so serialize writes R: for the properties sharing
+// it: the entry just appended for the property `name` joins its cell
+pub fn keepPropertyReference(ctx: *NativeContext, obj: *PhpObject, table: *PhpArray, name: []const u8) RuntimeError!void {
+    const cell = sharedPropertyCell(ctx, obj, name) orelse return;
+    const entry = &table.entries.items[table.entries.items.len - 1];
+    try bindElement(ctx, table, entry.key, cell);
 }
 
 fn splMembers(ctx: *NativeContext, obj: *PhpObject) !*PhpArray {
