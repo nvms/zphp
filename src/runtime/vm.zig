@@ -26052,6 +26052,8 @@ pub const VM = struct {
     }
 
     fn methodByValue(self: *VM, receiver: Value, method: []const u8, pos: u8) ?bool {
+        // Generator and Fiber are final and take every argument by value
+        if (receiver == .generator or receiver == .fiber) return true;
         if (receiver != .object) return null;
         if (receiver.object.lazy != null) return null;
         // a closure's __invoke takes the closure's own parameters
