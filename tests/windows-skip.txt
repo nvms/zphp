@@ -83,3 +83,4 @@ error_log_mail.php: the message is piped to cat through the shell, which cmd.exe
 pcntl_dispatch_fiber_switch.php: pcntl and posix_kill are posix-only
 stream_select_filtered_and_temp.php: the runner's php fails stream_socket_pair(STREAM_PF_UNIX) itself on windows (setsockopt 10042)
 realpath_cache.php: windows resolves paths through the os and keeps no realpath cache
+popen_real.php: the test runs sh commands (kill, read, sleep) and cat, and the windows popen is still emulated

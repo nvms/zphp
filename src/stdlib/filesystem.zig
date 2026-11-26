@@ -527,6 +527,7 @@ pub fn cleanupHandle(obj: *PhpObject) void {
         if (getFileHandle(obj)) |file| {
             if (!platform.isStdio(file)) platform.closeFd(fd.int);
         }
+        _ = reapPopenChild(obj);
         if (obj.properties.getPtr("__open")) |slot| slot.* = .{ .bool = false };
     }
 }
@@ -3644,6 +3645,12 @@ fn closeHandle(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
             platform.closeSocket(obj.get("__fd").int);
         } else if (!platform.isStdio(file)) {
             platform.closeFile(file, obj.get("__fd").int);
+            // a process pipe's close is pclose: its status is the close's
+            // result, so fclose() reports a failing child as false
+            if (reapPopenChild(obj)) |status| {
+                obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
+                return status == 0;
+            }
         } else if (closesProcessStdin(ctx.vm, obj)) {
             // php's cli STDIN is descriptor 0 itself: fclose(STDIN) frees
             // it, and the next descriptor opened takes its number
@@ -5220,6 +5227,7 @@ pub fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
         else => false,
     };
     if (!valid) return throwValueError(ctx, "popen(): Argument #2 ($mode) must be one of \"r\", \"rb\", \"w\", or \"wb\"", .{});
+    if (!platform.is_windows) return popenPosix(ctx, cmd, mode, posix_mode);
     if (mode.len > 0 and (mode[0] == 'r')) {
         const result = runShellCapture(ctx.allocator, cmd, null) catch return NativeResult.scalar(.{ .bool = false });
         ctx.allocator.free(result.stderr);
@@ -5236,8 +5244,61 @@ pub fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     return NativeResult.scalar(.{ .bool = false });
 }
 
+// libc's popen: /bin/sh -c the command with one end of a pipe as its stdin
+// ("w") or stdout ("r"), everything else inherited. the stream is php's
+// STDIO stream over the parent's end; closing it waits for the child
+fn popenPosix(ctx: *NativeContext, cmd: []const u8, mode: []const u8, posix_mode: []const u8) RuntimeError!NativeResult {
+    // glibc refuses an empty mode
+    if (posix_mode.len == 0) {
+        try warn(ctx, "popen(): Invalid argument", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const reading = posix_mode[0] == 'r';
+    // the child writes to the same stdout as the script's output
+    ctx.vm.flushOutputToStdout();
+    const specs = [_]ProcDesc{.{ .role = if (reading) 1 else 0, .action = if (reading) .pipe_w else .pipe_r }};
+    var spawned = forkExecDesc(ctx.allocator, .{ .shell = cmd }, &specs, null, null) catch |err| {
+        try warn(ctx, "popen(): {s}", .{spawnFailureMessage(err)});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    defer spawned.pipe_fds.deinit(ctx.allocator);
+    const fd = spawned.pipe_fds.items[0].fd;
+    const obj = ctx.createResource("FileHandle") catch |err| {
+        sys.close(fd);
+        _ = sys.waitpid(spawned.pid, 0);
+        return err;
+    };
+    try obj.set(ctx.allocator, "__fd", .{ .int = @intCast(fd) });
+    try obj.set(ctx.allocator, "__popen_pid", .{ .int = @intCast(spawned.pid) });
+    // the slot reapPopenChild fills in
+    try obj.set(ctx.allocator, "__popen_exit", .{ .int = -1 });
+    try obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed(if (reading) "r" else "w") });
+    try obj.setCopiedString(ctx.allocator, "__popen_mode", mode);
+    return NativeResult.borrowed(.{ .resource = obj });
+}
+
+// pclose(3) once the descriptor is closed: the child's exit code, or the raw
+// wait status of a child a signal ended
+fn reapPopenChild(obj: *PhpObject) ?i64 {
+    if (platform.is_windows) return null;
+    const pid_slot = obj.properties.getPtr("__popen_pid") orelse return null;
+    if (pid_slot.* != .int or pid_slot.int <= 0) return null;
+    const pid: std.posix.pid_t = @intCast(pid_slot.int);
+    pid_slot.* = .{ .int = 0 };
+    const res = sys.waitpid(pid, 0);
+    const status: i64 = if (PosixW.IFEXITED(res.status)) PosixW.EXITSTATUS(res.status) else @intCast(res.status);
+    if (obj.properties.getPtr("__popen_exit")) |slot| slot.* = .{ .int = status };
+    return status;
+}
+
 pub fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "pclose", .param = "handle" });
+    if (obj.get("__popen_pid") == .int) {
+        _ = try closeStream(ctx, obj);
+        const exit_v = obj.get("__popen_exit");
+        return NativeResult.scalar(.{ .int = if (exit_v == .int) exit_v.int else -1 });
+    }
     const cmd_v = obj.get("__popen_cmd");
     if (cmd_v == .string) {
         const buf_v = obj.get("__buffer");
