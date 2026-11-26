@@ -312,6 +312,11 @@ pub fn uncaughtDescription(vm: *VM, allocator: std.mem.Allocator) ?[]u8 {
     var engine = vm.engineCall();
     vm.native_call = &engine;
     defer vm.native_call = engine.outer;
+    // zend_exception_error runs once the script stopped: no user code is
+    // executing, so what is thrown converting it names "[no active file]"
+    const outer_finished = vm.finished_frames;
+    vm.finished_frames = vm.frame_count;
+    defer vm.finished_frames = outer_finished;
     var attempts: usize = 0;
     while (attempts < 8) : (attempts += 1) {
         const exc = vm.pending_exception orelse return null;

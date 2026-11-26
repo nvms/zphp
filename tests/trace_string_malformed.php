@@ -20,3 +20,13 @@ foreach ($traces as $trace) {
     var_dump($e->getTraceAsString());
 }
 
+// what converting an uncaught throwable throws names no file: the script
+// has stopped
+class BadMessage extends Exception {
+    public function __construct() {
+        $this->message = new stdClass;
+    }
+}
+ini_set('display_errors', '1');
+ini_set('log_errors', '0');
+throw new BadMessage;

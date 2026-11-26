@@ -29641,7 +29641,11 @@ pub const VM = struct {
     }
 
     fn stampThrowableBelow(self: *VM, obj: *PhpObject, top: usize) RuntimeError!void {
-        const at: SourcePosition = if (top > 0 and top - 1 < self.finished_frames)
+        // an internal function's frame executes no user code: the frame
+        // under it is the one that counts
+        var user = top;
+        while (user > 1 and self.frames[user - 1].native) user -= 1;
+        const at: SourcePosition = if (top > 0 and user - 1 < self.finished_frames)
             .{ .file = "[no active file]", .line = 0 }
         else if (top > 0) self.framePosition(top - 1) orelse .{ .file = self.frameFile(top - 1), .line = 0 } else .{ .file = self.file_path, .line = 0 };
         try obj.set(self.allocator, "file", .{ .string = Value.String.borrowed(at.file) });
