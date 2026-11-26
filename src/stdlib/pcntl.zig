@@ -202,6 +202,9 @@ fn native_pcntl_signal_get_handler(_: *NativeContext, args: []const Value) Runti
 }
 
 fn native_pcntl_signal_dispatch(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    // no fiber switch inside a signal handler (zend_fiber_switch_block)
+    ctx.vm.fiber_switch_blocked += 1;
+    defer ctx.vm.fiber_switch_blocked -= 1;
     var i: usize = 1;
     while (i < MAX_SIG) : (i += 1) {
         const pending = pending_signals[i].swap(0, .seq_cst);
@@ -215,7 +218,12 @@ fn native_pcntl_signal_dispatch(ctx: *NativeContext, _: []const Value) RuntimeEr
         const info_arr = try ctx.createArray();
         try info_arr.set(ctx.allocator, .{ .string = Value.String.borrowed("signo") }, sigi_val);
         const argv = [_]Value{ sig_val, .{ .array = info_arr } };
-        _ = ctx.invokeCallable(cb, &argv) catch continue;
+        // call_user_function: what a handler throws goes on out of the
+        // dispatch, and no later handler is called while it is pending
+        _ = ctx.invokeCallable(cb, &argv) catch |err| {
+            if (ctx.vm.pending_exception != null or ctx.vm.exit_requested) return err;
+            continue;
+        };
     }
     return NativeResult.scalar(.{ .bool = true });
 }
