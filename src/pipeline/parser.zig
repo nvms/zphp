@@ -52,6 +52,15 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         error.ParseError => {},
         error.OutOfMemory => return error.OutOfMemory,
     };
+    // php's parser gives up once its state stack holds 10000 states (bison's
+    // YYMAXDEPTH): source nested deep enough to come near it is checked
+    // against php's grammar, which counts them
+    if (p.errors.items.len == 0 and p.max_nesting > Parser.deep_nesting) {
+        if (try @import("php_syntax.zig").diagnose(allocator, source)) |found| {
+            allocator.free(found.message);
+            try p.errors.append(allocator, .{ .token = @intCast(tok_buf.items.len - 1), .tag = .unexpected_token });
+        }
+    }
 
     const tok_slice = try tok_buf.toOwnedSlice(allocator);
     errdefer allocator.free(tok_slice);
@@ -153,6 +162,11 @@ const Parser = struct {
     // file's (or a bracketed namespace's) own statements, php's
     // top_statement
     stmt_depth: u32 = 0,
+    // statements and expressions being parsed around the current one, and
+    // the most there were: php's parser keeps at least one state on its
+    // stack for each
+    nesting: u32 = 0,
+    max_nesting: u32 = 0,
     // a __halt_compiler() inside a block ended the tokens
     halted_inside: bool = false,
     // property hook bodies being parsed, and the node ranges of functions
@@ -216,7 +230,23 @@ const Parser = struct {
         return self.addNode(.{ .tag = .echo_stmt, .main_token = echo_tok, .data = .{ .lhs = extra } });
     }
 
+    // a nesting no php source gets through (its parser's stack is full well
+    // before), refused before zphp's own stack runs out
+    const max_nesting_depth = 10000;
+    const deep_nesting = 1000;
+
+    fn enterNesting(self: *Parser) Error!void {
+        if (self.nesting >= max_nesting_depth) {
+            try self.addError(.unexpected_token);
+            return error.ParseError;
+        }
+        self.nesting += 1;
+        if (self.nesting > self.max_nesting) self.max_nesting = self.nesting;
+    }
+
     fn parseStatement(self: *Parser) Error!u32 {
+        try self.enterNesting();
+        defer self.nesting -= 1;
         const outer_depth = self.stmt_depth;
         self.stmt_depth = outer_depth + 1;
         defer self.stmt_depth = outer_depth;
@@ -3135,6 +3165,8 @@ const Parser = struct {
     }
 
     fn parseExprPrec(self: *Parser, min_prec: u8) Error!u32 {
+        try self.enterNesting();
+        defer self.nesting -= 1;
         var left = try self.parsePrefixExpr();
         if (left == self.bare_new and left != 0) switch (self.peek()) {
             .l_bracket, .arrow, .question_arrow, .colon_colon => {

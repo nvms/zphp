@@ -51,6 +51,7 @@ pub fn diagnose(allocator: std.mem.Allocator, source: []const u8) !?SyntaxError 
             n = g.table[@intCast(n)];
             if (n > 0) {
                 try states.append(allocator, n);
+                if (states.items.len >= max_depth) return try exhausted(allocator, &scanner);
                 echo_tag_on_top = std.mem.eql(u8, lookahead.?.text, "<?=");
                 lookahead = null;
                 continue;
@@ -64,7 +65,16 @@ pub fn diagnose(allocator: std.mem.Allocator, source: []const u8) !?SyntaxError 
         }
         echo_tag_on_top = false;
         try reduce(allocator, &states, rule);
+        if (states.items.len >= max_depth) return try exhausted(allocator, &scanner);
     }
+}
+
+// bison's YYMAXDEPTH: the state stack of php's parser can't grow past it
+const max_depth = 10000;
+
+// yyexhaustedlab: php's parser gives up as its stack fills
+fn exhausted(allocator: std.mem.Allocator, scanner: *const Scanner) !SyntaxError {
+    return .{ .message = try allocator.dupe(u8, "memory exhausted"), .line = scanner.line };
 }
 
 fn reduce(allocator: std.mem.Allocator, states: *std.ArrayListUnmanaged(i32), rule: i32) !void {
