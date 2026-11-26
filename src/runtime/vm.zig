@@ -5435,6 +5435,13 @@ pub const VM = struct {
             const r = self.stack[self.sp - 1];
             self.clearArgStackFrom(sp_before_eval);
             self.sp = sp_before_eval;
+            // the operand stack's hold on an object goes with the slot: eval
+            // hands the value on borrowed, and the caller's push holds it
+            // again before anything drains
+            switch (r) {
+                .object, .resource => |o| self.objRelease(o),
+                else => {},
+            }
             return r;
         }
         return .null;
