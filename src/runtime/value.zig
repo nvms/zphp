@@ -1028,6 +1028,10 @@ pub const Generator = struct {
     implicit_key: i64 = 0,
     handler_count: usize = 0,
     saved_handlers: std.ArrayListUnmanaged(SavedHandler) = .empty,
+    // the exceptions finally blocks hold while it is suspended (their
+    // operand slots, as offsets from base_sp): a later exception still
+    // takes them as its previous
+    saved_held: std.ArrayListUnmanaged(SavedHeld) = .empty,
     delegate: ?DelegateState = null,
     // while this generator runs as the delegate of a yield from, the
     // generator waiting in it (backtraces show the chain, as php's do)
@@ -1074,6 +1078,11 @@ pub const Generator = struct {
         chunk: *const Chunk,
     };
 
+    pub const SavedHeld = struct {
+        sp_offset: usize,
+        exception: *PhpObject,
+    };
+
     pub const DelegateState = union(enum) {
         gen: *Generator,
         array: struct { arr: *PhpArray, index: usize },
@@ -1087,6 +1096,7 @@ pub const Generator = struct {
     pub fn deinit(self: *Generator, allocator: std.mem.Allocator) void {
         self.extra_args.deinit(allocator);
         self.saved_handlers.deinit(allocator);
+        self.saved_held.deinit(allocator);
         self.vars.deinit(allocator);
         self.locals.deinit(allocator);
         self.stack.deinit(allocator);

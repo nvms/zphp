@@ -5441,7 +5441,7 @@ pub const VM = struct {
     fn dropFramesAbove(self: *VM, base_frame: usize) void {
         if (self.frame_count <= base_frame) return;
         const entry_sp = self.frames[base_frame].entry_sp;
-        if (self.pending_exception) |exc| self.chainHeldExceptions(exc, base_frame, entry_sp);
+        self.chainPendingHeld(base_frame, entry_sp);
         while (self.frame_count > base_frame) {
             self.frame_count -= 1;
             self.deinitFrameSlot(self.frame_count);
@@ -19831,8 +19831,14 @@ pub const VM = struct {
     // and pushes the exception for its catch. false when a destructor (or a
     // destroyed fiber's finally) the unwinding ran called exit(): no catch
     // runs, and the caller stops for the exit
-    fn enterHandler(self: *VM, handler: ExceptionHandler, exc: Value, comptime ownership: enum { owned, borrowed }) bool {
-        self.chainHeldExceptions(exc, handler.frame_count, handler.sp);
+    fn enterHandler(self: *VM, handler: ExceptionHandler, exc_in: Value, comptime ownership: enum { owned, borrowed }) bool {
+        var exc = exc_in;
+        var owned = ownership == .owned;
+        if (self.chainHeldExceptions(exc, handler.frame_count, handler.sp)) |replacement| {
+            if (owned) self.stackRelease(exc);
+            exc = .{ .object = replacement };
+            owned = true;
+        }
         // initializers the exception left
         while (self.initializer_scopes.items.len > 0 and self.initializer_scopes.items[self.initializer_scopes.items.len - 1].handlers >= self.handler_count) {
             _ = self.initializer_scopes.pop();
@@ -19849,7 +19855,7 @@ pub const VM = struct {
         self.sp = handler.sp;
         self.unwindSilence(handler.silenced_depth);
         var thrown = exc;
-        if (ownership == .borrowed) stackRetain(thrown);
+        if (!owned) stackRetain(thrown);
         // what the unwound frames held is destroyed before the catch runs;
         // a destructor's exception replaces the one caught, with it as its
         // previous
@@ -19883,7 +19889,15 @@ pub const VM = struct {
     // an exception unwinding to `frame_count` frames and `sp` operands takes
     // the exceptions finally blocks above that point held as its previous,
     // innermost first
-    fn chainHeldExceptions(self: *VM, exc: Value, frame_count: usize, sp: usize) void {
+    //
+    // a generator being destroyed unwinds with the marker, which is no
+    // exception (zend_dispatch_try_catch_finally_helper with none): the
+    // first held one it passes becomes the exception, retained for the
+    // caller, which puts it in the marker's place. a destroyed fiber's
+    // graceful exit discards them
+    fn chainHeldExceptions(self: *VM, exc: Value, frame_count: usize, sp: usize) ?*PhpObject {
+        var current = exc;
+        var replacement: ?*PhpObject = null;
         var i = self.held_exceptions.items.len;
         while (i > 0) {
             i -= 1;
@@ -19892,7 +19906,26 @@ pub const VM = struct {
             const unwound = held.frame >= frame_count or (frame_count > 0 and held.frame == frame_count - 1 and held.slot >= sp);
             if (in_place and !unwound) continue;
             _ = self.held_exceptions.orderedRemove(i);
-            if (in_place and exc == .object and !self.isUnwindMarker(.{ .object = held.exception })) _ = self.chainPrevious(exc.object, held.exception) catch {};
+            if (!in_place or current != .object or self.isUnwindMarker(.{ .object = held.exception })) continue;
+            if (self.isUnwindMarker(current)) {
+                const gen = self.frames[held.frame].generator orelse continue;
+                if (!gen.forced_close) continue;
+                held.exception.refcount += 1;
+                replacement = held.exception;
+                current = .{ .object = held.exception };
+                continue;
+            }
+            _ = self.chainPrevious(current.object, held.exception) catch {};
+        }
+        return replacement;
+    }
+
+    // chainHeldExceptions for the pending exception
+    fn chainPendingHeld(self: *VM, frame_count: usize, sp: usize) void {
+        const exc = self.pending_exception orelse return;
+        if (self.chainHeldExceptions(exc, frame_count, sp)) |replacement| {
+            self.stackRelease(exc);
+            self.pending_exception = .{ .object = replacement };
         }
     }
 
@@ -20379,6 +20412,7 @@ pub const VM = struct {
                 // no handler - generator completes with the exception pending
                 gen.state = .completed;
                 self.handler_count = saved_handler_count;
+                self.chainPendingHeld(return_frame, saved_sp);
                 while (self.frame_count > return_frame) {
                     self.frame_count -= 1;
                     self.deinitFrameSlot(self.frame_count);
@@ -20404,6 +20438,7 @@ pub const VM = struct {
             }
             gen.state = .completed;
             self.handler_count = saved_handler_count;
+            self.chainPendingHeld(return_frame, saved_sp);
             while (self.frame_count > return_frame) {
                 self.frame_count -= 1;
                 self.deinitFrameSlot(self.frame_count);
@@ -24360,6 +24395,17 @@ pub const VM = struct {
             });
         }
         self.handler_count = self.handler_floor;
+        // the held exceptions of the frame suspending go with it
+        gen.saved_held.clearRetainingCapacity();
+        const frame = self.frame_count - 1;
+        var i: usize = 0;
+        while (i < self.held_exceptions.items.len) {
+            const held = self.held_exceptions.items[i];
+            if (held.frame == frame and held.slot >= gen.base_sp) {
+                try gen.saved_held.append(self.allocator, .{ .sp_offset = held.slot - gen.base_sp, .exception = held.exception });
+                _ = self.held_exceptions.orderedRemove(i);
+            } else i += 1;
+        }
     }
 
     fn restoreGeneratorHandlers(self: *VM, gen: *Generator) RuntimeError!void {
@@ -24375,6 +24421,10 @@ pub const VM = struct {
             };
             self.handler_count += 1;
         }
+        for (gen.saved_held.items) |held| {
+            try self.held_exceptions.append(self.allocator, .{ .frame = self.frame_count - 1, .slot = gen.base_sp + held.sp_offset, .exception = held.exception });
+        }
+        gen.saved_held.clearRetainingCapacity();
     }
 
     fn callClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u32) RuntimeError!void {
@@ -31026,7 +31076,7 @@ pub const VM = struct {
     // an uncaught throwable ends everything but the main frame, above which
     // the report, the exception handler and shutdown functions run
     fn unwindToMain(self: *VM) void {
-        if (self.pending_exception) |exc| self.chainHeldExceptions(exc, 0, 0);
+        self.chainPendingHeld(0, 0);
         while (self.frame_count > 1) {
             self.frame_count -= 1;
             self.deinitFrameSlot(self.frame_count);
