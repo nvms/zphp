@@ -1661,6 +1661,10 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
             if (isTemporaryContainer(self, arg.data.lhs)) {
                 try self.compileNode(arg.data.lhs);
                 if (!guard.by_value) try emitArgGuard(self, guard, .arg_temp_container);
+            } else if (isCallContainer(self, arg.data.lhs)) {
+                // a call's result is the container (FETCH_DIM_FUNC_ARG on
+                // the VAR), not the argument: nothing is sent for it
+                try self.compileNode(arg.data.lhs);
             } else try compileArgLvalue(self, arg.data.lhs, guard);
             try self.compileNode(arg.data.rhs);
             try emitArgGuard(self, guard, .arg_guard_dim);
@@ -1724,6 +1728,17 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
 
 // a dimension or property fetch's container that php compiles to a
 // temporary: a fetch from it can't be passed by reference
+// a container that is a call's result (php's IS_VAR), which a by-reference
+// argument's dimension fetch writes into as it is
+fn isCallContainer(self: *Compiler, idx: u32) bool {
+    var n = self.ast.nodes[idx];
+    while (n.tag == .grouped_expr) n = self.ast.nodes[n.data.lhs];
+    return switch (n.tag) {
+        .call, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call => true,
+        else => false,
+    };
+}
+
 fn isTemporaryContainer(self: *Compiler, idx: u32) bool {
     var n = self.ast.nodes[idx];
     while (n.tag == .grouped_expr) n = self.ast.nodes[n.data.lhs];
