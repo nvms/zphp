@@ -1113,6 +1113,10 @@ pub const VM = struct {
     gen_release_cursor: usize = 0,
     pending_fiber_release: std.ArrayListUnmanaged(*@import("value.zig").Fiber) = .empty,
     fiber_release_cursor: usize = 0,
+    // how long each release queue was when the drain began the item it runs
+    // now: what lies between its cursors and these is still the outer
+    // drain's, which a nested pass leaves for it
+    drain_marks: DrainMarks = .{},
     // a write through a reference several names share replaced what the
     // other names' slot mirrors still hold; the next drain points them at
     // the cell's value, so the old value dies when php frees it (the entry
@@ -35310,13 +35314,54 @@ pub const VM = struct {
         self.drainQueues(&deferred_stack_arrays);
     }
 
+    const DrainMarks = struct { destruct: usize = 0, array: usize = 0, gen: usize = 0, fiber: usize = 0 };
+
+    inline fn markDrainItem(self: *VM) void {
+        self.drain_marks = .{
+            .destruct = self.pending_destruct.items.len,
+            .array = self.pending_array_release.items.len,
+            .gen = self.pending_gen_release.items.len,
+            .fiber = self.pending_fiber_release.items.len,
+        };
+    }
+
     // a pass over what was queued since the drain running now reached it,
     // for an exception unwinding inside a destructor or a destroyed
-    // generator: php frees the unwound frames' values before the catch
+    // generator or fiber: php frees the unwound frames' values before the
+    // catch. what the outer drain had queued before it is its own, freed in
+    // its order once the item it runs is done
     fn drainNested(self: *VM) void {
         var deferred_stack_arrays: std.ArrayListUnmanaged(*PhpArray) = .empty;
         defer deferred_stack_arrays.deinit(self.allocator);
+        const marks = self.drain_marks;
+        const cursors = DrainMarks{
+            .destruct = self.destruct_cursor,
+            .array = self.array_release_cursor,
+            .gen = self.gen_release_cursor,
+            .fiber = self.fiber_release_cursor,
+        };
+        // marks from an outer item a nested pass already finished
+        const inner_only = cursors.destruct <= marks.destruct and cursors.array <= marks.array and cursors.gen <= marks.gen and cursors.fiber <= marks.fiber and
+            marks.destruct <= self.pending_destruct.items.len and marks.array <= self.pending_array_release.items.len and
+            marks.gen <= self.pending_gen_release.items.len and marks.fiber <= self.pending_fiber_release.items.len;
+        if (inner_only) {
+            self.destruct_cursor = marks.destruct;
+            self.array_release_cursor = marks.array;
+            self.gen_release_cursor = marks.gen;
+            self.fiber_release_cursor = marks.fiber;
+        }
         self.drainQueues(&deferred_stack_arrays);
+        if (inner_only) {
+            self.pending_destruct.shrinkRetainingCapacity(marks.destruct);
+            self.pending_array_release.shrinkRetainingCapacity(marks.array);
+            self.pending_gen_release.shrinkRetainingCapacity(marks.gen);
+            self.pending_fiber_release.shrinkRetainingCapacity(marks.fiber);
+            self.destruct_cursor = cursors.destruct;
+            self.array_release_cursor = cursors.array;
+            self.gen_release_cursor = cursors.gen;
+            self.fiber_release_cursor = cursors.fiber;
+        }
+        self.drain_marks = marks;
         for (deferred_stack_arrays.items) |arr| self.queueArrayRelease(arr);
     }
 
@@ -35337,6 +35382,7 @@ pub const VM = struct {
             while (self.destruct_cursor < self.pending_destruct.items.len) {
                 const obj = self.pending_destruct.items[self.destruct_cursor];
                 self.destruct_cursor += 1;
+                self.markDrainItem();
                 self.destroyReleasedObject(obj, deferred_stack_arrays);
             }
             while (self.array_release_cursor < self.pending_array_release.items.len) {
@@ -35348,6 +35394,7 @@ pub const VM = struct {
             while (self.gen_release_cursor < self.pending_gen_release.items.len) {
                 const gen = self.pending_gen_release.items[self.gen_release_cursor];
                 self.gen_release_cursor += 1;
+                self.markDrainItem();
                 // rescued if re-retained between queue and drain
                 self.destroyReleasedGenerator(gen, deferred_stack_arrays);
             }
@@ -35355,6 +35402,7 @@ pub const VM = struct {
                 const fiber = self.pending_fiber_release.items[self.fiber_release_cursor];
                 self.fiber_release_cursor += 1;
                 if (fiber.refcount != 0 or fiber.pooled) continue;
+                self.markDrainItem();
                 if (fiber.state == .suspended) {
                     fiber.refcount += 1;
                     self.destroyFiber(fiber);
