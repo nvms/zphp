@@ -22798,7 +22798,7 @@ pub const VM = struct {
     // a trait's own methods (name -> func) in declaration order, resolved
     // once and cached: the full scan of self.functions was applyTrait's whole
     // cost. the cache persists across requests (stable bytecode in serve mode)
-    fn traitMethods(self: *VM, trait_name: []const u8) ![]const TraitMethodEntry {
+    pub fn traitMethods(self: *VM, trait_name: []const u8) ![]const TraitMethodEntry {
         if (self.trait_method_cache.get(trait_name)) |cached| return cached;
         var list: std.ArrayListUnmanaged(TraitMethodEntry) = .empty;
         if (self.method_names_by_class.get(trait_name)) |names| {

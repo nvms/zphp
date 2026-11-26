@@ -15,6 +15,7 @@ const RuntimeError = vm_mod.RuntimeError;
 const Value = @import("value.zig").Value;
 const PhpObject = @import("value.zig").PhpObject;
 const PhpArray = @import("value.zig").PhpArray;
+const class_names = @import("class_names.zig");
 
 pub const Callee = union(enum) {
     // a function or closure name
@@ -320,6 +321,11 @@ fn staticCallee(vm: *VM, class: []const u8, method: []const u8) RuntimeError!Res
     const scope = vm.currentDefiningClass();
     if (try findMethod(vm, class, method)) |m| {
         if (vm.methodVisible(m.class, m.name, m.visibility)) {
+            if (vm.traits.contains(m.class)) {
+                const msg = try std.fmt.allocPrint(vm.allocator, "Calling static trait method {s}::{s} is deprecated, it should only be called on a class using the trait", .{ m.class, m.name });
+                defer vm.allocator.free(msg);
+                try vm.raiseError(VM.E_DEPRECATED, msg);
+            }
             if (m.is_static == false) return .{ .failure = .{ .non_static = .{ .class = vm.declaredClassName(m.class), .method = m.name } } };
             return .{ .callee = .{ .static_method = .{ .registered = m.registered, .called_class = class } } };
         }
@@ -395,10 +401,11 @@ fn functionNamed(vm: *VM, raw: []const u8) ?[]const u8 {
 
 fn lookupClass(vm: *VM, raw: []const u8) RuntimeError!?[]const u8 {
     const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-    if (vm.classes.getKey(name)) |key| return key;
+    // zend_lookup_class finds traits too
+    if (vm.classes.getKey(name) orelse vm.traits.getKey(name)) |key| return key;
     try vm.tryAutoload(name);
     if (vm.pending_exception != null) return error.RuntimeError;
-    return vm.classes.getKey(name);
+    return vm.classes.getKey(name) orelse vm.traits.getKey(name);
 }
 
 const Method = struct {
@@ -413,6 +420,27 @@ const Method = struct {
 };
 
 fn findMethod(vm: *VM, class: []const u8, method: []const u8) RuntimeError!?Method {
+    // a trait's own function table: its methods carry their modifiers
+    if (vm.traits.getKey(class)) |trait| {
+        for (try vm.traitMethods(trait)) |e| {
+            if (!std.ascii.eqlIgnoreCase(e.name, method)) continue;
+            var buf: [256]u8 = undefined;
+            const registered = vm.functions.getKey(class_names.memberKey(&buf, trait, e.name)) orelse return null;
+            return .{
+                .class = trait,
+                .name = e.name,
+                .registered = registered,
+                .visibility = switch (e.func.method_visibility) {
+                    1 => .protected,
+                    2 => .private,
+                    else => .public,
+                },
+                .is_static = e.func.is_static,
+                .is_abstract = e.func.is_abstract,
+            };
+        }
+        return null;
+    }
     const registered = vm.resolveMethod(class, method) catch {
         if (vm.pending_exception != null) return error.RuntimeError;
         return null;
