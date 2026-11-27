@@ -7685,7 +7685,13 @@ fn rcResetAsLazy(ctx: *NativeContext, args: []const Value, proxy: bool) RuntimeE
         }
     }
     obj.destructor_called = false;
-    // dynamic properties go
+    // dynamic properties go: php removes them from the end of the table up
+    // to the first entry pointing at a slot. a detached table has none such
+    // and is left empty
+    if (obj.detached_table) {
+        ctx.vm.dropFrozenTable(obj);
+        obj.detached_table = true;
+    }
     for (obj.properties.values()) |v| ctx.vm.releaseValue(v);
     obj.clearProperties(ctx.allocator);
     if (obj.slots == null) try ctx.vm.initObjectProperties(obj, obj.class_name);

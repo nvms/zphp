@@ -1285,6 +1285,9 @@ pub const VM = struct {
     value_returned: ?*PhpArray = null,
     // lazy objects property operations hold while they run (operandHolds)
     lazy_operands: std.ArrayListUnmanaged(*PhpObject) = .empty,
+    // the declared values a detached property table holds, for each object
+    // with PhpObject.detached_table (freezeTable)
+    frozen_tables: std.AutoHashMapUnmanaged(*PhpObject, std.ArrayListUnmanaged(FrozenProp)) = .{},
     // how many roots of each kind the buffer held when it filled
     gc_full_at: ?struct { objs: usize, arrs: usize } = null,
     // ref-returning function call mechanism: a `&function` sets these on
@@ -4258,6 +4261,11 @@ pub const VM = struct {
         self.arrays.deinit(self.allocator);
         self.free_arrays.deinit(self.allocator);
         self.lazy_operands.deinit(self.allocator);
+        {
+            var frozen = self.frozen_tables.valueIterator();
+            while (frozen.next()) |list| list.deinit(self.allocator);
+            self.frozen_tables.deinit(self.allocator);
+        }
         self.released_arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
         self.free_generators.deinit(self.allocator);
@@ -4600,6 +4608,12 @@ pub const VM = struct {
         for (&self.url_scanners) |*scanner| scanner.deinit(self.allocator);
         self.magic_guards.clearRetainingCapacity();
         self.magic_call_guard.clearRetainingCapacity();
+        {
+            // the request's objects are gone
+            var frozen = self.frozen_tables.valueIterator();
+            while (frozen.next()) |list| list.deinit(self.allocator);
+            self.frozen_tables.clearRetainingCapacity();
+        }
         if (self.serve_mode) {
             self.functions.clearRetainingCapacity();
             if (self.ic) |ic_ptr| {
@@ -4678,6 +4692,67 @@ pub const VM = struct {
         hooks.release = .{ .ctx = self, .call = releaseHookFn };
         hooks.cell_unbind = .{ .ctx = self, .call = cellUnbindHook };
         hooks.object = .{ .ctx = self, .cast = objectCastHook, .compare = objectCompareHook };
+        hooks.table_separate = .{ .ctx = self, .call = tableSeparateHook };
+    }
+
+    fn tableSeparateHook(ctx: *anyopaque, obj: *PhpObject) void {
+        const self: *VM = @ptrCast(@alignCast(ctx));
+        self.freezeTable(obj) catch {};
+    }
+
+    pub const FrozenProp = struct { slot: u32, value: Value };
+
+    // a ghost's property table separated while its initializer runs
+    // (zend_array_dup during zend_lazy_object_init): the copy holds the
+    // declared properties set then, at the values they have now, and no
+    // longer follows their slots. listings read it from then on
+    fn freezeTable(self: *VM, obj: *PhpObject) RuntimeError!void {
+        if (obj.detached_table) return;
+        const layout = obj.slot_layout orelse return;
+        const slots = obj.slots orelse return;
+        var frozen: std.ArrayListUnmanaged(FrozenProp) = .empty;
+        errdefer frozen.deinit(self.allocator);
+        for (slots, 0..) |v, i| {
+            if (i >= layout.names.len) break;
+            const name = layout.names[i];
+            if (v == .undef or obj.isUnset(name) or object_properties.isInternalState(self, obj, name)) continue;
+            if (v == .null) {
+                const declared = self.propertyDeclaration(layout.declaring_classes[i], name);
+                if (declared.type_str.len > 0 and self.typedPropForbidsNull(declared.type_str)) continue;
+            }
+            try frozen.append(self.allocator, .{ .slot = @intCast(i), .value = v });
+        }
+        try self.frozen_tables.put(self.allocator, obj, frozen);
+        for (frozen.items) |f| retainValue(f.value);
+        obj.detached_table = true;
+    }
+
+    pub fn frozenTable(self: *VM, obj: *const PhpObject) []const FrozenProp {
+        if (!obj.detached_table) return &.{};
+        const list = self.frozen_tables.getPtr(@constCast(obj)) orelse return &.{};
+        return list.items;
+    }
+
+    // the table follows the slots again: a reset, a reverted initializer,
+    // or the object going away
+    pub fn dropFrozenTable(self: *VM, obj: *PhpObject) void {
+        if (!obj.detached_table) return;
+        obj.detached_table = false;
+        var entry = self.frozen_tables.fetchRemove(obj) orelse return;
+        for (entry.value.items) |f| self.releaseValue(f.value);
+        entry.value.deinit(self.allocator);
+    }
+
+    // a clone copies the table, stale values and all
+    pub fn copyFrozenTable(self: *VM, from: *PhpObject, to: *PhpObject) RuntimeError!void {
+        const items = self.frozenTable(from);
+        if (items.len == 0 and !from.detached_table) return;
+        var copy: std.ArrayListUnmanaged(FrozenProp) = .empty;
+        errdefer copy.deinit(self.allocator);
+        try copy.appendSlice(self.allocator, items);
+        try self.frozen_tables.put(self.allocator, to, copy);
+        for (copy.items) |f| retainValue(f.value);
+        to.detached_table = true;
     }
 
     fn objectCastHook(ctx: *anyopaque, obj: *PhpObject, target: @import("value.zig").NumericCast) ?Value {
@@ -20201,6 +20276,10 @@ pub const VM = struct {
             // the copy (the clone copies php's IS_PROP_UNINIT flag)
             var unset_names = src.unset_slots.keyIterator();
             while (unset_names.next()) |name| try copy.markUnset(self.allocator, name.*);
+            // zend_objects_clone_members copies the property table: entries
+            // that point at slots point at the copy's, copied values stay
+            copy.table_built = src.table_built;
+            try self.copyFrozenTable(src, copy);
             if (native_clone) |hook| if (!hook(self, src, copy)) {
                 // a hook may refuse with its class's own error
                 if (self.pending_exception == null) try self.setUncloneable(src.class_name);
@@ -29368,6 +29447,7 @@ pub const VM = struct {
         if (proxy.ref_mirrored) for (proxy.properties.keys()) |name| self.detachPropRefs(proxy, name, null);
         for (proxy.properties.values()) |v| self.releaseValue(v);
         proxy.clearProperties(self.allocator);
+        proxy.table_built = false;
     }
 
     fn runLazyInitializer(self: *VM, obj: *PhpObject, state: *PhpObject.LazyState) RuntimeError!void {
@@ -29492,6 +29572,17 @@ pub const VM = struct {
             self.releaseValue(initializer);
             self.dropProxyOwnProperties(obj);
             return;
+        }
+        // the snapshot shares the property table the ghost has: a reverted
+        // initializer puts the snapshot back
+        const table_built = obj.table_built;
+        const table_detached = obj.detached_table;
+        state.table_shared = table_built and !table_detached;
+        defer state.table_shared = false;
+        errdefer {
+            state.table_shared = false;
+            if (!table_detached) self.dropFrozenTable(obj);
+            obj.table_built = table_built;
         }
         const result = try ctx.invokeCallable(state.initializer, &.{.{ .object = obj }});
         if (result != .null) {
@@ -36631,7 +36722,7 @@ pub const VM = struct {
                 s[idx] = .null;
                 // php's property table keeps counting the slot until the old
                 // value's destructors are done
-                if ((obj.props_table or obj.properties.count() > 0) and (old == .object or old == .array)) {
+                if ((obj.table_built or obj.properties.count() > 0) and (old == .object or old == .array)) {
                     // object memory is arena-owned, so the counter is safe to
                     // drop even if a destructor released the object
                     obj.unsetting_slots += 1;
@@ -38491,6 +38582,7 @@ pub const VM = struct {
                 ri.removeTargetAllOwners(self.allocator, binding.cell, binding.target);
             }
         };
+        self.dropFrozenTable(obj);
         if (obj.backingValue() != .null) {
             self.releaseValue(obj.backingValue());
             obj.lazy.?.backing = null;

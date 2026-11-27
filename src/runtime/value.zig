@@ -22,6 +22,7 @@ pub fn cellOf(value: *Value) *RefCell {
     return @fieldParentPtr("value", value);
 }
 pub const CellUnbindHook = struct { ctx: *anyopaque, call: *const fn (*anyopaque, *Value) void };
+pub const ObjectEventHook = struct { ctx: *anyopaque, call: *const fn (*anyopaque, *PhpObject) void };
 fn unbindCell(value: *Value) void {
     if (hooks().cell_unbind) |hook| hook.call(hook.ctx, value);
 }
@@ -48,6 +49,9 @@ pub const Hooks = struct {
     serialize_precision: i32 = -1,
     cell_unbind: ?CellUnbindHook = null,
     release: ?ReleaseHook = null,
+    // a ghost's property table separated from its initialization snapshot
+    // (PhpObject.separateTable)
+    table_separate: ?ObjectEventHook = null,
     object: ?ObjectHooks = null,
     trace_obj: ?*PhpObject = null,
     trace_rc_verbose: bool = false,
@@ -1339,6 +1343,13 @@ pub const PhpObject = struct {
     weakly_referenced: bool = false,
     // an enum case's object
     enum_case: bool = false,
+    // php has built the object's property table (zobj->properties): a
+    // listing, foreach or dynamic property made it. its element count then
+    // only drops for an unset slot once the unset has released the old value
+    table_built: bool = false,
+    // the table holds copies of the declared properties' values, which
+    // listings show instead of the slots (VM.frozen_tables)
+    detached_table: bool = false,
     // Recursion flags
     recursion: u8 = 0,
     // native pointers behind a builtin or extension class live here, never
@@ -1348,10 +1359,6 @@ pub const PhpObject = struct {
     // account beyond the bytes it takes (php's property HashTable is
     // smaller); undone when the table is freed, as PhpArray.mem_adj
     mem_adj: i64 = 0,
-    // php has built the object's property table (zobj->properties: a
-    // listing, foreach or dynamic property did), so its element count only
-    // drops for an unset slot once the unset has released the old value
-    props_table: bool = false,
     // declared slots being unset whose old value is still being released
     // while the table exists: var_dump's count still includes them
     // (zend_std_unset_property sets HASH_FLAG_HAS_EMPTY_IND after the dtor)
@@ -1364,7 +1371,20 @@ pub const PhpObject = struct {
         pending: []bool,
         skip_serialize: bool = false,
         running: bool = false,
+        // a ghost's initializer runs while zend_lazy_object_init holds a
+        // snapshot of the property table the object had: the first write to
+        // the dynamic part separates it (separateTable)
+        table_shared: bool = false,
     };
+
+    // zend_array_dup of a property table the lazy-init snapshot shares: the
+    // copy holds the declared properties' values as they are now instead of
+    // pointing at their slots, so listings show those values from then on
+    pub fn separateTable(self: *PhpObject) void {
+        const state = self.lazy orelse return;
+        state.table_shared = false;
+        if (hooks().table_separate) |hook| hook.call(hook.ctx, self);
+    }
 
     // the instance name of a Closure made from a closure expression (or bound
     // from one); null for every other object
@@ -1509,6 +1529,8 @@ pub const PhpObject = struct {
     }
 
     pub fn putProperty(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        if (self.lazy) |state| if (state.table_shared) self.separateTable();
+        self.table_built = true;
         // the table is counted at php's size for what it will hold before
         // it grows, so memory_limit checks that size
         const capacity = self.properties.capacity();
@@ -1538,6 +1560,8 @@ pub const PhpObject = struct {
 
     // the removed property's value, handed to the caller to release
     pub fn removeProperty(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8) ?Value {
+        // unsetting a declared property empties its slot, not the table
+        if (self.lazy) |state| if (state.table_shared and (self.properties.contains(name) or self.getSlotIndex(name) == null)) self.separateTable();
         const removed = self.properties.fetchOrderedRemove(name) orelse return null;
         allocator.free(removed.key);
         return removed.value;

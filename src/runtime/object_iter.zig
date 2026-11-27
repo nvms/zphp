@@ -18,10 +18,11 @@ const PhpObject = value_mod.PhpObject;
 const object_properties = @import("object_properties.zig");
 
 pub const ObjectIter = struct {
-    const Kind = enum { slot, dynamic, hooked };
+    const Kind = enum { slot, dynamic, hooked, frozen };
     const Item = struct {
         kind: Kind,
-        // the declared slot of a .slot item
+        // the declared slot of a .slot item, a .frozen item's place in the
+        // object's detached table (VM.frozenTable)
         slot: u32 = 0,
         // a declared name is class metadata; a dynamic one is owned here
         name: Value.String,
@@ -68,12 +69,35 @@ fn declaredVisible(vm: *VM, obj: *PhpObject, scope: ?[]const u8, name: []const u
     };
 }
 
+fn internMangled(vm: *VM, class: []const u8, name: []const u8) RuntimeError![]const u8 {
+    const mangled = try std.fmt.allocPrint(vm.allocator, "\x00{s}\x00{s}", .{ class, name });
+    defer vm.allocator.free(mangled);
+    return vm.internName(mangled);
+}
+
 pub fn create(vm: *VM, obj: *PhpObject, scope: ?[]const u8, by_ref: bool) RuntimeError!*ObjectIter {
     const it = try vm.allocator.create(ObjectIter);
     it.* = .{ .scope = scope, .by_ref = by_ref };
     errdefer it.destroy(vm);
-    obj.props_table = true;
-    if (object_properties.classHasHooks(vm, obj.class_name)) {
+    obj.table_built = true;
+    if (obj.detached_table and !object_properties.classHasHooks(vm, obj.class_name)) {
+        // a detached table holds copies of the declared values, which php
+        // reads as dynamic entries: a protected or private one is there
+        // under its mangled name, which every scope may see
+        if (obj.slot_layout) |layout| for (vm.frozenTable(obj), 0..) |f, i| {
+            const name = layout.names[f.slot];
+            const declared = vm.propertyDeclaration(layout.declaring_classes[f.slot], name);
+            const key: []const u8 = switch (declared.visibility) {
+                .public => blk: {
+                    if (!declaredVisible(vm, obj, scope, name, declared.visibility, declared.defining_class)) continue;
+                    break :blk name;
+                },
+                .protected => try internMangled(vm, "*", name),
+                .private => try internMangled(vm, declared.defining_class, name),
+            };
+            try it.items.append(vm.allocator, .{ .kind = .frozen, .slot = @intCast(i), .name = Value.String.borrowed(key), .declaring = layout.declaring_classes[f.slot] });
+        };
+    } else if (object_properties.classHasHooks(vm, obj.class_name)) {
         var order: std.ArrayListUnmanaged(object_properties.Declared) = .empty;
         defer order.deinit(vm.allocator);
         try object_properties.declaredOrder(vm, obj.class_name, vm.allocator, &order);
@@ -166,6 +190,17 @@ pub fn fetch(vm: *VM, it: *ObjectIter, obj: *PhpObject, from: usize) RuntimeErro
             switch (item.kind) {
                 .slot => if (slotValue(vm, obj, item.slot, name, item.declaring)) |v| {
                     return .{ .index = i, .key = .{ .string = item.name }, .value = v };
+                },
+                .frozen => {
+                    const frozen = vm.frozenTable(obj);
+                    if (item.slot < frozen.len) {
+                        // a mangled name shows the part after the class
+                        const key = if (name.len > 0 and name[0] == 0) blk: {
+                            const end = std.mem.indexOfScalarPos(u8, name, 1, 0) orelse name.len - 1;
+                            break :blk item.name.borrowedSlice(end + 1, name.len);
+                        } else item.name;
+                        return .{ .index = i, .key = .{ .string = key }, .value = frozen[item.slot].value, .raw = item.name };
+                    }
                 },
                 .dynamic => if (obj.properties.get(name)) |v| {
                     if (name.len > 0 and name[0] == 0) {

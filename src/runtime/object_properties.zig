@@ -202,7 +202,7 @@ pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Alloc
     };
     // the debug and export listings build php's property table
     // (rebuild_object_properties); the others read the slots directly
-    if (purpose == .debug or purpose == .var_export) obj.props_table = true;
+    if (purpose == .debug or purpose == .var_export) obj.table_built = true;
     if (try table(vm, obj, purpose)) |arr| {
         defer releaseBuilt(vm, arr);
         for (arr.entries.items) |entry| {
@@ -262,7 +262,16 @@ pub fn table(vm: *VM, obj: *PhpObject, purpose: Purpose) RuntimeError!?*PhpArray
 // lists a typed property that was never initialized (one whose type forbids
 // null; zphp stores a nullable one unset as null, so it reads as null)
 pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, allocator: std.mem.Allocator) RuntimeError!void {
-    if (obj.slot_layout) |layout| if (obj.slots) |slots| {
+    obj.table_built = true;
+    // a detached table lists the declared values it copied
+    if (obj.detached_table) if (obj.slot_layout) |layout| {
+        for (vm.frozenTable(obj)) |f| {
+            const name = layout.names[f.slot];
+            const declared = vm.propertyDeclaration(layout.declaring_classes[f.slot], name);
+            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = f.value, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true });
+        }
+    };
+    if (!obj.detached_table) if (obj.slot_layout) |layout| if (obj.slots) |slots| {
         for (layout.names, 0..) |name, i| {
             if (i >= slots.len) break;
             // a lazy object's property not yet initialized: the debug view
