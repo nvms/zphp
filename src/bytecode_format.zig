@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 112;
+pub const FORMAT_VERSION: u16 = 113;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -156,15 +156,15 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
     try writeU32(&buf, allocator, @intCast(result.function_attrs.items.len));
     for (result.function_attrs.items) |fa| {
         try writeU32(&buf, allocator, try strtab.intern(allocator, fa.name));
-        try writeU16(&buf, allocator, @intCast(fa.attrs.len));
+        try writeU32(&buf, allocator, @intCast(fa.attrs.len));
         for (fa.attrs) |attr| {
             try writeU32(&buf, allocator, try strtab.intern(allocator, attr.name));
             try writeU32(&buf, allocator, attr.line);
             try writeU32(&buf, allocator, try strtab.intern(allocator, attr.file));
             try buf.append(allocator, @intFromBool(attr.strict));
-            try writeU16(&buf, allocator, @intCast(attr.args.len));
+            try writeU32(&buf, allocator, @intCast(attr.args.len));
             for (attr.args) |arg| try serializeValue(&buf, allocator, &strtab, arg);
-            try writeU16(&buf, allocator, @intCast(attr.arg_names.len));
+            try writeU32(&buf, allocator, @intCast(attr.arg_names.len));
             for (attr.arg_names) |arg_name| {
                 try writeU32(&buf, allocator, if (arg_name) |name| try strtab.intern(allocator, name) else 0xFFFFFFFF);
             }
@@ -314,7 +314,7 @@ fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, str
         try writeU32(buf, allocator, if (d.len > 0) try strtab.intern(allocator, d) else 0xFFFFFFFF);
     }
 
-    try writeU16(buf, allocator, @intCast(func.static_vars.len));
+    try writeU32(buf, allocator, @intCast(func.static_vars.len));
     for (func.static_vars) |sv| {
         try writeU32(buf, allocator, try strtab.intern(allocator, sv.name));
         try serializeValue(buf, allocator, strtab, sv.initial);
@@ -350,7 +350,7 @@ fn serializeValue(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab
             } else if (bytecode.newDefaultPtr(s.bytes())) |nd| {
                 try buf.append(allocator, TAG_NEW_DEFAULT);
                 try writeU32(buf, allocator, try strtab.intern(allocator, nd.class_name));
-                try buf.append(allocator, @intCast(nd.args.len));
+                try writeU32(buf, allocator, @intCast(nd.args.len));
                 for (nd.args) |a| try serializeValue(buf, allocator, strtab, a);
             } else {
                 try buf.append(allocator, TAG_STRING);
@@ -617,17 +617,17 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
     const function_attr_count = r.readU32() catch return error.InvalidFormat;
     for (0..function_attr_count) |_| {
         const fn_name = strings[try readStringIndex(&r, strings)];
-        const attr_count = r.readU16() catch return error.InvalidFormat;
+        const attr_count = r.readU32() catch return error.InvalidFormat;
         const attrs = try allocator.alloc(@import("runtime/vm.zig").AttributeDef, attr_count);
         for (0..attr_count) |ai| {
             const attr_name = strings[try readStringIndex(&r, strings)];
             const attr_line = r.readU32() catch return error.InvalidFormat;
             const attr_file = strings[try readStringIndex(&r, strings)];
             const attr_strict = (r.readByte() catch return error.InvalidFormat) != 0;
-            const arg_count = r.readU16() catch return error.InvalidFormat;
+            const arg_count = r.readU32() catch return error.InvalidFormat;
             const args = try allocator.alloc(Value, arg_count);
             for (0..arg_count) |i| args[i] = try deserializeValue(&r, &ctx);
-            const arg_name_count = r.readU16() catch return error.InvalidFormat;
+            const arg_name_count = r.readU32() catch return error.InvalidFormat;
             const arg_names = try allocator.alloc(?[]const u8, arg_name_count);
             for (0..arg_name_count) |i| {
                 const idx = r.readU32() catch return error.InvalidFormat;
@@ -752,7 +752,7 @@ fn deserializeFunction(r: *Reader, ctx: *DeserCtx) !ObjFunction {
         break :blk docs;
     };
 
-    const static_count = try r.readU16();
+    const static_count = try r.readU32();
     const static_vars = try allocator.alloc(bytecode.StaticVar, static_count);
     for (0..static_count) |i| {
         const sidx = try r.readU32();
@@ -833,7 +833,7 @@ fn deserializeValue(r: *Reader, ctx: *DeserCtx) !Value {
         },
         TAG_NEW_DEFAULT => blk: {
             const class_idx = try readStringIndex(r, ctx.strings);
-            const arg_count = try r.readByte();
+            const arg_count = try r.readU32();
             const args = try ctx.allocator.alloc(Value, arg_count);
             errdefer ctx.allocator.free(args);
             for (0..arg_count) |i| args[i] = try deserializeValue(r, ctx);
