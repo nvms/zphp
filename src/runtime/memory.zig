@@ -234,12 +234,18 @@ pub const MemoryAccount = struct {
         while (self.used.cmpxchgWeak(current, current -| len, .monotonic, .monotonic)) |seen| current = seen;
     }
 
+    // a huge block also takes the node php's heap lists it in
+    // (zend_mm_add_huge_block's zend_mm_huge_list, 32 bytes)
+    fn withHugeList(size: usize) usize {
+        return if (isHuge(size)) size +| 32 else size;
+    }
+
     fn chargeSized(self: *MemoryAccount, size: usize) void {
-        self.charge(size);
+        self.charge(withHugeList(size));
     }
 
     fn dischargeSized(self: *MemoryAccount, size: usize) void {
-        self.discharge(size);
+        self.discharge(withHugeList(size));
     }
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {

@@ -3,10 +3,11 @@ const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 const StringPool = @This();
 const MemoryAccount = @import("memory.zig").MemoryAccount;
+const Owner = @import("value.zig").PhpString.Owner;
 
 backing: Allocator,
 // the VM's memory account, charged for the strings handed out (not for the
-// blocks kept for reuse), at the length asked for as php would
+// blocks kept for reuse) at the size php's zend_string takes for them
 account: ?*MemoryAccount = null,
 free_lists: [9][32]?[*]u8 = @splat(@splat(null)),
 counts: [9]usize = @splat(0),
@@ -35,12 +36,22 @@ pub fn deinit(self: *StringPool) void {
     }
 }
 
+// what a block is counted at: a string's bytes as php's zend_string for
+// them (_ZSTR_STRUCT_SIZE: a 24-byte header, the bytes and a NUL, 8-byte
+// aligned), and a string's Owner at nothing, as it stands for that header
+fn phpLen(length: usize, alignment: Alignment) usize {
+    if (alignment == .@"1") return std.mem.alignForward(usize, length +| 25, 8);
+    if (length == @sizeOf(Owner) and alignment.toByteUnits() == @alignOf(Owner)) return 0;
+    return length;
+}
+
 fn alloc(ctx: *anyopaque, length: usize, alignment: Alignment, ra: usize) ?[*]u8 {
     const self: *StringPool = @ptrCast(@alignCast(ctx));
     const account = self.account orelse return self.take(length, alignment, ra);
-    if (!account.admitLen(length)) return null;
+    const counted = phpLen(length, alignment);
+    if (!account.admitLen(counted)) return null;
     const ptr = self.take(length, alignment, ra) orelse return null;
-    account.chargeLen(length);
+    account.chargeLen(counted);
     return ptr;
 }
 
@@ -56,9 +67,11 @@ fn take(self: *StringPool, length: usize, alignment: Alignment, ra: usize) ?[*]u
 fn resize(ctx: *anyopaque, bytes: []u8, alignment: Alignment, length: usize, ra: usize) bool {
     const self: *StringPool = @ptrCast(@alignCast(ctx));
     const account = self.account orelse return self.resizeBlock(bytes, alignment, length, ra);
-    if (!account.admitGrowthLen(bytes.len, length)) return false;
+    const old_counted = phpLen(bytes.len, alignment);
+    const new_counted = phpLen(length, alignment);
+    if (!account.admitGrowthLen(old_counted, new_counted)) return false;
     if (!self.resizeBlock(bytes, alignment, length, ra)) return false;
-    account.adjustLen(bytes.len, length);
+    account.adjustLen(old_counted, new_counted);
     return true;
 }
 
@@ -75,7 +88,7 @@ fn remap(ctx: *anyopaque, bytes: []u8, alignment: Alignment, length: usize, ra: 
 
 fn free(ctx: *anyopaque, bytes: []u8, alignment: Alignment, ra: usize) void {
     const self: *StringPool = @ptrCast(@alignCast(ctx));
-    if (self.account) |account| account.dischargeLen(bytes.len);
+    if (self.account) |account| account.dischargeLen(phpLen(bytes.len, alignment));
     const index = sizeClass(bytes.len, alignment) orelse {
         self.backing.rawFree(bytes, alignment, ra);
         return;
