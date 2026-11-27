@@ -1391,12 +1391,23 @@ fn convertFilter(ctx: *NativeContext, c: *Convert, f: *Filter, in: *Brigade, out
 // factory isn't registered, as in a php built without the iconv extension
 pub const has_iconv = @import("builtin").os.tag == .linux;
 
-const libc_iconv = struct {
+const iconv_failed = std.math.maxInt(usize);
+// where there is no iconv the filter code must not reference the symbols
+const libc_iconv = if (has_iconv) struct {
     extern "c" fn iconv_open(to: [*:0]const u8, from: [*:0]const u8) usize;
     extern "c" fn iconv(cd: usize, in: ?*[*]const u8, in_left: ?*usize, out: ?*[*]u8, out_left: ?*usize) usize;
     extern "c" fn iconv_close(cd: usize) c_int;
+} else struct {
+    fn iconv_open(_: [*:0]const u8, _: [*:0]const u8) usize {
+        return iconv_failed;
+    }
+    fn iconv(_: usize, _: ?*[*]const u8, _: ?*usize, _: ?*[*]u8, _: ?*usize) usize {
+        return iconv_failed;
+    }
+    fn iconv_close(_: usize) c_int {
+        return 0;
+    }
 };
-const iconv_failed = std.math.maxInt(usize);
 // ICONV_CSNMAXLEN
 const iconv_charset_max = 64;
 
