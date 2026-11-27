@@ -4396,7 +4396,7 @@ pub const VM = struct {
         self.string_pool.deinit();
         self.pending_gen_release.deinit(self.untracked);
         self.pending_fiber_release.deinit(self.untracked);
-        self.deferred_local_releases.deinit(self.allocator);
+        self.deferred_local_releases.deinit(self.untracked);
         self.stale_mirrors.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
         self.disabled_natives.deinit(self.allocator);
@@ -26120,7 +26120,7 @@ pub const VM = struct {
     fn unbindLocalCell(self: *VM, cell: *Value, queued: usize) void {
         const v = cell.*;
         if ((v == .object or v == .array) and self.pending_destruct.items.len > queued and !self.heap_teardown) {
-            if (self.deferred_local_releases.append(self.allocator, v)) |_| retainValue(v) else |_| {}
+            if (self.deferred_local_releases.append(self.untracked, v)) |_| retainValue(v) else |_| {}
         }
         self.unbindCell(cell);
     }
@@ -26131,7 +26131,7 @@ pub const VM = struct {
     // handle first
     pub inline fn releaseLocal(self: *VM, v: Value, queued: usize) void {
         if ((v == .object or v == .array) and self.pending_destruct.items.len > queued and !self.heap_teardown) {
-            self.deferred_local_releases.append(self.allocator, v) catch return self.releaseValue(v);
+            self.deferred_local_releases.append(self.untracked, v) catch return self.releaseValue(v);
             return;
         }
         self.releaseValue(v);
