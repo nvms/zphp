@@ -1096,6 +1096,8 @@ pub const VM = struct {
     // calls go deeper (ensureCallRoom), so their addresses never move
     frames: []CallFrame = &.{},
     frame_room: Region(CallFrame) = .{},
+    // the call regions' bytes memory_get_usage() leaves out (reserveCallRegions)
+    call_regions_free: usize = 0,
     // counts what `allocator` hands out and enforces memory_limit; the VM
     // allocates through it and it wraps the allocator the VM was built with
     memory: ?*MemoryAccount = null,
@@ -36459,6 +36461,10 @@ pub const VM = struct {
         self.exception_handlers = self.handler_room.items;
         _ = self.handler_room.ensure(256) catch return error.OutOfMemory;
         if (!try self.growCallRoom(64)) return error.OutOfMemory;
+        // php's first VM stack page is there before a script runs: the first
+        // growth for a frame entered above another's operands (one more
+        // frame's worth of operand slots) costs memory_get_usage() nothing
+        self.call_regions_free = self.callRegionBytes() + stack_headroom * (@sizeOf(Value) + @sizeOf(RefSource) + @sizeOf(bool));
     }
 
     // room for `count` more try blocks entered
@@ -36535,7 +36541,7 @@ pub const VM = struct {
         const after = self.callRegionBytes();
         const account = self.memory orelse return;
         const page: usize = 256 * 1024;
-        var left = after -| before;
+        var left = after -| @max(before, self.call_regions_free);
         while (left > 0) {
             const step = @min(left, page);
             if (!account.chargeExternal(step)) return error.OutOfMemory;
