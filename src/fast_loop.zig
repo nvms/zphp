@@ -1429,7 +1429,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         // move model (Stage 1): release $this and the parameter
                         // locals - this consumes the operand-stack retains the
                         // call site transferred in
-                        for (locals) |lv| self.releaseValue(lv);
+                        const queued = self.pending_destruct.items.len;
+                        for (locals) |lv| self.releaseLocal(lv, queued);
                         self.freeLocals(locals);
                     }
                     self.frame_count -= 1;
@@ -1469,7 +1470,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (frame.call_name) |name| self.releaseClosureByName(name);
                     if (locals.len > 0) {
                         // move model (Stage 1): release $this and parameter locals
-                        for (locals) |lv| self.releaseValue(lv);
+                        const queued = self.pending_destruct.items.len;
+                        for (locals) |lv| self.releaseLocal(lv, queued);
                         self.freeLocals(locals);
                     }
                     self.frame_count -= 1;

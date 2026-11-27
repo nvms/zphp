@@ -1237,6 +1237,12 @@ pub const VM = struct {
     gen_release_cursor: usize = 0,
     pending_fiber_release: std.ArrayListUnmanaged(*@import("value.zig").Fiber) = .empty,
     fiber_release_cursor: usize = 0,
+    // a returning frame's variables after the first whose release queued a
+    // destruction: php frees each compiled variable fully before the next
+    // (i_free_compiled_variables), so their releases wait for the drain to
+    // reach them, after what the earlier ones dropped is gone
+    deferred_local_releases: std.ArrayListUnmanaged(Value) = .empty,
+    deferred_local_cursor: usize = 0,
     // how long each release queue was when the drain began the item it runs
     // now: what lies between its cursors and these is still the outer
     // drain's, which a nested pass leaves for it
@@ -4300,6 +4306,7 @@ pub const VM = struct {
         self.string_pool.deinit();
         self.pending_gen_release.deinit(self.allocator);
         self.pending_fiber_release.deinit(self.allocator);
+        self.deferred_local_releases.deinit(self.allocator);
         self.stale_mirrors.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
         self.disabled_natives.deinit(self.allocator);
@@ -4546,6 +4553,8 @@ pub const VM = struct {
         self.gen_release_cursor = 0;
         self.pending_fiber_release.clearRetainingCapacity();
         self.fiber_release_cursor = 0;
+        self.deferred_local_releases.clearRetainingCapacity();
+        self.deferred_local_cursor = 0;
         self.stale_mirrors.clearRetainingCapacity();
         self.weakmaps.clearRetainingCapacity();
         self.weak_references.clearRetainingCapacity();
@@ -25762,24 +25771,62 @@ pub const VM = struct {
         if (frame.call_name) |name| self.releaseClosureByName(name);
         const snames = if (frame.func) |f| f.slot_names else frame.slot_names;
         const vars_populated = frame.vars.count() > 0;
+        const queued = self.pending_destruct.items.len;
         // zend_free_compiled_variables: the compiled variables in their
         // order (a slot whose variable lives in the table releases the
         // table's value), then the rest of the table
         for (frame.locals, 0..) |lv, i| {
             const name = if (i < snames.len) snames[i] else "<unnamed slot>";
             const v = if (vars_populated and i < snames.len and snames[i].len > 0) frame.vars.get(snames[i]) orelse lv else lv;
-            self.releaseValue(v);
+            self.releaseLocal(v, queued);
             if (self.debug_gc_verify) self.gcRecordFrameRelease(frame, name, v);
+            // a reference variable lets go of its reference in its turn
+            if (frame.ref_slots.count() > 0 and i < snames.len and snames[i].len > 0) {
+                if (frame.ref_slots.fetchRemove(snames[i])) |kv| self.unbindLocalCell(kv.value, queued);
+            }
         }
         if (vars_populated) {
             var it = frame.vars.iterator();
             next: while (it.next()) |entry| {
                 const name = entry.key_ptr.*;
                 for (snames[0..@min(snames.len, frame.locals.len)]) |sn| if (sn.len > 0 and std.mem.eql(u8, sn, name)) continue :next;
-                self.releaseValue(entry.value_ptr.*);
+                self.releaseLocal(entry.value_ptr.*, queued);
                 if (self.debug_gc_verify) self.gcRecordFrameRelease(frame, name, entry.value_ptr.*);
+                if (frame.ref_slots.count() > 0) {
+                    if (frame.ref_slots.fetchRemove(name)) |kv| self.unbindLocalCell(kv.value, queued);
+                }
             }
         }
+        // variables that are only references have no slot
+        if (frame.ref_slots.count() > 0) {
+            var old = frame.ref_slots;
+            frame.ref_slots = .{};
+            var it = old.valueIterator();
+            while (it.next()) |cell| self.unbindLocalCell(cell.*, queued);
+            old.deinit(self.allocator);
+        }
+    }
+
+    // the reference cell of a returning frame's variable: what it held last
+    // waits behind the earlier variables' destructions as releaseLocal's do
+    fn unbindLocalCell(self: *VM, cell: *Value, queued: usize) void {
+        const v = cell.*;
+        if ((v == .object or v == .array) and self.pending_destruct.items.len > queued and !self.heap_teardown) {
+            if (self.deferred_local_releases.append(self.allocator, v)) |_| retainValue(v) else |_| {}
+        }
+        self.unbindCell(cell);
+    }
+
+    // once an earlier variable of the frame queued a destruction, an object
+    // or array waits in deferred_local_releases: releasing it now would let
+    // what the earlier one's destruction drops reach zero there, freeing its
+    // handle first
+    pub inline fn releaseLocal(self: *VM, v: Value, queued: usize) void {
+        if ((v == .object or v == .array) and self.pending_destruct.items.len > queued and !self.heap_teardown) {
+            self.deferred_local_releases.append(self.allocator, v) catch return self.releaseValue(v);
+            return;
+        }
+        self.releaseValue(v);
     }
 
     fn gcRecordFrameRelease(self: *VM, frame: *const CallFrame, name: []const u8, v: Value) void {
@@ -26133,7 +26180,8 @@ pub const VM = struct {
         if (self.held_exceptions.items.len > 0) self.releaseHeldAt(idx, 0);
         self.forgetFrameArgs(idx);
         const frame_generator = self.frames[idx].generator;
-        self.deinitRefSlots(&self.frames[idx].ref_slots);
+        // releaseFrameObjects lets each variable's reference go with it
+        if (frame_generator != null) self.deinitRefSlots(&self.frames[idx].ref_slots);
         self.unregFrameBindings(&self.frames[idx]);
         // when the frame belongs to a generator, its vars hashmap is owned by
         // the Generator and will be freed during freeHeapItems. freeing it
@@ -26143,6 +26191,7 @@ pub const VM = struct {
             // pooled/freed - this is what makes function-scope objects and
             // constructor objects fire __destruct at frame exit (Stage 1)
             self.releaseFrameObjects(idx);
+            self.deinitRefSlots(&self.frames[idx].ref_slots);
             self.releaseFrameVars(&self.frames[idx].vars);
         }
         // the frame may have grown the generator's vars map: the generator
@@ -36730,7 +36779,7 @@ pub const VM = struct {
     // the destructors of objects only its locals held run before the caller
     // sees the result. true when a drain ran
     pub fn drainAtReturn(self: *VM) bool {
-        if (self.pending_destruct.items.len == 0) return false;
+        if (self.pending_destruct.items.len == 0 and self.deferred_local_releases.items.len == 0) return false;
         self.drainPendingDestruct();
         return true;
     }
@@ -36780,6 +36829,8 @@ pub const VM = struct {
             self.gen_release_cursor = 0;
             self.pending_fiber_release.clearRetainingCapacity();
             self.fiber_release_cursor = 0;
+            self.deferred_local_releases.clearRetainingCapacity();
+            self.deferred_local_cursor = 0;
             for (self.released_arrays.items) |arr| {
                 if (arr.cycle_queued) {
                     for (self.cycle_array_candidates.items, 0..) |candidate, i| {
@@ -36880,7 +36931,8 @@ pub const VM = struct {
             self.gen_release_cursor < self.pending_gen_release.items.len or
             self.fiber_release_cursor < self.pending_fiber_release.items.len or
             self.pending_string_release.items.len > 0 or
-            self.stale_mirrors.items.len > 0)
+            self.stale_mirrors.items.len > 0 or
+            self.deferred_local_cursor < self.deferred_local_releases.items.len)
         {
             self.refreshStaleMirrors();
             self.drainPendingStringReleases();
@@ -36909,6 +36961,18 @@ pub const VM = struct {
                 if (fiber.refcount != 0 or fiber.pooled) continue;
                 self.markDrainItem();
                 self.destroyReleasedFiber(fiber);
+            }
+            // the next variable of a returning frame, once everything the
+            // earlier ones dropped is destroyed
+            if (self.destruct_cursor == self.pending_destruct.items.len and
+                self.array_release_cursor == self.pending_array_release.items.len and
+                self.gen_release_cursor == self.pending_gen_release.items.len and
+                self.fiber_release_cursor == self.pending_fiber_release.items.len and
+                self.deferred_local_cursor < self.deferred_local_releases.items.len)
+            {
+                const v = self.deferred_local_releases.items[self.deferred_local_cursor];
+                self.deferred_local_cursor += 1;
+                self.releaseValue(v);
             }
         }
     }
@@ -38580,6 +38644,7 @@ pub const VM = struct {
     // their opcodes rather than protected by a narrower gate
     pub inline fn hasPendingReleases(self: *VM) bool {
         return self.pending_destruct.items.len > 0 or
+            self.deferred_local_releases.items.len > 0 or
             self.stale_mirrors.items.len > 0 or
             self.pending_string_release.items.len > 0 or
             self.pending_array_release.items.len > 0 or
