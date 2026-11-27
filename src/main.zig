@@ -998,7 +998,9 @@ fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
     const ob_base: ?usize = if (vm.ob_stack.items.len > 0) vm.ob_stack.items[0].start else null;
     output_control.endAll(vm) catch {
         if (vm.pending_exception != null) {
-            if (vm.user_exception_handler != null and !vm.uncatchable_fatal) {
+            // a fatal error (php_output_lock_error) deactivates the output
+            // layer before it is displayed, so its copy goes out directly
+            if (vm.uncatchable_fatal or vm.user_exception_handler != null) {
                 if (try handleOrReport(allocator, vm)) failed = true;
             } else {
                 if (ob_base) |base| if (base <= vm.output.items.len) vm.output.shrinkRetainingCapacity(base);
