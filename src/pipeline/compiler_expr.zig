@@ -410,7 +410,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                     try compilePropWriteBase(self, target.data.lhs);
                     const dynamic = self.isDynamicProp(target);
                     if (dynamic) try self.compileNode(target.data.rhs);
-                    try compileReferenceSource(self, self.ast.nodes[node.data.rhs].data.lhs);
+                    try compileReferenceSourceAs(self, self.ast.nodes[node.data.rhs].data.lhs, @import("../runtime/vm.zig").VM.property_reference_source);
                     if (dynamic) {
                         try self.emitOp(.prop_bind_ref_source_dyn);
                     } else {
@@ -3412,7 +3412,11 @@ fn isReferenceSource(self: *Compiler, source: u32) bool {
 // Move the temporary binding into the owning operand-stack provenance. No
 // synthetic variable survives the expression or holds a returned local alive.
 fn compileReferenceSource(self: *Compiler, source: u32) Error!void {
-    const dst = try self.addConstant(.{ .string = Value.String.borrowed("\x00reference-source") });
+    return compileReferenceSourceAs(self, source, "\x00reference-source");
+}
+
+fn compileReferenceSourceAs(self: *Compiler, source: u32, name: []const u8) Error!void {
+    const dst = try self.addConstant(.{ .string = Value.String.borrowed(name) });
     if (!try compileReferenceBinding(self, source, dst)) return error.CompileError;
     try self.emitOp(.reference_source);
     try self.emitU16(dst);

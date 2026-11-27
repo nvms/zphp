@@ -1333,6 +1333,10 @@ pub const VM = struct {
     // the name the last bind_ref_from_return bound a copy of the value to,
     // the call having returned no reference
     ref_bind_degraded: ?[*]const u8 = null,
+    // a call's value bound as a property's reference source: php's "Only
+    // variables should be assigned by reference" comes once the property
+    // was fetched (zend_assign_to_property_reference), not with the call
+    ref_notice_pending: bool = false,
     // last_return_ref is what the call whose reference is being bound handed
     // back: a return_ref set it since reset_return_ref ran before the call
     return_ref_fresh: bool = false,
@@ -10442,6 +10446,8 @@ pub const VM = struct {
                 },
 
                 .prop_bind_ref_source, .prop_bind_ref_source_dyn => |bind_op| {
+                    const notice_pending = self.ref_notice_pending;
+                    self.ref_notice_pending = false;
                     var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
                     defer self.releaseBindSource(&source);
                     self.releaseBindSource(&self.ic.?.arg_stack[self.sp - 1]);
@@ -10498,6 +10504,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         if (try self.refuseReadonlyRefTarget(obj_val.object.storage(), prop_name)) continue;
+                        if (notice_pending) self.raiseError(8, "Only variables should be assigned by reference") catch if (try self.resumeRaised()) continue;
                         try self.bindPropToCell(obj_val.object.storage(), prop_name, cell);
                     }
                     // php frees what the destination held before it reads the
@@ -10771,7 +10778,9 @@ pub const VM = struct {
                         // a function returning by value: php's notice. a
                         // return or yield by reference gives its own
                         const own_notice = std.mem.eql(u8, dst_name, "$__ret_ref") or std.mem.eql(u8, dst_name, "\x00yield-reference");
-                        if (!own_notice and !by_ref_function) self.raiseError(8, "Only variables should be assigned by reference") catch if (try self.resumeRaised()) continue;
+                        if (std.mem.eql(u8, dst_name, property_reference_source)) {
+                            self.ref_notice_pending = !by_ref_function;
+                        } else if (!own_notice and !by_ref_function) self.raiseError(8, "Only variables should be assigned by reference") catch if (try self.resumeRaised()) continue;
                         if (internal_name) {
                             const cell = try self.newRefCell();
                             self.setCell(cell, val);
@@ -35609,6 +35618,10 @@ pub const VM = struct {
         const b3: u32 = self.readByte();
         return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
     }
+
+    // the reference source of a property assigned by reference from a call
+    // (compiler_expr.compileReferenceSourceAs)
+    pub const property_reference_source = "\x00property-reference-source";
 
     pub fn currentChunk(self: *const VM) *const Chunk {
         return self.frames[self.frame_count - 1].chunk;
