@@ -5622,7 +5622,9 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
         return error.RuntimeError;
     }
     if (args[0] != .object) return zpp.typeError(ctx, label, 0, "object", "object", args[0]);
-    const target = args[0].object;
+    // without lazy initialization, an initialized proxy's write goes to its
+    // instance, chosen before the value's coercion can run any code
+    const target = if (skip) args[0].object.storage() else args[0].object;
     // php 8.6 deprecates an object of another class than the reflected one
     if (mode != .raw_without_lazy) if (reflectedClass(this)) |reflected| if (!ctx.vm.isInstanceOf(target.class_name, reflected)) {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Calling {s}() with a given object that is not an instance of the class this property was declared in is deprecated", .{label});
@@ -5667,8 +5669,28 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
             return error.RuntimeError;
         }
     }
+    // the slot stops being lazy before the write, so code the coercion runs
+    // initializes the object without it; it is lazy again if the write fails
+    var lazy_slot: ?usize = null;
+    if (skip) if (target.lazy) |state| if (!state.running and state.initializer != .null) {
+        if (target.getSlotIndexForScope(prop_name, slot_scope)) |i| if (state.pending[i]) {
+            state.pending[i] = false;
+            lazy_slot = i;
+        };
+    };
     var value = args[1];
-    if (try ctx.vm.checkPropertyType(&value, vr.type_str, vr.defining_class, prop_name)) return error.RuntimeError;
+    const type_failed = ctx.vm.checkPropertyType(&value, vr.type_str, vr.defining_class, prop_name) catch |err| blk: {
+        if (err != error.RuntimeError) return err;
+        break :blk true;
+    };
+    if (type_failed) {
+        if (lazy_slot) |i| if (target.lazy) |state| if (!state.running and state.initializer != .null and state.backing == null) {
+            if (target.slots) |slots| if (slots[i] == .undef) {
+                state.pending[i] = true;
+            };
+        };
+        return error.RuntimeError;
+    }
     // write_property creating a dynamic property
     if (!decl.declared and !target.properties.contains(prop_name)) switch (ctx.vm.dynamicPropertyRule(target)) {
         .allowed => {},
@@ -5685,8 +5707,22 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
             if (ctx.vm.pending_exception != null) return error.RuntimeError;
         },
     };
-    try target.setForScope(ctx.allocator, prop_name, value, slot_scope);
-    if (skip) _ = try rpSkipLazy(ctx, args);
+    if (!skip) {
+        try target.setForScope(ctx.allocator, prop_name, value, slot_scope);
+        return NativeResult.scalar(.null);
+    }
+    // a proxy the coercion initialized keeps the value in its own slot,
+    // which nothing reads any more
+    try target.setOwnForScope(ctx.allocator, prop_name, value, slot_scope);
+    // the object stops being lazy with its last lazy slot
+    if (lazy_slot != null) if (target.lazy) |state| if (!state.running and state.initializer != .null and state.backing == null) {
+        for (state.pending) |pending| {
+            if (pending) return NativeResult.scalar(.null);
+        }
+        const initializer = state.initializer;
+        state.initializer = .null;
+        ctx.vm.releaseValue(initializer);
+    };
     return NativeResult.scalar(.null);
 }
 

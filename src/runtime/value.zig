@@ -1628,6 +1628,12 @@ pub const PhpObject = struct {
     // declaring class (private slots are picked correctly)
     pub fn setForScope(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value, scope: ?[]const u8) !void {
         if (self.storage() != self) return self.storage().setForScope(allocator, name, value, scope);
+        return self.setOwnForScope(allocator, name, value, scope);
+    }
+
+    // setForScope on the object's own table even when it is an initialized
+    // proxy: a write whose target was fixed before the proxy initialized
+    pub fn setOwnForScope(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value, scope: ?[]const u8) !void {
         retainStored(value);
         if (self.slots) |s| {
             if (self.getSlotIndexForScope(name, scope)) |idx| {
