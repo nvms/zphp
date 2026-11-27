@@ -410,10 +410,16 @@ fn wakeup(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     for (listing.items.items) |p| try arr.append(ctx.allocator, p.value);
     try obj.set(ctx.allocator, P.elements, .{ .array = arr });
     try setResize(ctx, obj, -1);
+    var names: std.StringHashMapUnmanaged(void) = .{};
+    defer names.deinit(ctx.allocator);
     for (listing.items.items) |p| switch (p.key) {
-        .name => |n| if (obj.removeProperty(ctx.allocator, n)) |old| ctx.vm.releaseValue(old),
+        .name => |n| try names.put(ctx.allocator, n, {}),
         .int => {},
     };
+    var released: std.ArrayListUnmanaged(Value) = .empty;
+    defer released.deinit(ctx.allocator);
+    try obj.removeProperties(ctx.allocator, &names, &released);
+    for (released.items) |old| ctx.vm.releaseValue(old);
     return NativeResult.scalar(.null);
 }
 

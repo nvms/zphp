@@ -1742,6 +1742,26 @@ pub const PhpObject = struct {
         return removed.value;
     }
 
+    // removes the named properties in one pass (php's zend_hash_clean of a
+    // table, where removing them one by one from the front would be
+    // quadratic), handing their values to `released`; the rest keep their
+    // order
+    pub fn removeProperties(self: *PhpObject, allocator: std.mem.Allocator, names: *const std.StringHashMapUnmanaged(void), released: *std.ArrayListUnmanaged(Value)) !void {
+        if (names.count() == 0) return;
+        if (self.lazy) |state| if (state.table_shared) self.separateTable();
+        try released.ensureUnusedCapacity(allocator, names.count());
+        var kept: std.StringArrayHashMapUnmanaged(Value) = .{};
+        try kept.ensureTotalCapacity(allocator, self.properties.count());
+        // `names` may borrow the keys, so they are freed after the lookups
+        for (self.properties.keys(), self.properties.values()) |name, value| {
+            if (names.contains(name)) released.appendAssumeCapacity(value) else kept.putAssumeCapacity(name, value);
+        }
+        for (self.properties.keys()) |name| if (!kept.contains(name)) allocator.free(name);
+        self.properties.deinit(allocator);
+        self.properties = kept;
+        self.skewProperties(allocator, self.properties.count(), self.properties.capacity());
+    }
+
     // drops every property without releasing the values, which the caller
     // has already released or taken
     pub fn clearProperties(self: *PhpObject, allocator: std.mem.Allocator) void {
