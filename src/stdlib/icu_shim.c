@@ -47,7 +47,12 @@ const UNormalizer2* zphp_unorm2_getNFDInstance(UErrorCode* err) { return unorm2_
 const UNormalizer2* zphp_unorm2_getNFKCInstance(UErrorCode* err) { return unorm2_getNFKCInstance(err); }
 const UNormalizer2* zphp_unorm2_getNFKDInstance(UErrorCode* err) { return unorm2_getNFKDInstance(err); }
 const UNormalizer2* zphp_unorm2_getNFKCCasefoldInstance(UErrorCode* err) { return unorm2_getNFKCCasefoldInstance(err); }
-int32_t zphp_unorm2_normalize(const UNormalizer2* n, const UChar* src, int32_t srcLen, UChar* dest, int32_t cap, UErrorCode* err) {
+/* the "uts46" instance is UTS #46 mapping plus NFC, which the whatwg url
+ * host parser uses for its idna processing */
+const UNormalizer2* zphp_unorm2_getInstance(const char* packageName, const char* name, int32_t mode, UErrorCode* err) {
+    return unorm2_getInstance(packageName, name, (UNormalization2Mode) mode, err);
+}
+int32_t zphp_unorm2_normalize(const UNormalizer2* n,const UChar* src, int32_t srcLen, UChar* dest, int32_t cap, UErrorCode* err) {
     return unorm2_normalize(n, src, srcLen, dest, cap, err);
 }
 UBool zphp_unorm2_isNormalized(const UNormalizer2* n, const UChar* src, int32_t srcLen, UErrorCode* err) {
