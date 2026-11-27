@@ -13,13 +13,19 @@ function entry(string $text, string $name): string
     return substr($text, $at, $end + 6 - $at);
 }
 
-echo new ReflectionExtension('json');
-echo new ReflectionExtension('ctype');
+// a module's number depends on which extensions the php build loads
+function shown(string $name): string
+{
+    return preg_replace('/extension #\d+ /', 'extension #N ', (string) new ReflectionExtension($name));
+}
+
+echo shown('json');
+echo shown('ctype');
 
 ini_set('arg_separator.output', "f\0oo");
 ini_set('precision', '10');
 $core = (string) new ReflectionExtension('core');
-echo strtok($core, "\n"), "\n";
+echo preg_replace('/#\d+ /', '#N ', strtok($core, "\n")), "\n";
 echo entry($core, 'arg_separator.output');
 echo entry($core, 'precision');
 echo entry($core, 'allow_url_fopen');
@@ -31,6 +37,6 @@ echo entry($pcre, 'pcre.backtrack_limit');
 echo entry($pcre, 'pcre.jit');
 
 $standard = new ReflectionExtension('standard');
-echo strtok((string) $standard, "\n"), "\n";
+echo preg_replace('/#\d+ /', '#N ', strtok((string) $standard, "\n")), "\n";
 echo $standard->getVersion(), "\n";
 echo (new ReflectionExtension('dom'))->getVersion(), "\n";
