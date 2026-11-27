@@ -13425,6 +13425,9 @@ pub const VM = struct {
                             var args_buf: [16]Value = undefined;
                             const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
                             defer self.freeStackArgs(args_buf_s, &args_buf);
+                            // a by-reference constructor parameter writes
+                            // through the argument's source
+                            if (native.byref) self.captureArgSources(ac);
                             self.dropN(ac);
 
                             var tmp_vars = self.acquireFrameVars();
@@ -13681,6 +13684,9 @@ pub const VM = struct {
                             var args_buf: [16]Value = undefined;
                             const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
                             defer self.freeStackArgs(args_buf_s, &args_buf);
+                            // a by-reference constructor parameter writes
+                            // through the argument's source
+                            if (native.byref) self.captureArgSources(ac);
                             self.dropN(ac + 1);
                             var tmp_vars = self.acquireFrameVars();
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
@@ -14917,6 +14923,9 @@ pub const VM = struct {
                         const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
                         defer self.freeStackArgs(args_buf_s, &args_buf);
                         self.saveFrameArgs(mcs_ac);
+                        // named by-reference arguments write through their
+                        // sources, as positional ones do
+                        if (native.byref) self.captureArgSources(ac);
                         self.dropN(ac);
                         self.dropN(1);
                         var tmp_vars = self.acquireFrameVars();
