@@ -690,6 +690,7 @@ Zend/tests/bug69551.phpt
 Zend/tests/bug69568.phpt
 Zend/tests/bug69599.phpt
 Zend/tests/bug69640.phpt
+Zend/tests/bug69732.phpt
 Zend/tests/bug69755.phpt
 Zend/tests/bug69756.phpt
 Zend/tests/bug69758.phpt
@@ -715,6 +716,7 @@ Zend/tests/bug70288.phpt
 Zend/tests/bug70332.phpt
 Zend/tests/bug70398.phpt
 Zend/tests/bug70478.phpt
+Zend/tests/bug70662.phpt
 Zend/tests/bug70681.phpt
 Zend/tests/bug70689.phpt
 Zend/tests/bug70748.phpt
@@ -732,6 +734,7 @@ Zend/tests/bug71163.phpt
 Zend/tests/bug71196.phpt
 Zend/tests/bug71221.phpt
 Zend/tests/bug71266.phpt
+Zend/tests/bug71300.phpt
 Zend/tests/bug71336.phpt
 Zend/tests/bug71470.phpt
 Zend/tests/bug71474.phpt
@@ -805,6 +808,7 @@ Zend/tests/bug77660.phpt
 Zend/tests/bug77922.phpt
 Zend/tests/bug78151.phpt
 Zend/tests/bug78154.phpt
+Zend/tests/bug78182.phpt
 Zend/tests/bug78271.phpt
 Zend/tests/bug78335.phpt
 Zend/tests/bug78340.phpt
@@ -922,6 +926,7 @@ Zend/tests/class_name/class_on_constant_evaluated_expression.phpt
 Zend/tests/class_name/class_on_object.phpt
 Zend/tests/class_name/parent_class_name_without_parent.phpt
 Zend/tests/class_name/self_class_const_in_unknown_scope.phpt
+Zend/tests/class_properties_const.phpt
 Zend/tests/class_properties_dynamic.phpt
 Zend/tests/class_properties_static.phpt
 Zend/tests/clone/ast.phpt
@@ -1201,6 +1206,7 @@ Zend/tests/constants/final_constants/final_const8.phpt
 Zend/tests/constants/final_constants/final_const9.phpt
 Zend/tests/constants/gh10709.phpt
 Zend/tests/constants/gh10709_2.phpt
+Zend/tests/constants/gh10709_3.phpt
 Zend/tests/constants/gh17222.phpt
 Zend/tests/constants/gh18850.phpt
 Zend/tests/constants/halt_compiler/bug48930.phpt
@@ -1394,6 +1400,7 @@ Zend/tests/dynamic_prop_deprecation.phpt
 Zend/tests/dynamic_prop_deprecation_002.phpt
 Zend/tests/dynamic_prop_name_leak.phpt
 Zend/tests/e_strict-deprecated.phpt
+Zend/tests/early_binding_unreachable.phpt
 Zend/tests/empty_str_offset.phpt
 Zend/tests/empty_with_expr.phpt
 Zend/tests/entry_block_with_predecessors.phpt
@@ -2460,6 +2467,7 @@ Zend/tests/gh20183_002.phpt
 Zend/tests/gh20564.phpt
 Zend/tests/gh20628_001.phpt
 Zend/tests/gh20628_002.phpt
+Zend/tests/gh20628_003.phpt
 Zend/tests/gh20628_004.phpt
 Zend/tests/gh20628_005.phpt
 Zend/tests/gh20672.phpt
@@ -2737,6 +2745,7 @@ Zend/tests/inheritance/bug80126_2.phpt
 Zend/tests/inheritance/bug80391.phpt
 Zend/tests/inheritance/constructor_abstract_grantparent.phpt
 Zend/tests/inheritance/deprecation_to_exception_during_inheritance.phpt
+Zend/tests/inheritance/deprecation_to_exception_during_inheritance_can_be_caught.phpt
 Zend/tests/inheritance/enum_only_interfaces_error_via_indirect_interface.phpt
 Zend/tests/inheritance/gh15907.phpt
 Zend/tests/inheritance/gh9407.phpt
@@ -2806,6 +2815,7 @@ Zend/tests/jump/jump14.phpt
 Zend/tests/jump/jump15.phpt
 Zend/tests/jump/jump16.phpt
 Zend/tests/jump/jump17.phpt
+Zend/tests/lazy_objects/array_walk.phpt
 Zend/tests/lazy_objects/clone_calls___clone_once.phpt
 Zend/tests/lazy_objects/clone_creates_object_with_independent_state_001.phpt
 Zend/tests/lazy_objects/clone_creates_object_with_independent_state_002.phpt
@@ -2861,6 +2871,7 @@ Zend/tests/lazy_objects/gh18038-009.phpt
 Zend/tests/lazy_objects/gh18038-010.phpt
 Zend/tests/lazy_objects/gh18038-011.phpt
 Zend/tests/lazy_objects/gh18038-012.phpt
+Zend/tests/lazy_objects/gh20085.phpt
 Zend/tests/lazy_objects/gh20174.phpt
 Zend/tests/lazy_objects/gh20504-001.phpt
 Zend/tests/lazy_objects/gh20504-002.phpt
@@ -2870,10 +2881,13 @@ Zend/tests/lazy_objects/gh20504-005.phpt
 Zend/tests/lazy_objects/gh20657-001.phpt
 Zend/tests/lazy_objects/gh20657-002.phpt
 Zend/tests/lazy_objects/gh20854.phpt
+Zend/tests/lazy_objects/gh20873.phpt
+Zend/tests/lazy_objects/gh20875.phpt
 Zend/tests/lazy_objects/gh20875_proxy_get_no_init.phpt
 Zend/tests/lazy_objects/gh20905.phpt
 Zend/tests/lazy_objects/gh21478-isset.phpt
 Zend/tests/lazy_objects/gh21478-proxy-get-override.phpt
+Zend/tests/lazy_objects/gh21478-proxy-get-ref-forward.phpt
 Zend/tests/lazy_objects/gh21478-set.phpt
 Zend/tests/lazy_objects/gh21478-unset.phpt
 Zend/tests/lazy_objects/gh21478.phpt
@@ -2889,6 +2903,8 @@ Zend/tests/lazy_objects/init_exception_reverts_initializer_changes_overridden_pr
 Zend/tests/lazy_objects/init_exception_reverts_initializer_changes_props_ht.phpt
 Zend/tests/lazy_objects/init_exception_reverts_initializer_changes_props_ht_ref.phpt
 Zend/tests/lazy_objects/init_fatal.phpt
+Zend/tests/lazy_objects/init_handles_ref_source_types.phpt
+Zend/tests/lazy_objects/init_handles_ref_source_types_exception.phpt
 Zend/tests/lazy_objects/init_may_leave_props_uninit.phpt
 Zend/tests/lazy_objects/init_preserves_identity.phpt
 Zend/tests/lazy_objects/init_preserves_proxy_class.phpt
@@ -2920,6 +2936,7 @@ Zend/tests/lazy_objects/isset_hooked_may_initialize.phpt
 Zend/tests/lazy_objects/isset_hooked_may_not_initialize.phpt
 Zend/tests/lazy_objects/isset_initializes.phpt
 Zend/tests/lazy_objects/jit_assign_obj_dynamic.phpt
+Zend/tests/lazy_objects/jit_assign_obj_op_dynamic.phpt
 Zend/tests/lazy_objects/jit_assign_obj_op_prop_info.phpt
 Zend/tests/lazy_objects/jit_assign_obj_op_unknown_prop_info.phpt
 Zend/tests/lazy_objects/jit_assign_obj_op_unknown_prop_info_untyped.phpt
@@ -2984,6 +3001,7 @@ Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_readonly.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_readonly_variant.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_realize.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_side_effect_destruct.phpt
+Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_side_effect_toString.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_skips___set.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_skips_hook.phpt
 Zend/tests/lazy_objects/skipLazyInitialization.phpt
@@ -3279,6 +3297,7 @@ Zend/tests/magic_methods/stringable_automatic_implementation.phpt
 Zend/tests/magic_methods/stringable_automatic_implementation_case_insensitive.phpt
 Zend/tests/magic_methods/stringable_trait.phpt
 Zend/tests/magic_methods/stringable_trait_invalid.phpt
+Zend/tests/magic_methods/trampoline_closure_named_arguments.phpt
 Zend/tests/match/001.phpt
 Zend/tests/match/002.phpt
 Zend/tests/match/003.phpt
@@ -3743,6 +3762,7 @@ Zend/tests/oss_fuzz_434346548.phpt
 Zend/tests/oss_fuzz_438780145.phpt
 Zend/tests/oss_fuzz_447521098.phpt
 Zend/tests/oss_fuzz_454273637.phpt
+Zend/tests/oss_fuzz_456317305.phpt
 Zend/tests/oss_fuzz_54325.phpt
 Zend/tests/oss_fuzz_58181.phpt
 Zend/tests/oss_fuzz_59764.phpt
@@ -5304,6 +5324,7 @@ Zend/tests/type_declarations/variance/internal_parent/missing_return_type.phpt
 Zend/tests/type_declarations/variance/internal_parent/unresolvable_inheritance_check_param.phpt
 Zend/tests/type_declarations/variance/internal_parent/unresolvable_inheritance_check_return.phpt
 Zend/tests/type_declarations/variance/loading_exception1.phpt
+Zend/tests/type_declarations/variance/loading_exception2.phpt
 Zend/tests/type_declarations/variance/mixed_return_type.phpt
 Zend/tests/type_declarations/variance/object_variance.phpt
 Zend/tests/type_declarations/variance/override_static_with_self/static_to_self.phpt
@@ -5370,6 +5391,7 @@ Zend/tests/unset/unset_cv10.phpt
 Zend/tests/unset/unset_cv11.phpt
 Zend/tests/unset/unset_cv12.phpt
 Zend/tests/unset/unset_non_array.phpt
+Zend/tests/unset/unset_prop_recursion.phpt
 Zend/tests/unset_empty_isset_comprehensive.phpt
 Zend/tests/unterminated_comment.phpt
 Zend/tests/use_const/alias.phpt
@@ -8372,6 +8394,7 @@ ext/standard/tests/array/array_walk/bug62607.phpt
 ext/standard/tests/array/array_walk/bug69068.phpt
 ext/standard/tests/array/array_walk/bug69068_2.phpt
 ext/standard/tests/array/array_walk/bug70713.phpt
+ext/standard/tests/array/array_walk/bug79839.phpt
 ext/standard/tests/array/bug14580.phpt
 ext/standard/tests/array/bug20381.phpt
 ext/standard/tests/array/bug20865.phpt
@@ -9930,6 +9953,10 @@ ext/standard/tests/http/http_build_query/http_build_query_with_resource.phpt
 ext/standard/tests/http/http_clear_last_response_headers.phpt
 ext/standard/tests/http/http_empty_location_redirect.phpt
 ext/standard/tests/http/http_location_realloc.phpt
+ext/standard/tests/http/http_proxy_auth_removed.phpt
+ext/standard/tests/http/http_proxy_ssl_connect_01.phpt
+ext/standard/tests/http/http_proxy_ssl_connect_02.phpt
+ext/standard/tests/http/http_proxy_ssl_connect_03.phpt
 ext/standard/tests/http/http_redirect_removes_post_headers.phpt
 ext/standard/tests/http/http_response_header_01.phpt
 ext/standard/tests/http/http_response_header_02.phpt
@@ -10546,8 +10573,10 @@ ext/standard/tests/streams/bug71884.phpt
 ext/standard/tests/streams/bug72075.phpt
 ext/standard/tests/streams/bug72221.phpt
 ext/standard/tests/streams/bug72534.phpt
+ext/standard/tests/streams/bug72771.phpt
 ext/standard/tests/streams/bug72853.phpt
 ext/standard/tests/streams/bug72857.phpt
+ext/standard/tests/streams/bug73457.phpt
 ext/standard/tests/streams/bug74556.phpt
 ext/standard/tests/streams/bug74951.phpt
 ext/standard/tests/streams/bug75031.phpt
@@ -10556,6 +10585,8 @@ ext/standard/tests/streams/bug76857.phpt
 ext/standard/tests/streams/bug76859.phpt
 ext/standard/tests/streams/bug76943.phpt
 ext/standard/tests/streams/bug77664.phpt
+ext/standard/tests/streams/bug77680.phpt
+ext/standard/tests/streams/bug77765.phpt
 ext/standard/tests/streams/bug78326.phpt
 ext/standard/tests/streams/bug78326_1.phpt
 ext/standard/tests/streams/bug78662.phpt
@@ -10564,6 +10595,9 @@ ext/standard/tests/streams/bug79000.phpt
 ext/standard/tests/streams/bug79467.phpt
 ext/standard/tests/streams/bug81659.phpt
 ext/standard/tests/streams/eagain_is_not_an_error.phpt
+ext/standard/tests/streams/ftp_dirstream_oob.phpt
+ext/standard/tests/streams/ftp_fopen_do_pasv_reply_bounds.phpt
+ext/standard/tests/streams/ftp_url_stat_mdtm_no_digits.phpt
 ext/standard/tests/streams/gh10406.phpt
 ext/standard/tests/streams/gh11418.phpt
 ext/standard/tests/streams/gh14506.phpt
@@ -10586,10 +10620,15 @@ ext/standard/tests/streams/gh24506.phpt
 ext/standard/tests/streams/gh8409.phpt
 ext/standard/tests/streams/gh8472.phpt
 ext/standard/tests/streams/ghsa-3cr5-j632-f35r.phpt
+ext/standard/tests/streams/ghsa-f6gg-rchx-xw8j.phpt
 ext/standard/tests/streams/non_finite_values.phpt
 ext/standard/tests/streams/nonblocking_stdin.phpt
 ext/standard/tests/streams/oom_stream_copy_to_stream_memory.phpt
 ext/standard/tests/streams/oom_stream_get_contents.phpt
+ext/standard/tests/streams/opendir-001.phpt
+ext/standard/tests/streams/opendir-002.phpt
+ext/standard/tests/streams/opendir-003.phpt
+ext/standard/tests/streams/opendir-004.phpt
 ext/standard/tests/streams/persistent_stream_context_shutdown.phpt
 ext/standard/tests/streams/proc_open_bug51800_right.phpt
 ext/standard/tests/streams/proc_open_bug51800_right2.phpt
