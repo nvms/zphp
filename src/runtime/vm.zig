@@ -487,6 +487,28 @@ pub const NativeContext = struct {
         return callables.invokeRef(self.vm, callee, args);
     }
 
+    // invokeCallableRefWarned where the by-reference parameters at the
+    // positions cells names are bound to those references themselves, so
+    // the callee writes the place directly (type checks included)
+    pub fn invokeCallableWithCells(self: *NativeContext, callable: Value, args: []Value, values_from: usize, cells: []const ?*Value) RuntimeError!Value {
+        var refs: [16]bool = @splat(false);
+        for (0..@min(values_from, refs.len)) |i| refs[i] = true;
+        const outer = self.vm.native_caller;
+        self.vm.native_caller = .{ .name = self.call_name, .frames = self.vm.frame_count };
+        defer self.vm.native_caller = outer;
+        const callee = try self.vm.callbackCallee(callable);
+        try self.warnValuesForReferencesMask(callee, args.len, refs[0..@min(args.len, refs.len)]);
+        // only the calls that bind by-reference parameters take them
+        const takes = switch (callee) {
+            .function, .invoke, .method, .static_method => true,
+            .closure => |obj| obj.closureName() != null,
+            else => false,
+        };
+        if (takes) self.vm.pending_arg_cells = cells;
+        defer self.vm.pending_arg_cells = &.{};
+        return callables.invokeRef(self.vm, callee, args);
+    }
+
     // whether the user function a callable names takes parameter i by reference
     pub fn callableParamIsRef(self: *NativeContext, callable: Value, i: usize) RuntimeError!bool {
         const callee = self.vm.callbackCallee(callable) catch {
@@ -1497,6 +1519,10 @@ pub const VM = struct {
     // last used this frame slot
     pending_invoke_args: ?[]const Value = null,
     pending_ref_args: ?[]Value = null,
+    // the references a native hands a user callback's by-reference
+    // parameters (php's ZVAL_MAKE_REF on the place itself), by position;
+    // the call taking them clears it before anything else can run
+    pending_arg_cells: []const ?*Value = &.{},
     // the arguments of the native call running from user code with
     // by-reference arguments (invokeNative)
     byref_call: ?*ByRefCall = null,
@@ -34526,6 +34552,8 @@ pub const VM = struct {
     }
 
     pub fn callMethodRefAs(self: *VM, obj: *PhpObject, method_name: []const u8, registered: ?[]const u8, args: []Value) RuntimeError!Value {
+        const given_cells = self.pending_arg_cells;
+        self.pending_arg_cells = &.{};
         const full_name = registered orelse self.resolveMethod(obj.class_name, method_name) catch return error.RuntimeError;
         if (self.functions.get(full_name)) |func| {
             if (func.ref_params.len == 0) {
@@ -34544,8 +34572,11 @@ pub const VM = struct {
             for (0..bind_count) |i| {
                 try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(args[i]));
                 if (i < func.ref_params.len and func.ref_params[i] and i < 16) {
-                    const cell = try self.newRefCell();
-                    self.setCell(cell, args[i]);
+                    const cell = if (i < given_cells.len and given_cells[i] != null) given_cells[i].? else blk: {
+                        const fresh = try self.newRefCell();
+                        self.setCell(fresh, args[i]);
+                        break :blk fresh;
+                    };
 
                     try self.bindRefSlot(&ref_slots, func.params[i], cell);
                     self.bindCell(cell);
@@ -34570,6 +34601,8 @@ pub const VM = struct {
 
     pub fn callByNameRefAs(self: *VM, raw_name: []const u8, args: []Value, called_class: ?[]const u8) RuntimeError!Value {
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
+        const given_cells = self.pending_arg_cells;
+        self.pending_arg_cells = &.{};
         if (self.functions.get(name)) |func| {
             if (func.ref_params.len == 0) {
                 return self.callByNameAs(name, args, called_class);
@@ -34594,8 +34627,11 @@ pub const VM = struct {
             for (0..bind_count) |i| {
                 try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(checked[i]));
                 if (i < func.ref_params.len and func.ref_params[i] and i < 16) {
-                    const cell = try self.newRefCell();
-                    self.setCell(cell, checked[i]);
+                    const cell = if (i < given_cells.len and given_cells[i] != null) given_cells[i].? else blk: {
+                        const fresh = try self.newRefCell();
+                        self.setCell(fresh, checked[i]);
+                        break :blk fresh;
+                    };
 
                     try self.bindRefSlot(&ref_slots, func.params[i], cell);
                     self.bindCell(cell);

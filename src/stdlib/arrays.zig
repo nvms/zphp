@@ -1053,17 +1053,30 @@ fn walk(ctx: *NativeContext, target: Value, callback: Value, userdata: ?Value, r
 }
 
 // an object's property table, its private and protected names mangled as
-// (array) shows them; a by-reference change is written to the property
-fn walkObject(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpObject, callback: Value, userdata: ?Value, recursive: bool) RuntimeError!void {
+// (array) shows them. php's HASH_OF reads it through get_properties, which
+// initializes a lazy object (a proxy's instance's table is walked), and each
+// property goes to the callback as a reference to the property itself,
+// typed by its declaration (ZEND_REF_ADD_TYPE_SOURCE)
+fn walkObject(ctx: *NativeContext, obj_in: *@import("../runtime/value.zig").PhpObject, callback: Value, userdata: ?Value, recursive: bool) RuntimeError!void {
+    var obj = obj_in;
+    while (true) {
+        try ctx.vm.triggerLazyInit(obj);
+        if (obj.storage() == obj) break;
+        obj = obj.storage();
+    }
     const table = try ctx.vm.castToArray(.{ .object = obj });
     defer ctx.vm.releaseValue(table);
     const by_ref = try ctx.callableParamIsRef(callback, 0);
     for (table.array.entries.items) |entry| {
         const value = if (entry.ref) |cell| cell.* else entry.value;
+        var scope: ?[]const u8 = null;
         const name: []const u8 = switch (entry.key) {
             .string => |s| blk: {
                 const b = s.bytes();
-                if (b.len > 0 and b[0] == 0) if (std.mem.indexOfScalarPos(u8, b, 1, 0)) |end| break :blk b[end + 1 ..];
+                if (b.len > 0 and b[0] == 0) if (std.mem.indexOfScalarPos(u8, b, 1, 0)) |end| {
+                    if (b[1] != '*') scope = b[1..end];
+                    break :blk b[end + 1 ..];
+                };
                 break :blk b;
             },
             .int => "",
@@ -1074,9 +1087,17 @@ fn walkObject(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpObje
         }
         var call_args = [3]Value{ value, keyValue(entry.key), userdata orelse .null };
         const slice: []Value = if (userdata != null) call_args[0..3] else call_args[0..2];
-        _ = try ctx.invokeCallableRefWarned(callback, slice, 1);
+        if (by_ref and entry.key == .string) {
+            // the binding outlives the table's key bytes
+            const prop = try ctx.vm.internName(name);
+            const declaring: ?[]const u8 = if (scope) |sc| try ctx.vm.internName(sc) else null;
+            const cell = try ctx.vm.propertyReferenceCell(obj, prop, declaring);
+            const cells = [1]?*Value{cell};
+            _ = try ctx.invokeCallableWithCells(callback, slice, 1, &cells);
+        } else {
+            _ = try ctx.invokeCallableRefWarned(callback, slice, 1);
+        }
         if (ctx.vm.pending_exception != null) return error.RuntimeError;
-        if (by_ref and entry.key == .string) try obj.set(ctx.allocator, name, call_args[0]);
     }
 }
 
