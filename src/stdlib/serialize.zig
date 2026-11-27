@@ -17,6 +17,7 @@ const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const VM = @import("../runtime/vm.zig").VM;
 const Allocator = std.mem.Allocator;
+const stack_grow = @import("../runtime/stack_grow.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const e_warning = 2;
@@ -915,6 +916,7 @@ fn readTop(ctx: *NativeContext, u: *UnserCtx, sc: *Scan, dest: Loc) RuntimeError
 // php_var_unserialize_internal: reads one value at sc.p into dest. false is
 // a failure (sc.p where php's scanner stopped; an exception may be pending)
 fn read(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc) RuntimeError!bool {
+    if (stack_grow.needed()) return stack_grow.callAlways(read, .{ ctx, u_opt, sc, dest }) orelse false;
     const start = sc.p;
     if (start >= sc.s.len) return false;
     const c0 = sc.s[start];

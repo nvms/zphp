@@ -1,6 +1,7 @@
 <?php
-// walkers php doesn't bound by the native stack (print_r, the merge of
-// array_merge_recursive) go as deep as the value, on a fiber's stack too
+// walkers php doesn't bound by the native stack (print_r, unserialize,
+// array_merge_recursive's merge) go as deep as the value, on a fiber's
+// stack too
 ini_set('fiber.stack_size', '16M');
 $fiber = new Fiber(function () {
     $a = [];
@@ -33,5 +34,15 @@ $fiber = new Fiber(function () {
         $depth++;
     }
     echo "array_merge_recursive: $depth deep, $sum\n";
+
+    // unserialize without a depth limit
+    $s = str_repeat('a:1:{i:0;', 20000) . 'a:0:{}' . str_repeat('}', 20000);
+    $v = unserialize($s, ['max_depth' => 0]);
+    $depth = 0;
+    while (is_array($v) && $v !== []) {
+        $v = $v[0];
+        $depth++;
+    }
+    echo "unserialize: $depth deep\n";
 });
 $fiber->start();
