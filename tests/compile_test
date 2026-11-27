@@ -178,6 +178,36 @@ echo implode("-", $parts) . "\n";
 EOF
 run_test "strings" "$TMPDIR/strings.php"
 
+# a script whose functions are bigger than 16-bit operands reach: literals
+# past constant index 65535 (constant_w) and distances past 64 KB (the
+# chunk's far table) go through the bytecode file and back
+cat > "$TMPDIR/gen_big.php" << 'EOF'
+<?php
+$pairs = [];
+for ($i = 0; $i < 40000; $i++) $pairs[] = "'k$i' => $i.5";
+$big = '[' . implode(', ', $pairs) . ']';
+$adds = str_repeat('$t += $w + 3; ', 8000);
+$branches = '';
+for ($i = 0; $i < 20000; $i++) $branches .= " elseif (\$x === $i) { return 'b$i'; }";
+echo "<?php\n";
+echo "class Box { public \$v = 2; function twice(\$x) { return \$x * \$this->v; } }\n";
+echo "function byref(&\$a, \$big, &\$b) { \$a = count(\$big); \$b = 'set'; }\n";
+echo "function pool() { \$a = $big; \$o = new Box(); \$f = fn(\$x) => \$x . '!'; return [count(\$a), \$a['k39999'], \$o->twice(21), \$f('far')]; }\n";
+echo "function classify(\$x) { if (\$x === -1) { return 'neg'; } $branches else { return 'none'; } }\n";
+echo "function body(\$throw) { \$t = 0; \$w = 1; \$log = [];\n";
+echo "  for (\$i = 0; \$i < 2; \$i++) { $adds }\n";
+echo "  foreach ([1, 2] as \$v) { $adds if (\$v == 2) break; }\n";
+echo "  try { $adds if (\$throw) throw new Exception('far'); } catch (Exception \$e) { \$log[] = \$e->getMessage(); } finally { $adds \$log[] = 'finally'; }\n";
+echo "  \$p = 0; \$q = 0; byref(\$p, $big, \$q); \$log[] = \"\$p \$q\";\n";
+echo "  \$g = (function () { yield 1; yield 2; })(); \$log[] = iterator_to_array(\$g);\n";
+echo "  \$log[] = \$t; return \$log; }\n";
+echo "\$top = $big;\n";
+echo "echo count(\$top), ' ', \$top['k0'], \"\\n\";\n";
+echo "var_dump(pool(), classify(0), classify(19999), classify('x'), body(true), body(false));\n";
+EOF
+"$ZPHP" run "$TMPDIR/gen_big.php" > "$TMPDIR/big_functions.php"
+run_test "big functions" "$TMPDIR/big_functions.php"
+
 # a project of several files: every require, autoloaded class, template and
 # data file has to come from the executable, which runs away from the tree
 APP="$TMPDIR/project"
