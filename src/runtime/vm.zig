@@ -716,6 +716,10 @@ pub const ClassDef = struct {
     // the part of php's free_obj that runs before the property table goes
     // (zend_object_std_dtor): SplFixedArray's elements
     native_free: ?*const fn (*VM, *PhpObject) void = null,
+    // the rest of php's dtor_obj after __destruct, which the shutdown sweep
+    // runs for every object in handle order: the SPL file objects close
+    // their streams there, before a later object's destructor uses them
+    native_dtor: ?*const fn (*VM, *PhpObject) void = null,
     // completes `clone` after the properties are copied: a native handle, or
     // state a built-in class keeps in its properties. a class with a handle
     // and no hook is uncloneable, like php's handle classes
@@ -2792,6 +2796,7 @@ pub const VM = struct {
     const NativeHooks = struct {
         cleanup: ?*const fn (*PhpObject) bool = null,
         free: ?*const fn (*VM, *PhpObject) void = null,
+        dtor: ?*const fn (*VM, *PhpObject) void = null,
     };
 
     fn nativeHooks(self: *VM, class_name: []const u8) NativeHooks {
@@ -2801,6 +2806,7 @@ pub const VM = struct {
             const class = self.classes.get(name) orelse break;
             if (hooks.cleanup == null) hooks.cleanup = class.native_cleanup;
             if (hooks.free == null) hooks.free = class.native_free;
+            if (hooks.dtor == null) hooks.dtor = class.native_dtor;
             current = class.parent;
         }
         return hooks;
@@ -5196,6 +5202,7 @@ pub const VM = struct {
                         if (self.pending_exception == null or !self.destructors_after_shutdown) self.discardPending();
                     };
                 }
+                if (self.nativeHooks(obj.class_name).dtor) |dtor| dtor(self, obj);
             }
             if (round == 0) while (next_waiting < waiting.items.len) : (next_waiting += 1) self.destroyAtShutdown(waiting.items[next_waiting]);
             if (self.pending_exception != null and self.destructors_after_shutdown) break;

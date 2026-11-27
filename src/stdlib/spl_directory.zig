@@ -117,7 +117,7 @@ fn registerClass(vm: *VM, a: Allocator, def: ClassDef, comptime name: []const u8
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    var fi = ClassDef{ .name = "SplFileInfo" };
+    var fi = ClassDef{ .name = "SplFileInfo", .native_dtor = destroyObject };
     try fi.interfaces.append(a, "Stringable");
     try registerClass(vm, a, fi, "SplFileInfo", &.{
         .{ "__construct", fiConstruct },     .{ "getPath", fiGetPath },
@@ -275,6 +275,15 @@ fn methodGate(vm: *VM, obj: *PhpObject) RuntimeError!?[]u8 {
 
 fn dirOpen(obj: *PhpObject) bool {
     return flag(obj, F.dirp);
+}
+
+// spl_filesystem_object_destroy_object: once the destructor ran, a file
+// object's stream is closed
+fn destroyObject(vm: *VM, obj: *PhpObject) void {
+    const res = streamOf(obj) orelse return;
+    var ctx = vm.makeContext(null);
+    _ = @import("filesystem.zig").closeStream(&ctx, res) catch {};
+    obj.set(vm.allocator, F.stream, .null) catch {};
 }
 
 fn streamOf(obj: *PhpObject) ?*PhpObject {
