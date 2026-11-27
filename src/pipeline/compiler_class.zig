@@ -832,8 +832,16 @@ fn freeAttrSlice(allocator: Allocator, attrs: []const ParsedAttr) void {
     freeParsedAttrs(allocator, attrs);
 }
 
+// a declaration pushes its defaults and placeholders before its opcode
+// takes them: past what a frame's operand headroom holds, room is made first
+fn reserveDeclarationStack(self: *Compiler, values: usize) Error!void {
+    if (values < 1024) return;
+    try self.emitOp(.reserve_stack);
+    try self.emitU32(@intCast(values));
+}
+
 fn emitAttributeData(self: *Compiler, attrs: []const ParsedAttr) Error!void {
-    try self.emitByte(@intCast(attrs.len));
+    try self.emitCount(attrs.len);
     for (attrs) |attr| {
         const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(attr.name) });
         try self.emitU16(name_idx);
@@ -1587,6 +1595,13 @@ fn asLong(v: LiteralOperand) i64 {
     };
 }
 
+// a function's parameter count is a u8 (ObjFunction.arity): past it the
+// declaration fails to compile rather than wrap
+fn paramCount(self: *Compiler, param_nodes: []const u32) Error!u8 {
+    if (param_nodes.len > std.math.maxInt(u8)) return self.fail(self.ast.nodes[param_nodes[std.math.maxInt(u8)]].main_token, "Cannot declare a function with more than 255 parameters");
+    return @intCast(param_nodes.len);
+}
+
 // php counts every parameter up to the last one without a default as
 // required: an optional parameter before a required one becomes required
 fn requiredParamCount(ast: *const Ast, param_nodes: []const u32) u8 {
@@ -2149,7 +2164,7 @@ fn emitTraitRules(self: *Compiler, members: []const u32) Error!void {
             for (self.ast.extraSlice(member.data.rhs)) |cn| try rules.append(self.allocator, self.ast.nodes[cn]);
         }
     }
-    try self.emitByte(@intCast(rules.items.len));
+    try self.emitCount(rules.items.len);
     for (rules.items) |rule| {
         const method_name = self.ast.tokenSlice(rule.main_token);
         if (rule.tag == .trait_as) {
@@ -2171,7 +2186,7 @@ fn emitTraitRules(self: *Compiler, members: []const u32) Error!void {
         if (rule.tag == .trait_insteadof) {
             try self.emitByte(1);
             const excluded = self.ast.extraSlice(rule.data.rhs);
-            try self.emitByte(@intCast(excluded.len));
+            try self.emitCount(excluded.len);
             for (excluded) |en| {
                 const ename = try resolveNodeClassName(self, self.ast.nodes[en]);
                 try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(ename) }));
@@ -2410,6 +2425,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const raw_name = self.ast.tokenSlice(name_tok);
     const name = if (std.mem.startsWith(u8, raw_name, "__closure_")) raw_name else self.declaredName(raw_name);
     const param_nodes = self.ast.extraSlice(node.data.lhs);
+    _ = try paramCount(self, param_nodes);
     const outer_named_signature = self.named_signature;
     self.named_signature = !std.mem.startsWith(u8, raw_name, "__closure_");
     defer self.named_signature = outer_named_signature;
@@ -2589,6 +2605,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     try self.string_allocs.append(self.allocator, owned_name);
 
     const param_nodes = self.ast.extraSlice(node.data.lhs);
+    _ = try paramCount(self, param_nodes);
     var handed_over = false;
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
     errdefer if (!handed_over) self.allocator.free(param_names);
@@ -3559,7 +3576,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         return self.failFmt(member.main_token, "Class {s} declares abstract method {s}() and must therefore be declared abstract", .{ class_name, method });
     };
 
-    var method_count: u16 = 0;
+    var method_count: usize = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
@@ -3589,7 +3606,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     }
 
     // count promoted constructor params
-    var promoted_count: u16 = 0;
+    var promoted_count: usize = 0;
     var constructor_params: []const u32 = &.{};
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -3651,13 +3668,14 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         }
     }
 
+    try reserveDeclarationStack(self, members.len + trait_prop_members.items.len + constructor_params.len);
     // compile instance property defaults (push onto stack)
-    var prop_count: u16 = 0;
+    var prop_count: usize = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property or member.tag == .class_property_hooks) prop_count += 1;
     }
-    prop_count += @intCast(trait_prop_members.items.len);
+    prop_count += trait_prop_members.items.len;
     prop_count += promoted_count;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -3699,7 +3717,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
 
     // compile static property defaults (push onto stack after instance props)
     // class constants (const_decl) are treated as static props
-    var static_prop_count: u16 = 0;
+    var static_prop_count: usize = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .static_class_property or member.tag == .const_decl) static_prop_count += 1;
@@ -3732,7 +3750,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     try self.emitU32(lineForToken(self, shape.at));
     try self.emitU32(endLineForBlockStartingAt(self, shape.at));
     try self.emitU16(try docCommentConst(self, shape.at));
-    try self.emitU16(method_count);
+    try self.emitCount(method_count);
 
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -3741,7 +3759,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name_str) });
             try self.emitU16(mname_idx);
             const param_nodes = self.ast.extraSlice(member.data.lhs);
-            try self.emitByte(@intCast(param_nodes.len));
+            try self.emitByte(try paramCount(self, param_nodes));
             try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
             const vis: u8 = @intCast(member.data.rhs >> 30);
             try self.emitByte(vis);
@@ -3779,7 +3797,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name_str) });
             try self.emitU16(mname_idx);
             const param_nodes = self.ast.extraSlice(member.data.lhs);
-            try self.emitByte(@intCast(param_nodes.len));
+            try self.emitByte(try paramCount(self, param_nodes));
             try self.emitByte(@intCast((member.data.rhs >> 30) & 1));
             const i_vis: u8 = @intCast((member.data.rhs >> 28) & 0x3);
             try self.emitByte(i_vis);
@@ -3804,7 +3822,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         try self.emitByte(@intCast((self.ast.extra_data[tmember.data.lhs + @as(u32, if (is_set) 5 else 4)] >> 3) & 3));
     }
 
-    try self.emitU16(prop_count);
+    try self.emitCount(prop_count);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
@@ -3885,7 +3903,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         }
     }
 
-    try self.emitU16(static_prop_count);
+    try self.emitCount(static_prop_count);
     // how many instance properties the class declares before each static
     // one: php lists them all in declaration order
     var instance_before: u8 = 0;
@@ -3925,7 +3943,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     }
 
     // emit implements count and names (already resolved in impl_names)
-    try self.emitByte(@intCast(impl_count));
+    try self.emitCount(impl_count);
     for (0..impl_count) |i| {
         const iname_idx = try self.addConstant(.{ .string = Value.String.borrowed(impl_names[i]) });
         try self.emitU16(iname_idx);
@@ -3944,7 +3962,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(all_traits.items.len));
+    try self.emitCount(all_traits.items.len);
     for (all_traits.items) |tname| {
         const tname_idx = try self.addConstant(.{ .string = Value.String.borrowed(tname) });
         try self.emitU16(tname_idx);
@@ -3982,7 +4000,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(methods_with_attrs.items.len));
+    try self.emitCount(methods_with_attrs.items.len);
     for (methods_with_attrs.items) |ma| {
         const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(ma.name) });
         try self.emitU16(mname_idx);
@@ -4040,7 +4058,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         if (tattrs.len == 0) continue;
         try props_with_attrs.append(self.allocator, .{ .name = tname, .attrs = tattrs });
     }
-    try self.emitByte(@intCast(props_with_attrs.items.len));
+    try self.emitCount(props_with_attrs.items.len);
     for (props_with_attrs.items) |pa| {
         const ppname_idx = try self.addConstant(.{ .string = Value.String.borrowed(pa.name) });
         try self.emitU16(ppname_idx);
@@ -4063,7 +4081,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(consts_with_attrs.items.len));
+    try self.emitCount(consts_with_attrs.items.len);
     for (consts_with_attrs.items) |ca| {
         const caname_idx = try self.addConstant(.{ .string = Value.String.borrowed(ca.name) });
         try self.emitU16(caname_idx);
@@ -4119,11 +4137,11 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(methods_with_param_attrs.items.len));
+    try self.emitCount(methods_with_param_attrs.items.len);
     for (methods_with_param_attrs.items) |mpa| {
         const mpa_name_idx = try self.addConstant(.{ .string = Value.String.borrowed(mpa.method_name) });
         try self.emitU16(mpa_name_idx);
-        try self.emitByte(@intCast(mpa.params.len));
+        try self.emitCount(mpa.params.len);
         for (mpa.params) |pa| {
             const pa_name_idx = try self.addConstant(.{ .string = Value.String.borrowed(pa.name) });
             try self.emitU16(pa_name_idx);
@@ -4303,13 +4321,14 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     self.class_body_function = self.current_function;
     defer self.class_body_function = prev_body;
 
-    var method_count: u16 = 0;
-    var const_count: u8 = 0;
+    var method_count: usize = 0;
+    var const_count: usize = 0;
     for (members) |m| {
         if (self.ast.nodes[m].tag == .interface_method) method_count += 1;
         if (self.ast.nodes[m].tag == .const_decl) const_count += 1;
     }
 
+    try reserveDeclarationStack(self, const_count);
     // push null placeholders - real values set after interface_decl so self:: resolves
     for (members) |m| {
         const member = self.ast.nodes[m];
@@ -4325,7 +4344,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU32(lineForToken(self, node.main_token));
     try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
     try self.emitU16(try docCommentConst(self, node.main_token));
-    try self.emitU16(method_count);
+    try self.emitCount(method_count);
 
     for (members) |m| {
         const member = self.ast.nodes[m];
@@ -4338,7 +4357,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     if (node.data.rhs != 0) {
         const parent_count = self.ast.extra_data[node.data.rhs];
-        try self.emitByte(@intCast(parent_count));
+        try self.emitCount(parent_count);
         for (0..parent_count) |i| {
             const pnode = self.ast.nodes[self.ast.extra_data[node.data.rhs + 1 + i]];
             try rejectReservedParent(self, pnode, "interface");
@@ -4347,10 +4366,10 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(pidx);
         }
     } else {
-        try self.emitByte(0);
+        try self.emitCount(0);
     }
 
-    try self.emitByte(const_count);
+    try self.emitCount(const_count);
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag == .const_decl) {
@@ -4384,7 +4403,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(methods_with_attrs.items.len));
+    try self.emitCount(methods_with_attrs.items.len);
     for (methods_with_attrs.items) |ma| {
         const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(ma.name) });
         try self.emitU16(mname_idx);
@@ -4393,11 +4412,11 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
 
     // Property contracts carry their own metadata, not callable dummy methods.
-    var property_count: u16 = 0;
+    var property_count: usize = 0;
     for (members) |m| {
         if (self.ast.nodes[m].tag == .class_property_hooks) property_count += 1;
     }
-    try self.emitU16(property_count);
+    try self.emitCount(property_count);
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag != .class_property_hooks) continue;
@@ -4429,7 +4448,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         const cattrs = try extractAttributes(self, member.main_token, AttrTarget.class_constant);
         if (cattrs.len > 0) try consts_with_attrs.append(self.allocator, .{ .name = self.ast.tokenSlice(member.main_token), .attrs = cattrs });
     }
-    try self.emitByte(@intCast(consts_with_attrs.items.len));
+    try self.emitCount(consts_with_attrs.items.len);
     for (consts_with_attrs.items) |ca| {
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(ca.name) }));
         try emitAttributeData(self, ca.attrs);
@@ -4639,6 +4658,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         if (member.tag == .const_decl) try const_decls.append(self.allocator, member_idx);
     }
 
+    try reserveDeclarationStack(self, const_decls.items.len + static_props.items.len + own_props.items.len);
     // compile defaults for trait constants first (popped third by VM)
     const outer_trait_consts = self.trait_const_values;
     self.trait_const_values = true;
@@ -4672,7 +4692,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU32(lineForToken(self, node.main_token));
     try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
     try self.emitU16(try docCommentConst(self, node.main_token));
-    try self.emitByte(@intCast(sub_traits.items.len));
+    try self.emitCount(sub_traits.items.len);
     for (sub_traits.items) |st| {
         const st_idx = try self.addConstant(.{ .string = Value.String.borrowed(st) });
         try self.emitU16(st_idx);
@@ -4691,7 +4711,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
         break;
     }
-    try self.emitByte(@intCast(own_props.items.len + promoted.items.len));
+    try self.emitCount(own_props.items.len + promoted.items.len);
     for (own_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         var pname = self.ast.tokenSlice(pmember.main_token);
@@ -4727,7 +4747,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
         try self.emitByte(0);
     }
-    try self.emitByte(@intCast(static_props.items.len));
+    try self.emitCount(static_props.items.len);
     for (static_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         var pname = self.ast.tokenSlice(pmember.main_token);
@@ -4740,7 +4760,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // trait constants (PHP 8.2+)
-    try self.emitByte(@intCast(const_decls.items.len));
+    try self.emitCount(const_decls.items.len);
     for (const_decls.items) |pi| {
         const pmember = self.ast.nodes[pi];
         const pname = self.ast.tokenSlice(pmember.main_token);
@@ -4777,7 +4797,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(methods_with_attrs.items.len));
+    try self.emitCount(methods_with_attrs.items.len);
     for (methods_with_attrs.items) |ma| {
         const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(ma.name) });
         try self.emitU16(mname_idx);
@@ -4802,7 +4822,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(props_with_attrs.items.len));
+    try self.emitCount(props_with_attrs.items.len);
     for (props_with_attrs.items) |pa| {
         const ppname_idx = try self.addConstant(.{ .string = Value.String.borrowed(pa.name) });
         try self.emitU16(ppname_idx);
@@ -4818,7 +4838,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const cattrs = try extractAttributes(self, member.main_token, AttrTarget.class_constant);
         if (cattrs.len > 0) try consts_with_attrs.append(self.allocator, .{ .name = self.ast.tokenSlice(member.main_token), .attrs = cattrs });
     }
-    try self.emitByte(@intCast(consts_with_attrs.items.len));
+    try self.emitCount(consts_with_attrs.items.len);
     for (consts_with_attrs.items) |ca| {
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(ca.name) }));
         try emitAttributeData(self, ca.attrs);
@@ -4894,7 +4914,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     try checkDuplicateMembers(self, enum_name, members);
     try checkConstDecls(self, enum_name, members);
 
-    var method_count: u16 = 0;
+    var method_count: usize = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
@@ -4903,7 +4923,8 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    var case_count: u8 = 0;
+    try reserveDeclarationStack(self, members.len);
+    var case_count: usize = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .enum_case) {
@@ -4933,7 +4954,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
     try self.emitU16(try docCommentConst(self, node.main_token));
     try self.emitByte(backed_type);
-    try self.emitByte(case_count);
+    try self.emitCount(case_count);
 
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -4946,7 +4967,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    try self.emitU16(method_count);
+    try self.emitCount(method_count);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
@@ -4954,7 +4975,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name_str) });
             try self.emitU16(mname_idx);
             const param_nodes = self.ast.extraSlice(member.data.lhs);
-            try self.emitByte(@intCast(param_nodes.len));
+            try self.emitByte(try paramCount(self, param_nodes));
             try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
             const vis: u8 = @intCast(member.data.rhs >> 30);
             try self.emitByte(vis);
@@ -4963,7 +4984,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    try self.emitByte(@intCast(impl_count));
+    try self.emitCount(impl_count);
     for (0..impl_count) |i| {
         const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 2 + i]];
         const iname_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(impl_node.main_token)) });
@@ -4983,7 +5004,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(enum_traits.items.len));
+    try self.emitCount(enum_traits.items.len);
     for (enum_traits.items) |tname| {
         const tname_idx = try self.addConstant(.{ .string = Value.String.borrowed(tname) });
         try self.emitU16(tname_idx);
@@ -5019,7 +5040,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(methods_with_attrs.items.len));
+    try self.emitCount(methods_with_attrs.items.len);
     for (methods_with_attrs.items) |ma| {
         const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(ma.name) });
         try self.emitU16(mname_idx);
@@ -5045,7 +5066,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             }
         }
     }
-    try self.emitByte(@intCast(cases_with_attrs.items.len));
+    try self.emitCount(cases_with_attrs.items.len);
     for (cases_with_attrs.items) |ca| {
         const cname_idx2 = try self.addConstant(.{ .string = Value.String.borrowed(ca.name) });
         try self.emitU16(cname_idx2);
@@ -5054,11 +5075,11 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (cases_with_attrs.items) |ca| freeAttrSlice(self.allocator, ca.attrs);
 
     // enum constant names (not cases - actual const decls)
-    var enum_const_count: u8 = 0;
+    var enum_const_count: usize = 0;
     for (members) |member_idx| {
         if (self.ast.nodes[member_idx].tag == .const_decl) enum_const_count += 1;
     }
-    try self.emitByte(enum_const_count);
+    try self.emitCount(enum_const_count);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .const_decl) {
@@ -5094,6 +5115,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     try self.string_allocs.append(self.allocator, full_name);
 
     const param_nodes = self.ast.extraSlice(member.data.lhs);
+    _ = try paramCount(self, param_nodes);
     // zend_begin_method_decl
     if ((member.data.rhs >> 30) & 3 == 2 and (member.data.rhs & (1 << 28)) != 0 and !std.ascii.eqlIgnoreCase(method_name, "__construct")) {
         try self.warn(member.main_token, 128, "Private methods cannot be final as they are never overridden by other classes", .{});
@@ -5837,6 +5859,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
     try self.string_allocs.append(self.allocator, full_name);
 
     const param_nodes = self.ast.extraSlice(member.data.lhs);
+    _ = try paramCount(self, param_nodes);
     try checkParams(self, full_name, member.main_token, param_nodes, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), (member.data.rhs >> 31) & 1 != 0, promotionSite(method_name, true));
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
     const ref_flags = try self.allocator.alloc(bool, param_nodes.len);

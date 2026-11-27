@@ -104,7 +104,9 @@ pub const OpCode = enum(u16) {
     instance_check, // pop class name string, pop object, push bool
 
     // classes
-    class_decl, // u16: class name, u8: method count, then method_count * (u16 name, u8 arity)
+    // declarations: every count of members, parents, traits, rules and
+    // attributes is a u16 (Compiler.emitCount); a method's arity is a u8
+    class_decl, // u8 modifiers, u16: class name, u32 lines, u16 doc, u16: method count, then method_count * (u16 name, u8 arity, flags)
     new_obj, // u16: class name constant, u8: arg count
     new_obj_dynamic, // class name on stack, u8: arg count
     get_prop, // u16: property name constant
@@ -119,9 +121,9 @@ pub const OpCode = enum(u16) {
     static_call_spread, // u16: class name, u16: method name (args array on stack)
     static_call_dynamic, // u16: method name, u8: arg count (class name string on stack before args)
     static_call_dyn_method, // u16: class name, u8: arg count (method name string on stack below args)
-    interface_decl, // u16: name, u32 start line, u32 end line, u16 doc comment, u16: method count, then method_count * u16 method name, u8: parent_count, then parent_count * u16 parent name, u8: const_count, then const_count * u16 const name
-    trait_decl, // u16: name, u32 start line, u32 end line, u16 doc comment, u8: sub_trait_count, then sub_trait_count * u16 sub_trait_name
-    enum_decl, // u16: enum name, u32 start line, u32 end line, u16 doc comment, u8: backed_type (0=none, 1=int, 2=string), u8: case_count, then case_count * (u16 name, u8 has_value), then method/implements like class_decl
+    interface_decl, // u16: name, u32 start line, u32 end line, u16 doc comment, u16: method count, then method_count * u16 method name, u16: parent_count, then parent_count * u16 parent name, u16: const_count, then const_count * u16 const name
+    trait_decl, // u16: name, u32 start line, u32 end line, u16 doc comment, u16: sub_trait_count, then sub_trait_count * u16 sub_trait_name
+    enum_decl, // u16: enum name, u32 start line, u32 end line, u16 doc comment, u8: backed_type (0=none, 1=int, 2=string), u16: case_count, then case_count * (u16 name, u8 has_value), then method/implements like class_decl
     get_static_prop, // u16: class name, u16: property name
     set_static_prop, // u16: class name, u16: property name
     get_static_prop_dynamic, // u16: property name (class name on stack)
@@ -720,6 +722,9 @@ pub const OpCode = enum(u16) {
     // u32: constant pool index. `constant` for a literal past the part of
     // the pool u16 operands reach (Chunk.addLiteral)
     constant_w,
+    // u32 n: the declaration that follows pushes up to n values, more than
+    // the headroom a frame keeps: make room for them
+    reserve_stack,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -733,7 +738,7 @@ pub const OpCode = enum(u16) {
             .jump_if_class_declared, .bind_const_attributes => 6,
             .early_bind_end => 3,
             .make_var_var_ref => 4,
-            .constant_w => 6,
+            .constant_w, .reserve_stack => 6,
             .late_bind => 7,
             // the class names follow
             .early_bind => 8,

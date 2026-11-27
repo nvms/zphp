@@ -3169,6 +3169,13 @@ pub const Compiler = struct {
         try self.emitByte(@intCast(val & 0xff));
     }
 
+    // a declaration's count operand: u16, and a compile error past it
+    // rather than a count that wraps
+    pub fn emitCount(self: *Compiler, n: usize) Error!void {
+        if (n > std.math.maxInt(u16)) return self.fail(self.tokenAtOffset(self.current_source_offset), "Declaration too large to compile; split it into smaller declarations");
+        try self.emitU16(@intCast(n));
+    }
+
     pub fn emitU32(self: *Compiler, val: u32) Error!void {
         try self.emitByte(@intCast((val >> 24) & 0xff));
         try self.emitByte(@intCast((val >> 16) & 0xff));

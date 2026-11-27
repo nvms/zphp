@@ -6160,6 +6160,7 @@ pub const VM = struct {
                     const idx = self.readU32();
                     self.push(self.currentChunk().constants.items[idx]);
                 },
+                .reserve_stack => try self.ensureStackSlots(self.readU32()),
                 .op_null => self.push(.null),
                 .op_true => self.push(.{ .bool = true }),
                 .op_false => self.push(.{ .bool = false }),
@@ -13076,8 +13077,9 @@ pub const VM = struct {
                         try idef.methods.append(self.allocator, method_name);
                     }
 
-                    const parent_count = self.readByte();
-                    var parent_names: [16][]const u8 = undefined;
+                    const parent_count = self.readU16();
+                    const parent_names = try self.allocator.alloc([]const u8, parent_count);
+                    defer self.allocator.free(parent_names);
                     for (0..parent_count) |pi| {
                         const pidx = self.readU16();
                         parent_names[pi] = self.declaredClassName(self.currentChunk().constants.items[pidx].string.bytes());
@@ -13093,7 +13095,7 @@ pub const VM = struct {
                         if (idef.parent == null) idef.parent = "Stringable";
                     }
 
-                    const const_count = self.readByte();
+                    const const_count = self.readU16();
                     var def = ClassDef{ .name = iface_name, .is_internal = false, .file_path = iface_site.file, .start_line = iface_site.start_line, .end_line = iface_site.end_line, .doc_comment = iface_site.doc_comment };
                     if (const_count > 0) {
                         var ci: usize = const_count;
@@ -13126,7 +13128,7 @@ pub const VM = struct {
                     for (iface_attrs) |a| try def.attributes.append(self.allocator, a);
                     if (iface_attrs.len > 0) self.allocator.free(iface_attrs);
 
-                    const iface_method_attr_count = self.readByte();
+                    const iface_method_attr_count = self.readU16();
                     for (0..iface_method_attr_count) |_| {
                         const ma_name_idx = self.readU16();
                         const ma_name = self.currentChunk().constants.items[ma_name_idx].string.bytes();
@@ -13156,7 +13158,7 @@ pub const VM = struct {
                         const attrs = try self.readAttributeDefs();
                         if (attrs.len > 0) try def.property_attributes.put(self.allocator, prop_name, attrs);
                     }
-                    const iface_const_attr_count = self.readByte();
+                    const iface_const_attr_count = self.readU16();
                     for (0..iface_const_attr_count) |_| {
                         const ca_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
                         const ca_attrs = try self.readAttributeDefs();
@@ -13303,7 +13305,7 @@ pub const VM = struct {
                     // it, so it is freed with the others later
                     if (self.trait_tables.fetchRemove(trait_name)) |stale| try self.trait_tables_retired.append(self.allocator, stale.value);
                     try self.ic.?.trait_sites.put(self.allocator, trait_name, self.readDeclSite());
-                    const sub_count = self.readByte();
+                    const sub_count = self.readU16();
                     if (sub_count > 0) {
                         const subs = try self.allocator.alloc([]const u8, sub_count);
                         for (0..sub_count) |i| {
@@ -13314,14 +13316,20 @@ pub const VM = struct {
                     }
                     const rules = try self.readTraitRules();
                     if (try self.trait_rules.fetchPut(self.allocator, trait_name, rules)) |old_rules| old_rules.value.deinit(self.allocator);
-                    const tp_count = self.readByte();
+                    const tp_count = self.readU16();
                     if (tp_count > 0) {
-                        var tp_names: [32][]const u8 = undefined;
-                        var tp_has_default: [32]u8 = undefined;
-                        var tp_vis: [32]ClassDef.Visibility = undefined;
-                        var tp_flags: [32]u8 = undefined;
-                        var tp_types: [32][]const u8 = undefined;
-                        var tp_hooked: [32]bool = undefined;
+                        const tp_names = try self.allocator.alloc([]const u8, tp_count);
+                        defer self.allocator.free(tp_names);
+                        const tp_has_default = try self.allocator.alloc(u8, tp_count);
+                        defer self.allocator.free(tp_has_default);
+                        const tp_vis = try self.allocator.alloc(ClassDef.Visibility, tp_count);
+                        defer self.allocator.free(tp_vis);
+                        const tp_flags = try self.allocator.alloc(u8, tp_count);
+                        defer self.allocator.free(tp_flags);
+                        const tp_types = try self.allocator.alloc([]const u8, tp_count);
+                        defer self.allocator.free(tp_types);
+                        const tp_hooked = try self.allocator.alloc(bool, tp_count);
+                        defer self.allocator.free(tp_hooked);
                         for (0..tp_count) |pi| {
                             tp_names[pi] = self.currentChunk().constants.items[self.readU16()].string.bytes();
                             tp_has_default[pi] = self.readByte();
@@ -13332,7 +13340,8 @@ pub const VM = struct {
                             tp_types[pi] = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string.bytes();
                             tp_hooked[pi] = self.readByte() == 1;
                         }
-                        const tp_defaults = self.popDefaults(32, tp_has_default[0..tp_count]);
+                        const tp_defaults = try self.popDefaultsAlloc(tp_has_default);
+                        defer self.allocator.free(tp_defaults);
                         const props = try self.allocator.alloc(ClassDef.PropertyDef, tp_count);
                         var dj: usize = 0;
                         for (0..tp_count) |pi| {
@@ -13371,12 +13380,16 @@ pub const VM = struct {
                         }
                         try self.trait_props.put(self.allocator, trait_name, props);
                     }
-                    const sp_count = self.readByte();
+                    const sp_count = self.readU16();
                     if (sp_count > 0) {
-                        var sp_names: [32][]const u8 = undefined;
-                        var sp_has_default: [32]u8 = undefined;
-                        var sp_flags: [32]u8 = undefined;
-                        var sp_types: [32][]const u8 = undefined;
+                        const sp_names = try self.allocator.alloc([]const u8, sp_count);
+                        defer self.allocator.free(sp_names);
+                        const sp_has_default = try self.allocator.alloc(u8, sp_count);
+                        defer self.allocator.free(sp_has_default);
+                        const sp_flags = try self.allocator.alloc(u8, sp_count);
+                        defer self.allocator.free(sp_flags);
+                        const sp_types = try self.allocator.alloc([]const u8, sp_count);
+                        defer self.allocator.free(sp_types);
                         for (0..sp_count) |pi| {
                             sp_names[pi] = self.currentChunk().constants.items[self.readU16()].string.bytes();
                             sp_has_default[pi] = self.readByte();
@@ -13384,7 +13397,8 @@ pub const VM = struct {
                             const type_idx = self.readU16();
                             sp_types[pi] = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string.bytes();
                         }
-                        const sp_defaults = self.popDefaults(32, sp_has_default[0..sp_count]);
+                        const sp_defaults = try self.popDefaultsAlloc(sp_has_default);
+                        defer self.allocator.free(sp_defaults);
                         const sprops = try self.allocator.alloc(TraitStaticProp, sp_count);
                         var sj: usize = 0;
                         for (0..sp_count) |pi| {
@@ -13400,13 +13414,18 @@ pub const VM = struct {
                     }
 
                     // trait constants (PHP 8.2+)
-                    const tc_count = self.readByte();
+                    const tc_count = self.readU16();
                     if (tc_count > 0) {
-                        var tc_names: [32][]const u8 = undefined;
-                        var tc_has_default: [32]u8 = undefined;
-                        var tc_docs: [32][]const u8 = undefined;
-                        var tc_flags: [32]u8 = undefined;
-                        var tc_types: [32][]const u8 = undefined;
+                        const tc_names = try self.allocator.alloc([]const u8, tc_count);
+                        defer self.allocator.free(tc_names);
+                        const tc_has_default = try self.allocator.alloc(u8, tc_count);
+                        defer self.allocator.free(tc_has_default);
+                        const tc_docs = try self.allocator.alloc([]const u8, tc_count);
+                        defer self.allocator.free(tc_docs);
+                        const tc_flags = try self.allocator.alloc(u8, tc_count);
+                        defer self.allocator.free(tc_flags);
+                        const tc_types = try self.allocator.alloc([]const u8, tc_count);
+                        defer self.allocator.free(tc_types);
                         for (0..tc_count) |ci| {
                             tc_names[ci] = self.currentChunk().constants.items[self.readU16()].string.bytes();
                             tc_has_default[ci] = self.readByte();
@@ -13416,7 +13435,8 @@ pub const VM = struct {
                             const type_idx = self.readU16();
                             tc_types[ci] = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string.bytes();
                         }
-                        const tc_defaults = self.popDefaults(32, tc_has_default[0..tc_count]);
+                        const tc_defaults = try self.popDefaultsAlloc(tc_has_default);
+                        defer self.allocator.free(tc_defaults);
                         const tcs = try self.allocator.alloc(TraitStaticProp, tc_count);
                         var tcj: usize = 0;
                         for (0..tc_count) |ci| {
@@ -13431,24 +13451,28 @@ pub const VM = struct {
                     }
 
                     const trait_attrs = try self.readAttributeDefs();
-                    const trait_method_attr_count = self.readByte();
-                    var trait_method_attrs: [32]struct { name: []const u8, attrs: []const AttributeDef } = undefined;
+                    const NamedAttrs = struct { name: []const u8, attrs: []const AttributeDef };
+                    const trait_method_attr_count = self.readU16();
+                    const trait_method_attrs = try self.allocator.alloc(NamedAttrs, trait_method_attr_count);
+                    defer self.allocator.free(trait_method_attrs);
                     for (0..trait_method_attr_count) |tmi| {
                         const tma_name_idx = self.readU16();
                         const tma_name = self.currentChunk().constants.items[tma_name_idx].string.bytes();
                         const tma_attrs = try self.readAttributeDefs();
                         trait_method_attrs[tmi] = .{ .name = tma_name, .attrs = tma_attrs };
                     }
-                    const trait_prop_attr_count = self.readByte();
-                    var trait_prop_attrs: [32]struct { name: []const u8, attrs: []const AttributeDef } = undefined;
+                    const trait_prop_attr_count = self.readU16();
+                    const trait_prop_attrs = try self.allocator.alloc(NamedAttrs, trait_prop_attr_count);
+                    defer self.allocator.free(trait_prop_attrs);
                     for (0..trait_prop_attr_count) |tpi| {
                         const tpa_name_idx = self.readU16();
                         const tpa_name = self.currentChunk().constants.items[tpa_name_idx].string.bytes();
                         const tpa_attrs = try self.readAttributeDefs();
                         trait_prop_attrs[tpi] = .{ .name = tpa_name, .attrs = tpa_attrs };
                     }
-                    const trait_const_attr_count = self.readByte();
-                    var trait_const_attrs: [32]struct { name: []const u8, attrs: []const AttributeDef } = undefined;
+                    const trait_const_attr_count = self.readU16();
+                    const trait_const_attrs = try self.allocator.alloc(NamedAttrs, trait_const_attr_count);
+                    defer self.allocator.free(trait_const_attrs);
                     for (0..trait_const_attr_count) |tci| {
                         const tca_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
                         trait_const_attrs[tci] = .{ .name = tca_name, .attrs = try self.readAttributeDefs() };
@@ -22895,7 +22919,7 @@ pub const VM = struct {
         defer self.linking.shrinkRetainingCapacity(linking_index);
         // the interfaces the class lists are its own before any loads
         // (ce->interface_names): a variance check the loading runs sees them
-        const iface_count = self.readByte();
+        const iface_count = self.readU16();
         for (0..iface_count) |_| {
             const iname_idx = self.readU16();
             try def.interfaces.append(self.allocator, self.declaredClassName(self.currentChunk().constants.items[iname_idx].string.bytes()));
@@ -22927,8 +22951,9 @@ pub const VM = struct {
         try self.checkDeclaredInterfaces(&def, class_name);
         try self.checkInterfacesImplemented(&def, class_name);
 
-        const trait_count = self.readByte();
-        var trait_names: [64][]const u8 = undefined;
+        const trait_count = self.readU16();
+        const trait_names = try self.allocator.alloc([]const u8, trait_count);
+        defer self.allocator.free(trait_names);
         for (0..trait_count) |ti| {
             trait_names[ti] = self.currentChunk().constants.items[self.readU16()].string.bytes();
         }
@@ -22962,7 +22987,7 @@ pub const VM = struct {
         for (class_attrs) |a| try def.attributes.append(self.allocator, a);
         if (class_attrs.len > 0) self.allocator.free(class_attrs);
 
-        const method_attr_count = self.readByte();
+        const method_attr_count = self.readU16();
         for (0..method_attr_count) |_| {
             const ma_name_idx = self.readU16();
             const ma_name = self.currentChunk().constants.items[ma_name_idx].string.bytes();
@@ -22970,7 +22995,7 @@ pub const VM = struct {
             try def.method_attributes.put(self.allocator, ma_name, ma_attrs);
         }
 
-        const prop_attr_count = self.readByte();
+        const prop_attr_count = self.readU16();
         for (0..prop_attr_count) |_| {
             const pa_name_idx = self.readU16();
             const pa_name = self.currentChunk().constants.items[pa_name_idx].string.bytes();
@@ -22978,7 +23003,7 @@ pub const VM = struct {
             try def.property_attributes.put(self.allocator, pa_name, pa_attrs);
         }
 
-        const const_attr_count = self.readByte();
+        const const_attr_count = self.readU16();
         for (0..const_attr_count) |_| {
             const ca_name_idx = self.readU16();
             const ca_name = self.currentChunk().constants.items[ca_name_idx].string.bytes();
@@ -22990,11 +23015,11 @@ pub const VM = struct {
             }
         }
 
-        const param_attr_method_count = self.readByte();
+        const param_attr_method_count = self.readU16();
         for (0..param_attr_method_count) |_| {
             const pam_name_idx = self.readU16();
             const pam_method = self.currentChunk().constants.items[pam_name_idx].string.bytes();
-            const pam_param_count = self.readByte();
+            const pam_param_count = self.readU16();
             for (0..pam_param_count) |_| {
                 const pap_name_idx = self.readU16();
                 const pap_name = self.currentChunk().constants.items[pap_name_idx].string.bytes();
@@ -23485,7 +23510,7 @@ pub const VM = struct {
         try self.refuseRedeclaration(enum_name);
         const site = self.readDeclSite();
         const backed_type_byte = self.readByte();
-        const case_count = self.readByte();
+        const case_count = self.readU16();
 
         var def = ClassDef{ .name = enum_name, .is_enum = true, .is_internal = false, .file_path = site.file, .start_line = site.start_line, .end_line = site.end_line, .doc_comment = site.doc_comment };
         def.backed_type = @enumFromInt(backed_type_byte);
@@ -23554,7 +23579,7 @@ pub const VM = struct {
             return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
         };
 
-        const iface_count = self.readByte();
+        const iface_count = self.readU16();
         for (0..iface_count) |_| {
             try def.interfaces.append(self.allocator, self.declaredClassName(self.currentChunk().constants.items[self.readU16()].string.bytes()));
         }
@@ -23563,8 +23588,9 @@ pub const VM = struct {
         try def.interfaces.append(self.allocator, "UnitEnum");
         if (backed_type_byte != 0) try def.interfaces.append(self.allocator, "BackedEnum");
 
-        const enum_trait_count = self.readByte();
-        var enum_trait_names: [16][]const u8 = undefined;
+        const enum_trait_count = self.readU16();
+        const enum_trait_names = try self.allocator.alloc([]const u8, enum_trait_count);
+        defer self.allocator.free(enum_trait_names);
         for (0..enum_trait_count) |ti| {
             enum_trait_names[ti] = self.currentChunk().constants.items[self.readU16()].string.bytes();
         }
@@ -23578,7 +23604,7 @@ pub const VM = struct {
         for (enum_attrs) |a| try def.attributes.append(self.allocator, a);
         if (enum_attrs.len > 0) self.allocator.free(enum_attrs);
 
-        const enum_method_attr_count = self.readByte();
+        const enum_method_attr_count = self.readU16();
         for (0..enum_method_attr_count) |_| {
             const ma_name_idx = self.readU16();
             const ma_name = self.currentChunk().constants.items[ma_name_idx].string.bytes();
@@ -23588,7 +23614,7 @@ pub const VM = struct {
 
         // case attributes - stored as constant_attributes so
         // ReflectionClassConstant::getAttributes finds them
-        const enum_case_attr_count = self.readByte();
+        const enum_case_attr_count = self.readU16();
         for (0..enum_case_attr_count) |_| {
             const ca_name_idx = self.readU16();
             const ca_name = self.currentChunk().constants.items[ca_name_idx].string.bytes();
@@ -23601,7 +23627,7 @@ pub const VM = struct {
         }
 
         // enum constant names (const decls, not cases)
-        const enum_const_count = self.readByte();
+        const enum_const_count = self.readU16();
         for (0..enum_const_count) |_| {
             const ec_name_idx = self.readU16();
             const ec_name = self.currentChunk().constants.items[ec_name_idx].string.bytes();
@@ -23708,7 +23734,7 @@ pub const VM = struct {
     }
 
     fn readAttributeDefs(self: *VM) RuntimeError![]const AttributeDef {
-        const count = self.readByte();
+        const count = self.readU16();
         if (count == 0) return &.{};
         const attrs = try self.allocator.alloc(AttributeDef, count);
         for (0..count) |i| {
@@ -23766,20 +23792,6 @@ pub const VM = struct {
         } };
     }
 
-    fn popDefaults(self: *VM, comptime max: usize, has_default: []const u8) [max]Value {
-        var values: [max]Value = undefined;
-        var count: usize = 0;
-        for (has_default) |hd| {
-            if (hd == 1) count += 1;
-        }
-        var i: usize = count;
-        while (i > 0) {
-            i -= 1;
-            values[i] = self.pop();
-        }
-        return values;
-    }
-
     fn popDefaultsAlloc(self: *VM, has_default: []const u8) RuntimeError![]Value {
         var count: usize = 0;
         for (has_default) |hd| {
@@ -23816,7 +23828,7 @@ pub const VM = struct {
         }
     }
 
-    const InsteadofRule = struct { method: []const u8, preferred: []const u8, excluded: [16][]const u8, excluded_count: u8 };
+    const InsteadofRule = struct { method: []const u8, preferred: []const u8, excluded: []const []const u8 };
     // alias "" changes only the modifiers: bits 0-1 a visibility (1
     // protected, 2 private, 3 public), bit 2 final
     const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8, modifiers: u8 = 0 };
@@ -23828,6 +23840,7 @@ pub const VM = struct {
 
         pub fn deinit(self: TraitRules, allocator: Allocator) void {
             allocator.free(self.aliases);
+            for (self.insteadofs) |rule| allocator.free(rule.excluded);
             allocator.free(self.insteadofs);
         }
     };
@@ -23836,15 +23849,19 @@ pub const VM = struct {
         var aliases = std.ArrayListUnmanaged(AliasRule).empty;
         errdefer aliases.deinit(self.allocator);
         var insteadofs = std.ArrayListUnmanaged(InsteadofRule).empty;
-        errdefer insteadofs.deinit(self.allocator);
-        const count = self.readByte();
+        errdefer {
+            for (insteadofs.items) |rule| self.allocator.free(rule.excluded);
+            insteadofs.deinit(self.allocator);
+        }
+        const count = self.readU16();
         for (0..count) |_| {
             const method_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
             const rule_trait = self.currentChunk().constants.items[self.readU16()].string.bytes();
             if (self.readByte() == 1) {
-                var rule = InsteadofRule{ .method = method_name, .preferred = rule_trait, .excluded = undefined, .excluded_count = self.readByte() };
-                for (0..rule.excluded_count) |ei| rule.excluded[ei] = self.currentChunk().constants.items[self.readU16()].string.bytes();
-                try insteadofs.append(self.allocator, rule);
+                const excluded = try self.allocator.alloc([]const u8, self.readU16());
+                errdefer self.allocator.free(excluded);
+                for (excluded) |*name| name.* = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                try insteadofs.append(self.allocator, .{ .method = method_name, .preferred = rule_trait, .excluded = excluded });
             } else {
                 const alias_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
                 try aliases.append(self.allocator, .{ .method = method_name, .trait = rule_trait, .alias = alias_name, .modifiers = self.readByte() });
@@ -24127,7 +24144,7 @@ pub const VM = struct {
             const ti = try self.ruleTraitIndex(comp.owner, traits, rule.preferred);
             const trait = traits[ti].?;
             if (!traitTableHas(tables[ti], rule.method)) return self.traitRuleFatal("A precedence rule was defined for {s}::{s} but this method does not exist", .{ trait, rule.method });
-            for (rule.excluded[0..rule.excluded_count]) |ex| {
+            for (rule.excluded) |ex| {
                 const ei = try self.ruleTraitIndex(comp.owner, traits, ex);
                 for (excluded[ei].items) |m| if (std.ascii.eqlIgnoreCase(m, rule.method))
                     return self.traitRuleFatal("Failed to evaluate a trait precedence ({s}). Method of trait {s} was defined to be excluded multiple times", .{ rule.method, traits[ei].? });
