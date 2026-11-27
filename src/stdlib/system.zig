@@ -1051,8 +1051,11 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
 // skip_running: leave out the native running at the top (debug_backtrace
 // itself); a fatal error's trace lists it (zend_fetch_debug_backtrace with
 // skip_last 0)
-pub fn buildBacktraceFrom(ctx: *NativeContext, ignore_args: bool, provide_object: bool, limit: usize, skip_running: bool) RuntimeError!*PhpArray {
+pub fn buildBacktraceFrom(ctx: *NativeContext, ignore_args: bool, provide_object: bool, frames_limit: usize, skip_running: bool) RuntimeError!*PhpArray {
     const vm = ctx.vm;
+    // once memory_limit was crossed (ZEND_HAS_OOM), php stops after the
+    // first frame
+    const limit: usize = if (vm.memory) |account| (if (account.refused != null) 1 else frames_limit) else frames_limit;
     const alloc = ctx.allocator;
     var result = try ctx.createArray();
 
