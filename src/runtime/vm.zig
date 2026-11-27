@@ -10356,6 +10356,9 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         if (try self.refuseReadonlyRefTarget(target, prop_name)) continue;
+                        // the write fetch creates a missing property
+                        if (!self.classDeclaresProperty(target.class_name, prop_name) and !target.properties.contains(prop_name) and
+                            try self.checkDynamicPropertyRule(target, prop_name, 0)) continue;
                         try self.bindPropToCell(target, prop_name, cell);
                         if (self.hasPendingReleases()) self.drainPendingDestruct();
                         if (self.drainRaised()) {
@@ -10527,6 +10530,9 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         if (try self.refuseReadonlyRefTarget(target, prop_name)) continue;
+                        // the write fetch creates a missing property
+                        if (!self.classDeclaresProperty(target.class_name, prop_name) and !target.properties.contains(prop_name) and
+                            try self.checkDynamicProperty(target, prop_name, 0)) continue;
                         if (notice_pending) self.raiseError(8, "Only variables should be assigned by reference") catch if (try self.resumeRaised()) continue;
                         try self.bindPropToCell(target, prop_name, cell);
                     }
