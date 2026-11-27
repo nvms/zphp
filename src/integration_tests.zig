@@ -2175,3 +2175,27 @@ test "a parse error past the last token is reported at end of input" {
     const text = try @import("error_format.zig").compileFailureLog(arena.allocator(), &ast, null, "box.php");
     try std.testing.expect(std.mem.startsWith(u8, text, "PHP Parse error:  syntax error"));
 }
+
+fn generated(comptime piece: []const u8, n: usize, prefix: []const u8, suffix: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, prefix);
+    for (0..n) |i| try out.print(std.testing.allocator, piece, .{i});
+    try out.appendSlice(std.testing.allocator, suffix);
+    return out.toOwnedSlice(std.testing.allocator);
+}
+
+test "a function past what u16 operands address fails to compile instead of wrapping" {
+    const vars = try generated("$v{d} = 1; ", 70000, "<?php function f() { ", "}");
+    defer std.testing.allocator.free(vars);
+    try expectCompileFatal(vars, "Function body too large to compile: it uses too many distinct variables; split it into smaller functions");
+    const names = try generated("f{d}(); ", 70000, "<?php function g() { ", "}");
+    defer std.testing.allocator.free(names);
+    try expectCompileFatal(names, "Function body too large to compile: it names too many distinct functions, classes, methods, properties and constants; split it into smaller functions");
+}
+
+test "literals and jumps past u16 operands" {
+    const source = try generated("'k{d}', ", 70000, "<?php function f($x) { if ($x) { $a = [", "]; return count($a) . $a[69999]; } return 'no'; } echo f(1), f(0);");
+    defer std.testing.allocator.free(source);
+    try expectOutput(source, "70000k69999no");
+}

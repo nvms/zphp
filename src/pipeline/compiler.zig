@@ -2716,10 +2716,21 @@ pub const Compiler = struct {
     pub fn getOrCreateSlot(self: *Compiler, name: []const u8) u16 {
         if (self.local_slots.get(name)) |slot| return slot;
         const slot = self.next_slot;
-        self.local_slots.put(self.allocator, name, slot) catch return slot;
+        // slot operands are u16 and 0xffff means none (arg_unpack): past
+        // that the function fails to compile rather than share a slot
+        if (slot >= max_slots) {
+            if (self.late_error == null) self.late_error = self.fail(self.tokenAtOffset(self.current_source_offset), "Function body too large to compile: it uses too many distinct variables; split it into smaller functions");
+            return 0;
+        }
+        self.local_slots.put(self.allocator, name, slot) catch |err| {
+            if (self.late_error == null) self.late_error = err;
+            return 0;
+        };
         self.next_slot += 1;
         return slot;
     }
+
+    pub const max_slots: u16 = 0xffff;
 
     const temp_slot_prefix = "\x00temp";
 

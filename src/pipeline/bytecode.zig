@@ -1406,3 +1406,42 @@ pub const ObjFunction = struct {
     // matching id executes (PHP runtime function binding)
     cond_id: u16 = 0,
 };
+
+test "the constant pool keeps u16 operands addressable once literals pass them" {
+    const alloc = std.testing.allocator;
+    var chunk: Chunk = .{};
+    defer chunk.deinit(alloc);
+    for (0..Chunk.narrow_split) |i| _ = try chunk.addLiteral(alloc, .{ .int = @intCast(i) });
+    // the next literal goes past the part kept for u16 operands
+    const wide = try chunk.addLiteral(alloc, .{ .int = -1 });
+    try std.testing.expect(wide >= Chunk.narrow_limit);
+    try std.testing.expectEqual(@as(i64, -1), chunk.constants.items[wide].int);
+    const a = try chunk.addConstant(alloc, .{ .string = Value.String.borrowed("name") });
+    try std.testing.expectEqual(@as(u16, Chunk.narrow_split), a);
+    // a name already pooled is found again
+    try std.testing.expectEqual(a, try chunk.addConstant(alloc, .{ .string = Value.String.borrowed("name") }));
+    var added: usize = 1;
+    while (chunk.addConstant(alloc, .{ .int = @intCast(added) })) |_| {
+        added += 1;
+    } else |err| try std.testing.expectEqual(error.TooManyConstants, err);
+    try std.testing.expectEqual(@as(usize, Chunk.narrow_limit - Chunk.narrow_split), added);
+}
+
+test "a distance too long for its operand goes to the far table" {
+    const alloc = std.testing.allocator;
+    var chunk: Chunk = .{};
+    defer chunk.deinit(alloc);
+    try chunk.code.appendNTimes(alloc, 0, 8);
+    try chunk.setDistance(alloc, 2, 70000);
+    try std.testing.expectEqual(far_operand, std.mem.readInt(u16, chunk.code.items[2..4], .big));
+    try std.testing.expectEqual(@as(u32, 70000), chunk.distanceAt(2));
+    try chunk.setDistance(alloc, 4, 0xfffe);
+    try std.testing.expectEqual(@as(u32, 0xfffe), chunk.distanceAt(4));
+    // the marker's own value is far too
+    try chunk.setDistance(alloc, 6, 0xffff);
+    try std.testing.expectEqual(@as(u32, 0xffff), chunk.distanceAt(6));
+    // patched again, near
+    try chunk.setDistance(alloc, 2, 12);
+    try std.testing.expectEqual(@as(u32, 12), chunk.distanceAt(2));
+    try std.testing.expect(!chunk.far.contains(2));
+}
