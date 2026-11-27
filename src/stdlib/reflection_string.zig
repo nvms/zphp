@@ -1426,6 +1426,12 @@ fn attributeToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
 pub fn constantString(ctx: *NativeContext, name: []const u8, value: Value, persistent: bool, deprecated: bool) RuntimeError!NativeResult {
     var w = Writer{ .ctx = ctx };
     defer w.deinit();
+    try appendConstant(&w, name, value, persistent, deprecated);
+    return w.result();
+}
+
+// _const_string
+fn appendConstant(w: *Writer, name: []const u8, value: Value, persistent: bool, deprecated: bool) RuntimeError!void {
     try w.str("Constant [ ");
     if (persistent or deprecated) {
         try w.str("<");
@@ -1437,10 +1443,135 @@ pub fn constantString(ctx: *NativeContext, name: []const u8, value: Value, persi
     switch (value) {
         .array => try w.str("Array"),
         .bool => |b| try w.str(if (b) "true" else "false"),
-        .float => |f| try appendDouble(&w, f, false),
+        .float => |f| try appendDouble(w, f, false),
         .object => try w.str("Object"),
-        else => try value.format(&w.buf, ctx.allocator),
+        else => try value.format(&w.buf, w.ctx.allocator),
     }
     try w.str(" }\n");
+}
+
+// ---------------------------------------------------------------- extensions
+
+// the module number and version php reports for an extension
+pub fn moduleOf(name: []const u8) ?struct { number: u32, version: []const u8 } {
+    for (extensions.modules) |m| if (std.ascii.eqlIgnoreCase(m[0], name)) return .{ .number = m[1], .version = m[2] };
+    return null;
+}
+
+// _extension_ini_string: an ini entry, who may change it (php's
+// ZEND_INI_USER, PERDIR and SYSTEM bits), its value, and the value it had
+// before ini_set() changed it
+fn appendIniEntry(w: *Writer, name: []const u8, access: u8) RuntimeError!void {
+    const vm = w.ctx.vm;
+    try w.fmt("    Entry [ {s} <", .{name});
+    if (access == 7) {
+        try w.str("ALL");
+    } else {
+        var comma: []const u8 = "";
+        if (access & 1 != 0) {
+            try w.str("USER");
+            comma = ",";
+        }
+        if (access & 2 != 0) {
+            try w.fmt("{s}PERDIR", .{comma});
+            comma = ",";
+        }
+        if (access & 4 != 0) try w.fmt("{s}SYSTEM", .{comma});
+    }
+    try w.str("> ]\n");
+    const current = try vm.callByName("ini_get", &.{.{ .string = Value.String.borrowed(name) }});
+
+    try w.fmt("      Current = '{s}'\n", .{if (current == .string) current.string.bytes() else ""});
+    if (vm.ic.?.ini_values.contains(name)) {
+        const types = @import("types.zig");
+        const original: ?[]const u8 = @import("../ini_config.zig").get(name) orelse if (types.noBuiltinDefault(name)) null else types.iniDefault(name);
+        try w.fmt("      Default = '{s}'\n", .{original orelse ""});
+    }
+    try w.str("    }\n");
+}
+
+// _extension_string
+pub fn extensionString(ctx: *NativeContext, ext: []const u8) RuntimeError!NativeResult {
+    const vm = ctx.vm;
+    var w = Writer{ .ctx = ctx };
+    defer w.deinit();
+    const module = moduleOf(ext);
+    try w.fmt("Extension [ <persistent> extension #{d} {s} version {s} ] {{\n", .{
+        if (module) |m| m.number else 0,
+        ext,
+        if (module) |m| m.version else @import("../php_version.zig").string,
+    });
+
+    var deps = false;
+    for (extensions.dependencies) |dep| {
+        if (!std.mem.eql(u8, dep[0], ext)) continue;
+        if (!deps) try w.str("\n  - Dependencies {\n");
+        deps = true;
+        try w.fmt("    Dependency [ {s} ({s}) ]\n", .{ dep[1], dep[2] });
+    }
+    if (deps) try w.str("  }\n");
+
+    var ini = false;
+    for (extensions.ini) |entry| {
+        if (!std.mem.eql(u8, entry[1], ext)) continue;
+        if (!ini) try w.str("\n  - INI {\n");
+        ini = true;
+        try appendIniEntry(&w, entry[0], entry[2]);
+    }
+    if (ini) try w.str("  }\n");
+
+    {
+        var body = Writer{ .ctx = ctx };
+        defer body.deinit();
+        var count: usize = 0;
+        for (extensions.constant_order) |name| {
+            const owner = extensions.constants.get(name) orelse continue;
+            if (!std.mem.eql(u8, owner, ext)) continue;
+            const value = vm.php_constants.get(name) orelse continue;
+            try body.str("    ");
+            try appendConstant(&body, name, value, true, @import("deprecations_generated.zig").constants.has(name));
+            count += 1;
+        }
+        if (count > 0) {
+            try w.fmt("\n  - Constants [{d}] {{\n", .{count});
+            try w.str(body.buf.items);
+            try w.str("  }\n");
+        }
+    }
+
+    var functions = false;
+    for (extensions.function_order) |name| {
+        const owner = extensions.functions.get(name) orelse continue;
+        if (!std.mem.eql(u8, owner, ext)) continue;
+        const canonical = vm.canonicalFunctionName(name) orelse continue;
+        if (!functions) try w.str("\n  - Functions {\n");
+        functions = true;
+        var view = FnView{ .name = canonical, .module = ext };
+        view.sig = native_params.get(canonical);
+        if (vm.native_fns.get(canonical)) |native| view.deprecated = native.deprecated != null;
+        try appendFunction(&w, view, null, "    ");
+    }
+    if (functions) try w.str("  }\n");
+
+    {
+        var body = Writer{ .ctx = ctx };
+        defer body.deinit();
+        var count: usize = 0;
+        for (extensions.class_order) |name| {
+            const owner = extensions.classes.get(name) orelse continue;
+            if (!std.mem.eql(u8, owner, ext)) continue;
+            if (!vm.classes.contains(name) and !vm.interfaces.contains(name) and !vm.traits.contains(name)) continue;
+            try body.str("\n");
+            try appendClass(&body, vm.declaredClassName(name), null, "    ");
+            count += 1;
+        }
+        if (count > 0) {
+            try w.fmt("\n  - Classes [{d}] {{", .{count});
+            try w.str(body.buf.items);
+            try w.str("  }\n");
+        }
+    }
+
+    try w.str("}\n");
     return w.result();
 }

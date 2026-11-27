@@ -1928,7 +1928,7 @@ pub fn directiveMissingHere(name: []const u8) bool {
 
 // the directives php registers with a NULL default (ini_get_all() reports
 // null for them until something sets them; ini_get() reads "")
-fn noBuiltinDefault(name: []const u8) bool {
+pub fn noBuiltinDefault(name: []const u8) bool {
     const names = std.StaticStringMap(void).initComptime(.{
         .{"assert.callback"},     .{"auto_append_file"},           .{"auto_prepend_file"},     .{"browscap"},
         .{"doc_root"},            .{"error_append_string"},        .{"error_log"},             .{"error_prepend_string"},
@@ -2756,6 +2756,13 @@ fn native_noop_false(_: *NativeContext, _: []const Value) RuntimeError!NativeRes
 // php's ini_get_all: the directives of one extension (or all of them),
 // sorted by name, as their values or with global_value, local_value and
 // access. a directive zphp has no value for is listed as null
+// who may change a directive (ZEND_INI_USER 1, PERDIR 2, SYSTEM 4), as php
+// registers it
+pub fn iniAccess(name: []const u8) u8 {
+    for (@import("extensions_generated.zig").ini) |entry| if (std.mem.eql(u8, entry[0], name)) return entry[2];
+    return 7;
+}
+
 fn native_ini_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const ext: ?[]const u8 = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else null;
     const details = args.len < 2 or args[1].isTruthy();
@@ -2810,8 +2817,7 @@ fn native_ini_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         const builtin: Value = if (builtin_text) |v| .{ .string = try Value.String.create(ctx.allocator, v) } else .null;
         defer if (builtin == .string) builtin.string.release();
         try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("builtin_default_value") }, builtin);
-        const system = std.mem.eql(u8, name, "max_memory_limit") or @import("mail.zig").isSystemIni(name) or std.mem.eql(u8, name, "syslog.facility") or std.mem.eql(u8, name, "syslog.ident");
-        try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("access") }, .{ .int = if (system) 4 else 7 });
+        try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("access") }, .{ .int = iniAccess(name) });
         try result.set(ctx.allocator, key, .{ .array = entry });
     }
     return NativeResult.borrowed(.{ .array = result });

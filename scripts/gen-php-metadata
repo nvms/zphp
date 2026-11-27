@@ -65,7 +65,14 @@ foreach (explode("\n", trim(stream_get_contents(STDIN))) as $iface) {
 EXTENSIONS_OUT = os.path.join(REPO, "src", "stdlib", "extensions_generated.zig")
 
 EXTENSION_OF = r'''<?php
-$out = ['functions' => [], 'classes' => [], 'constants' => [], 'ini' => [], 'dependencies' => [], 'class_order' => []];
+$out = ['functions' => [], 'classes' => [], 'constants' => [], 'ini' => [], 'dependencies' => [], 'class_order' => [], 'modules' => []];
+// each extension's module number and version, which ReflectionExtension's
+// string form prints
+foreach (get_loaded_extensions() as $loaded) {
+    if (preg_match('/extension #(\d+) .* version (.*) \] \{/', strtok((string) new ReflectionExtension($loaded), "\n"), $m)) {
+        $out['modules'][] = [$loaded, (int) $m[1], $m[2]];
+    }
+}
 foreach (explode("\n", trim(stream_get_contents(STDIN))) as $line) {
     [$kind, $name] = explode(' ', $line, 2);
     try {
@@ -92,6 +99,14 @@ foreach (explode("\n", trim(stream_get_contents(STDIN))) as $line) {
     } catch (Throwable) {
     }
 }
+// who may change each entry; ini_get_all() sorts php's directive table, so
+// it runs once the registration order is read
+$access = ini_get_all(null, true);
+foreach ($out['ini'] as &$entry) $entry[] = $access[$entry[0]]['access'] ?? 7;
+unset($entry);
+// the order php registers the functions in
+$out['function_order'] = get_defined_functions()['internal'];
+$out['constant_order'] = array_keys(get_defined_constants());
 echo json_encode($out);
 '''
 
@@ -303,12 +318,35 @@ def write_extensions():
         for name in sorted(found[kind] or {}):
             lines.append("    .{ %s, %s }," % (zig_string(name.encode()), zig_string(found[kind][name].encode())))
         lines.append("});")
-    # ini entries with their extension, and each extension's dependencies
+    # ini entries with their extension and who may change them (php's
+    # ZEND_INI_USER 1, PERDIR 2, SYSTEM 4), and each extension's dependencies
     # (Required, Optional, Conflicts), in the order php registers them
     lines.append("")
-    lines.append("pub const ini = [_][2][]const u8{")
-    for entry, ext in found["ini"] or []:
-        lines.append("    .{ %s, %s }," % (zig_string(entry.encode()), zig_string(ext.encode())))
+    lines.append("pub const ini = [_]struct { []const u8, []const u8, u8 }{")
+    for entry, ext, access in found["ini"] or []:
+        lines.append("    .{ %s, %s, %d }," % (zig_string(entry.encode()), zig_string(ext.encode()), access))
+    lines.append("};")
+    # the order php registers the functions in, which ReflectionExtension's
+    # string form lists them in
+    lines.append("")
+    lines.append("pub const function_order = [_][]const u8{")
+    known = set(n.lower() for n in (found["functions"] or {}))
+    for name in found["function_order"] or []:
+        if name.lower() in known:
+            lines.append("    %s," % zig_string(name.encode()))
+    lines.append("};")
+    # and the constants
+    lines.append("")
+    lines.append("pub const constant_order = [_][]const u8{")
+    for name in found["constant_order"] or []:
+        if name in (found["constants"] or {}):
+            lines.append("    %s," % zig_string(name.encode()))
+    lines.append("};")
+    # each extension's module number and version as php reports them
+    lines.append("")
+    lines.append("pub const modules = [_]struct { []const u8, u32, []const u8 }{")
+    for name, number, ver in found["modules"] or []:
+        lines.append("    .{ %s, %d, %s }," % (zig_string(name.encode()), number, zig_string(ver.encode())))
     lines.append("};")
     lines.append("")
     lines.append("pub const dependencies = [_][3][]const u8{")

@@ -892,7 +892,8 @@ fn rextGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
     return NativeResult.share(this.get("name"));
 }
 
-fn rextGetVersion(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn rextGetVersion(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    if (extensionOfThis(ctx)) |ext| if (@import("reflection_string.zig").moduleOf(ext)) |m| return NativeResult.copyString(ctx.allocator, m.version);
     return NativeResult.literal(php_version.string);
 }
 
@@ -1067,7 +1068,8 @@ fn rcIsIterable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 }
 
 fn rextToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return rextGetName(ctx, &.{});
+    const ext = extensionOfThis(ctx) orelse return NativeResult.literal("");
+    return @import("reflection_string.zig").extensionString(ctx, ext);
 }
 
 pub fn getThis(ctx: *NativeContext) ?*PhpObject {
