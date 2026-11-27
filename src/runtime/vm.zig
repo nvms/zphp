@@ -10339,11 +10339,7 @@ pub const VM = struct {
                         }
                         const frame = self.currentFrame();
                         const cell = try self.getOrCreateVarCell(frame, source_name);
-                        self.triggerLazyAccess(obj_val.object, prop_name) catch {
-                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                            return error.RuntimeError;
-                        };
-                        const target = obj_val.object.storage();
+                        const target = (try self.lazyReferenceContainer(obj_val.object, prop_name, base_frame)) orelse continue;
                         const static_kind = self.staticAsInstance(target, prop_name, self.hasMethod(target.class_name, "__get")) catch {
                             _ = try self.resumeRaised();
                             continue;
@@ -10519,13 +10515,10 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
                             return error.RuntimeError;
                         }
-                        self.triggerLazyAccess(obj_val.object, prop_name) catch {
-                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                            return error.RuntimeError;
-                        };
+                        const target = (try self.lazyReferenceContainer(obj_val.object, prop_name, base_frame)) orelse continue;
                         if (overloaded: {
                             const handlers_before = self.handler_count;
-                            break :overloaded self.overloadedReferenceTarget(obj_val.object.storage(), prop_name) catch {
+                            break :overloaded self.overloadedReferenceTarget(target, prop_name) catch {
                                 if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
                                 return error.RuntimeError;
                             };
@@ -10533,9 +10526,9 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
                             return error.RuntimeError;
                         }
-                        if (try self.refuseReadonlyRefTarget(obj_val.object.storage(), prop_name)) continue;
+                        if (try self.refuseReadonlyRefTarget(target, prop_name)) continue;
                         if (notice_pending) self.raiseError(8, "Only variables should be assigned by reference") catch if (try self.resumeRaised()) continue;
-                        try self.bindPropToCell(obj_val.object.storage(), prop_name, cell);
+                        try self.bindPropToCell(target, prop_name, cell);
                     }
                     // php frees what the destination held before it reads the
                     // result, so a destructor's writes through the reference
@@ -10566,12 +10559,21 @@ pub const VM = struct {
                     // failed fetch leaves the variable bound as it was
                     {
                         var obj_ptr = obj_val.object;
-                        // __get answers before a lazy object is initialized
-                        if (!self.lazyMagicFirst(obj_ptr, prop_name, .get)) self.triggerLazyAccess(obj_ptr, prop_name) catch {
+                        // __get answers before a lazy object is initialized,
+                        // and on an initialized proxy itself
+                        const lazy_fetch = self.lazyWriteFetch(obj_ptr, prop_name);
+                        if (lazy_fetch != .magic_self) self.triggerLazyAccess(obj_ptr, prop_name) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        obj_ptr = obj_ptr.storage();
+                        if (lazy_fetch != .magic_self) obj_ptr = obj_ptr.storage();
+                        if (lazy_fetch == .instance_read) if (self.lazyInstanceReadMissing(obj_ptr, prop_name) catch {
+                            if (try self.resumeRaised()) continue;
+                            return error.RuntimeError;
+                        }) {
+                            try self.bindRefSlot(&frame.ref_slots, dst_name, try self.tempRefCell(.null));
+                            continue;
+                        };
                         if (!self.overloadedForWrite(obj_ptr, prop_name)) if (self.restrictedObjectProperty(obj_ptr, prop_name)) |held| {
                             try self.bindRefSlot(&frame.ref_slots, dst_name, try self.tempRefCell(held));
                             continue;
@@ -10683,16 +10685,25 @@ pub const VM = struct {
                         // interned: a lazy object's initializer runs php, whose
                         // statement boundaries free transient strings
                         const prop_owned = try self.internName(try self.valueToString(name_val));
-                        self.triggerLazyAccess(obj_ptr, prop_owned) catch {
+                        const lazy_fetch = self.lazyWriteFetch(obj_ptr, prop_owned);
+                        if (lazy_fetch != .magic_self) self.triggerLazyAccess(obj_ptr, prop_owned) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        obj_ptr = obj_ptr.storage();
-                        if (self.restrictedObjectProperty(obj_ptr, prop_owned)) |held| {
+                        if (lazy_fetch != .magic_self) obj_ptr = obj_ptr.storage();
+                        if (lazy_fetch == .instance_read) if (self.lazyInstanceReadMissing(obj_ptr, prop_owned) catch {
+                            if (try self.resumeRaised()) continue;
+                            return error.RuntimeError;
+                        }) {
+                            try self.bindRefSlot(&frame.ref_slots, dst_name, try self.tempRefCell(.null));
+                            continue;
+                        };
+                        const overloaded = self.overloadedForWrite(obj_ptr, prop_owned);
+                        if (!overloaded) if (self.restrictedObjectProperty(obj_ptr, prop_owned)) |held| {
                             try self.bindRefSlot(&frame.ref_slots, dst_name, try self.tempRefCell(held));
                             continue;
-                        }
-                        if (try self.checkPropertyMutation(obj_ptr, prop_owned, .indirect)) continue;
+                        };
+                        if (!overloaded and try self.checkPropertyMutation(obj_ptr, prop_owned, .indirect)) continue;
                         if (self.hasPropHook(obj_ptr.class_name, prop_owned, .get) and !self.inPropHook(obj_ptr, prop_owned) and !try self.propGetReturnsRef(obj_ptr, prop_owned)) {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
@@ -10712,17 +10723,30 @@ pub const VM = struct {
                         }
                         const has_prop = obj_ptr.properties.contains(prop_owned) or (obj_ptr.slots != null and obj_ptr.getSlotIndex(prop_owned) != null);
                         const ref_hook = self.hasPropHook(obj_ptr.class_name, prop_owned, .get) and !self.inPropHook(obj_ptr, prop_owned);
-                        if (ref_hook or (!has_prop and self.magicApplies(obj_ptr, prop_owned, .get))) {
+                        if (ref_hook or overloaded) {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
                             self.setReturnRef(null);
+                            var magic_result: Value = .null;
                             if (ref_hook) {
                                 _ = self.callPropHook(obj_ptr, prop_owned, .get, .null) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return error.RuntimeError;
                                 };
                             } else {
-                                _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj_ptr, prop_owned) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                                magic_result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj_ptr, prop_owned) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            }
+                            if (!ref_hook and self.last_return_ref == null) {
+                                // read_property(BP_VAR_W) through a by-value
+                                // __get: the reference is to a copy (the
+                                // result is borrowed)
+                                if (magic_result != .object) {
+                                    const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded property {s}::${s} has no effect", .{ obj_ptr.class_name, prop_owned });
+                                    defer self.allocator.free(msg);
+                                    self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
+                                }
+                                try self.bindRefSlot(&frame.ref_slots, dst_name, try self.tempRefCell(magic_result));
+                                continue;
                             }
                             if (self.last_return_ref) |cell| {
                                 try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
@@ -28372,14 +28396,15 @@ pub const VM = struct {
         }
         // zend_std_write_property runs a set hook or __set before a lazy
         // object is initialized: only a write to its storage initializes it
+        // __set runs on the lazy object itself, an initialized proxy too
+        const lazy_magic = obj_in.lazy != null and self.lazyMagicFirst(obj_in, prop_name, .set);
         const lazy_deferred = obj_in.lazy != null and
-            ((self.hasPropHook(obj_in.class_name, prop_name, .set) and !self.inPropHook(obj_in, prop_name)) or
-                self.lazyMagicFirst(obj_in, prop_name, .set));
+            ((self.hasPropHook(obj_in.class_name, prop_name, .set) and !self.inPropHook(obj_in, prop_name)) or lazy_magic);
         if (!lazy_deferred) self.triggerLazyAccess(obj_in, prop_name) catch {
             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return .{ .step = .dispatched };
             return error.RuntimeError;
         };
-        const obj = obj_in.storage();
+        const obj = if (lazy_magic) obj_in else obj_in.storage();
 
         // reflection_write_property: a reflector's declared name and class
         // are read-only
@@ -33611,6 +33636,59 @@ pub const VM = struct {
         if (obj.getSlotIndexForScope(name, self.currentDefiningClass()) != null) return false;
         if (!self.magicApplies(obj, name, kind)) return false;
         if (state.backing) |instance| if (self.magicGuarded(instance, name, kind)) return false;
+        return true;
+    }
+
+    pub const LazyWriteFetch = enum { normal, magic_self, instance_read };
+
+    // a write fetch (zend_std_get_property_ptr_ptr) on a lazy object, for a
+    // name its class doesn't declare: with __get unguarded on the object
+    // there is no pointer to hand out and php reads the property for writing
+    // instead. that read runs __get on the lazy object itself (magic_self),
+    // or on an initialized proxy whose instance's __get runs for the name,
+    // reads the instance (instance_read: its property, else "Undefined
+    // property" and a temporary). anything else is the instance's write fetch
+    fn lazyWriteFetch(self: *VM, obj: *PhpObject, name: []const u8) LazyWriteFetch {
+        const state = obj.lazy orelse return .normal;
+        if (self.lazyMagicFirst(obj, name, .get)) return .magic_self;
+        if (state.running or state.backing == null) return .normal;
+        if (obj.getSlotIndexForScope(name, self.currentDefiningClass()) != null) return .normal;
+        if (!self.hasMethod(obj.class_name, "__get") or self.magicGuarded(obj, name, .get)) return .normal;
+        return .instance_read;
+    }
+
+    // the object an ASSIGN_OBJ_REF binds a property of: the instance of a
+    // lazy object (initialized now), or the lazy object whose __get answers
+    // the write fetch. null when the fetch failed and its exception was
+    // dispatched (the instance lacking a property its read gives refuses)
+    fn lazyReferenceContainer(self: *VM, obj: *PhpObject, name: []const u8, base_frame: usize) RuntimeError!?*PhpObject {
+        const fetch = self.lazyWriteFetch(obj, name);
+        if (fetch == .magic_self) return obj;
+        self.triggerLazyAccess(obj, name) catch {
+            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return null;
+            return error.RuntimeError;
+        };
+        const target = obj.storage();
+        if (fetch == .instance_read) {
+            const missing = self.lazyInstanceReadMissing(target, name) catch {
+                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return null;
+                return error.RuntimeError;
+            };
+            if (missing) {
+                if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) return null;
+                return error.RuntimeError;
+            }
+        }
+        return target;
+    }
+
+    // instance_read for a property the instance doesn't have: php's warning
+    // (the read then gives null); false when the instance has it
+    fn lazyInstanceReadMissing(self: *VM, instance: *PhpObject, name: []const u8) RuntimeError!bool {
+        if (!instance.isUnset(name) and instance.properties.contains(name)) return false;
+        const msg = try std.fmt.allocPrint(self.allocator, "Undefined property: {s}::${s}", .{ instance.class_name, name });
+        defer self.allocator.free(msg);
+        try self.emitWarning(msg);
         return true;
     }
 
