@@ -697,6 +697,21 @@ pub const OpCode = enum(u16) {
     // references (FETCH_DIM_W, MAKE_REF, then FETCH_LIST_W): a false
     // element becomes an array without the deprecation, as a reference does
     array_get_list_w,
+    // u8 slot, u32 end, u8 count, count * (u16 member, u16 class): the start
+    // of a top-level class declaration php early-binds when its parent, and
+    // the classes the checks of what it overrides need, exist as the file
+    // compiles. a member (a method, or "$" and a property) needs its class
+    // only when the parent has it; 0xffff always does (the parent), 0xfffe
+    // names the class itself, which must not be declared yet. run in the file's
+    // prelude it declares the class now when they all exist, else jumps to
+    // end; run from late_bind it declares the class
+    early_bind,
+    // u8 slot: the end of an early_bind declaration: returns to the late_bind
+    // that ran it
+    early_bind_end,
+    // u8 slot, u32 start: where an early_bind class stands in the file: runs
+    // its declaration there unless the prelude did
+    late_bind,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -708,6 +723,10 @@ pub const OpCode = enum(u16) {
             .type_assert_array => 5,
             .tick, .separate_live_iterable => 4,
             .jump_if_class_declared, .bind_const_attributes => 6,
+            .early_bind_end => 3,
+            .late_bind => 7,
+            // the class names follow
+            .early_bind => 8,
             .parent_hook_call => 8,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result, .arg_temp_container => 5,
             .reference_source,
@@ -825,6 +844,7 @@ pub const OpCode = enum(u16) {
     // always move forward
     pub fn widthAt(code: []const u8, at: usize) usize {
         const op = opAt(code, at) orelse return op_bytes;
+        if (op == .early_bind and at + 8 <= code.len) return 8 + 4 * @as(usize, code[at + 7]);
         return op.width();
     }
 

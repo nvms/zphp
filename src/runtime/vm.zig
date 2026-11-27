@@ -2630,6 +2630,10 @@ pub const VM = struct {
         // a __call or __callStatic run for a missing method: php's call
         // trampoline, named after that method in deprecations and NoDiscard
         trampoline: bool = false,
+        // the early_bind slots of the file running here its prelude bound,
+        // and where an early_bind_end returns to a late_bind (0 when none)
+        early_bound: u32 = 0,
+        late_bind_return: u32 = 0,
     };
 
     fn allocGenerator(self: *VM, initial: Generator) RuntimeError!*Generator {
@@ -6644,6 +6648,52 @@ pub const VM = struct {
                     const class = self.currentChunk().constants.items[self.readU16()].string.bytes();
                     const offset = self.readU16();
                     if (self.classes.contains(class)) self.currentFrame().ip += offset;
+                },
+                .early_bind => {
+                    // zend_try_early_bind as the file compiles: its parent
+                    // and the classes its checks need must exist, linked
+                    const slot: u5 = @intCast(self.readByte());
+                    const end = self.readU32();
+                    const count = self.readByte();
+                    const frame = self.currentFrame();
+                    var present = true;
+                    var parent: []const u8 = "";
+                    for (0..count) |_| {
+                        const member_idx = self.readU16();
+                        const name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                        if (member_idx == 0xfffe) {
+                            // a name in use is declared where it stands
+                            if (self.classes.contains(name) or self.interfaces.contains(name) or self.traits.contains(name)) present = false;
+                            continue;
+                        } else if (member_idx == 0xffff) {
+                            parent = name;
+                        } else if (present and parent.len > 0 and self.classes.contains(parent)) {
+                            // only what overrides the parent's is checked
+                            const member = self.currentChunk().constants.items[member_idx].string.bytes();
+                            if (!self.earlyBindNeeds(parent, member, name)) continue;
+                        }
+                        if (!self.classes.contains(name) and !self.interfaces.contains(name)) present = false;
+                    }
+                    // run from its late_bind, the declaration happens here
+                    if (frame.late_bind_return != 0) continue;
+                    if (present) frame.early_bound |= @as(u32, 1) << slot else frame.ip = end;
+                },
+                .early_bind_end => {
+                    _ = self.readByte();
+                    const frame = self.currentFrame();
+                    if (frame.late_bind_return != 0) {
+                        frame.ip = frame.late_bind_return;
+                        frame.late_bind_return = 0;
+                    }
+                },
+                .late_bind => {
+                    const slot: u5 = @intCast(self.readByte());
+                    const start = self.readU32();
+                    const frame = self.currentFrame();
+                    if (frame.early_bound & (@as(u32, 1) << slot) == 0) {
+                        frame.late_bind_return = @intCast(frame.ip);
+                        frame.ip = start;
+                    }
                 },
                 .jump_if_true => {
                     const offset = self.readU16();
@@ -24071,6 +24121,33 @@ pub const VM = struct {
         });
         retainValue(target);
         return obj;
+    }
+
+    // whether zend_can_early_bind needs `class` for a member that may
+    // override the parent's: only when the parent has the member, typed,
+    // and its types don't name the class too (the same name is compatible
+    // without loading it)
+    fn earlyBindNeeds(self: *VM, parent: []const u8, member: []const u8, class: []const u8) bool {
+        if (member.len > 0 and member[0] == '$') {
+            const vr = self.findPropertyVisibility(parent, member[1..]);
+            if (vr.type_str.len == 0 or vr.visibility == .private) return false;
+            return !typeMentions(vr.type_str, class);
+        }
+        const found = self.findMethodInfo(parent, member) orelse return false;
+        var key_buf: [256]u8 = undefined;
+        const ti = getTypeInfo(class_names.memberKey(&key_buf, found.defining, found.info.name)) orelse return true;
+        if (typeMentions(ti.return_type, class)) return false;
+        for (ti.param_types) |t| if (typeMentions(t, class)) return false;
+        return true;
+    }
+
+    fn typeMentions(type_text: []const u8, class: []const u8) bool {
+        var it = std.mem.tokenizeAny(u8, type_text, "|&?() ");
+        while (it.next()) |part| {
+            const bare = if (part.len > 0 and part[0] == '\\') part[1..] else part;
+            if (std.ascii.eqlIgnoreCase(bare, class)) return true;
+        }
+        return false;
     }
 
     // a callable naming a method its class doesn't have, which __call or

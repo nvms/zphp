@@ -2924,51 +2924,160 @@ fn literalDefault(ast: *const Ast, idx: u32, class_refs: bool) bool {
 // declaration point: a parent (if any) already bound, no interfaces, no traits.
 // we additionally require literal defaults (see defaultExprIsLiteral) so the
 // relocation can never reorder a default ahead of a constant it reads
-fn classDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
-    if (declHasAttributes(self, node)) return false;
+const EarlyBind = enum {
+    no,
+    // bound in the prelude
+    now,
+    // bound in the prelude if the parent and the classes its types name
+    // exist when the file starts: an include's parent may come from the
+    // files run before it, which php sees as it compiles the include
+    if_present,
+};
+
+fn classDeclEarlyBind(self: *Compiler, node: Ast.Node) EarlyBind {
+    if (declHasAttributes(self, node)) return .no;
     const rhs_base = node.data.rhs;
-    if (self.ast.extra_data[rhs_base + 2] != 0) return false; // implements
-    const parent_node = self.ast.extra_data[rhs_base + 1];
-    if (parent_node != 0) {
-        const pnode = self.ast.nodes[parent_node];
-        const parent_name = resolveNodeClassName(self, pnode) catch return false;
-        if (!self.hoisted_names.contains(parent_name) and
-            !@import("../stdlib/builtin_classes.zig").contains(parent_name)) return false;
-    }
-    // php early-binds a subclass only when its inheritance checks can run
-    // with the classes known while compiling; one whose method types name
-    // anything else is declared where it stands
-    if (parent_node != 0 and !methodTypesKnown(self, node, &self.hoisted_names)) return false;
+    if (self.ast.extra_data[rhs_base + 2] != 0) return .no; // implements
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
         switch (m.tag) {
-            .trait_use => return false,
+            .trait_use => return .no,
             .class_property, .static_class_property => {
-                if (m.data.lhs != 0 and !defaultExprIsLiteral(self.ast, m.data.lhs)) return false;
+                if (m.data.lhs != 0 and !defaultExprIsLiteral(self.ast, m.data.lhs)) return .no;
             },
             .const_decl => {
-                if (!defaultExprIsLiteral(self.ast, m.data.lhs)) return false;
+                if (!defaultExprIsLiteral(self.ast, m.data.lhs)) return .no;
             },
             .class_property_hooks => {
                 const default_idx = self.ast.extra_data[m.data.lhs];
-                if (default_idx != 0 and !defaultExprIsLiteral(self.ast, default_idx)) return false;
+                if (default_idx != 0 and !defaultExprIsLiteral(self.ast, default_idx)) return .no;
             },
             else => {},
         }
     }
+    const parent_node = self.ast.extra_data[rhs_base + 1];
+    if (parent_node == 0) return .now;
+    const pnode = self.ast.nodes[parent_node];
+    const parent_name = resolveNodeClassName(self, pnode) catch return .no;
+    // php early-binds a subclass only when its inheritance checks can run
+    // with the classes known while compiling; one whose method types name
+    // anything else is bound only if they exist then
+    if ((self.hoisted_names.contains(parent_name) or @import("../stdlib/builtin_classes.zig").contains(parent_name)) and
+        methodTypesKnown(self, node, &self.hoisted_names, null)) return .now;
+    // __toString makes the class Stringable: an interface php doesn't bind
+    for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        if (m.tag == .class_method and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(m.main_token), "__toString")) return .no;
+    }
+    return .if_present;
+}
+
+const Declaration = enum { class, interface, trait };
+
+// a declaration the prelude binds if what it depends on exists as the file
+// starts (zend_compile_class_decl binding against the class table): its name
+// is free, and for a class bound only if present, its parent and what the
+// checks of its overrides need. [early_bind slot end needs...][the
+// declaration][early_bind_end slot]; its original site runs the same
+// declaration when the prelude didn't. false when the frame's slots ran out
+fn emitEarlyBind(self: *Compiler, idx: u32, node: Ast.Node, decl: Declaration, if_present: bool) Error!bool {
+    // a frame keeps the slots it bound in 32 bits
+    if (self.early_bind_slots >= 32) return false;
+    var needs: std.ArrayListUnmanaged(EarlyBindNeed) = .empty;
+    defer needs.deinit(self.allocator);
+    try needs.append(self.allocator, .{ .member = free_name, .class = self.declaredName(self.ast.tokenSlice(node.main_token)) });
+    if (if_present) {
+        const pnode = self.ast.nodes[self.ast.extra_data[node.data.rhs + 1]];
+        try needs.append(self.allocator, .{ .member = null, .class = try resolveNodeClassName(self, pnode) });
+        try collectEarlyBindNeeds(self, node, &needs);
+    }
+    if (needs.items.len > 255) return false;
+    const slot = self.early_bind_slots;
+    self.early_bind_slots += 1;
+    self.current_source_offset = self.ast.tokens[node.main_token].start;
+    const start: u32 = @intCast(self.chunk.offset());
+    try self.emitOp(.early_bind);
+    try self.emitByte(slot);
+    const end_at = self.chunk.offset();
+    try self.emitU32(0);
+    try self.emitByte(@intCast(needs.items.len));
+    for (needs.items) |need| {
+        const member: u16 = if (need.member) |m|
+            (if (m.ptr == free_name.ptr) 0xfffe else try self.addConstant(.{ .string = Value.String.borrowed(m) }))
+        else
+            0xffff;
+        try self.emitU16(member);
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(need.class) }));
+    }
+    switch (decl) {
+        .class => try compileClassDecl(self, node),
+        .interface => try compileInterfaceDecl(self, node),
+        .trait => try compileTraitDecl(self, node),
+    }
+    try self.emitOp(.early_bind_end);
+    try self.emitByte(slot);
+    const end: u32 = @intCast(self.chunk.offset());
+    const code = self.chunk.code.items;
+    code[end_at] = @intCast(end >> 24);
+    code[end_at + 1] = @intCast((end >> 16) & 0xff);
+    code[end_at + 2] = @intCast((end >> 8) & 0xff);
+    code[end_at + 3] = @intCast(end & 0xff);
+    try self.early_bind_nodes.put(self.allocator, idx, .{ .slot = slot, .start = start });
     return true;
+}
+
+// the need that the declared name is still free
+const free_name: []const u8 = "\x00free";
+
+const EarlyBindNeed = struct { member: ?[]const u8, class: []const u8 };
+
+// the classes zend_can_early_bind needs for each member that may override
+// the parent's: a method's parameter and return types, a property's type
+// ("$" and its name). classes bound before it or built in are always there
+fn collectEarlyBindNeeds(self: *Compiler, node: Ast.Node, needs: *std.ArrayListUnmanaged(EarlyBindNeed)) Error!void {
+    const own = self.declaredName(self.ast.tokenSlice(node.main_token));
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(self.allocator);
+    for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        names.clearRetainingCapacity();
+        var member: []const u8 = "";
+        if (m.tag == .class_property or m.tag == .static_class_property or m.tag == .class_property_hooks) {
+            const type_extra = m.data.rhs >> 16;
+            if (type_extra == 0) continue;
+            _ = typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra], &self.hoisted_names, &names);
+            if (names.items.len == 0) continue;
+            member = try std.fmt.allocPrint(self.allocator, "${s}", .{self.ast.tokenSlice(m.main_token)[1..]});
+            try self.string_allocs.append(self.allocator, member);
+        } else if (m.tag == .class_method or m.tag == .static_class_method) {
+            const params = self.ast.extraSlice(m.data.lhs);
+            for (params) |p| {
+                const type_extra = self.ast.nodes[p].data.rhs >> 8;
+                if (type_extra == 0) continue;
+                _ = typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra], &self.hoisted_names, &names);
+            }
+            const ret = m.data.lhs + 1 + @as(u32, @intCast(params.len));
+            _ = typeNamesKnown(self, own, self.ast.extra_data[ret], self.ast.extra_data[ret + 1], &self.hoisted_names, &names);
+            member = self.ast.tokenSlice(m.main_token);
+        } else continue;
+        for (names.items) |name| try needs.append(self.allocator, .{ .member = member, .class = name });
+    }
 }
 
 // whether every class a method of this class names in its parameter and
 // return types is built in or already early-bound in this file
-fn methodTypesKnown(self: *Compiler, node: Ast.Node, known: *const std.StringHashMapUnmanaged(void)) bool {
+fn methodTypesKnown(self: *Compiler, node: Ast.Node, known: *const std.StringHashMapUnmanaged(void), missing: ?*std.ArrayListUnmanaged([]const u8)) bool {
     const own = self.declaredName(self.ast.tokenSlice(node.main_token));
+    var all = true;
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
         // a property's type is checked against the one it redeclares too
         if (m.tag == .class_property or m.tag == .static_class_property or m.tag == .class_property_hooks) {
             const type_extra = m.data.rhs >> 16;
-            if (type_extra != 0 and !typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra], known)) return false;
+            if (type_extra != 0 and !typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra], known, missing)) {
+                if (missing == null) return false;
+                all = false;
+            }
             continue;
         }
         if (m.tag != .class_method and m.tag != .static_class_method and m.tag != .interface_method) continue;
@@ -2976,15 +3085,23 @@ fn methodTypesKnown(self: *Compiler, node: Ast.Node, known: *const std.StringHas
         for (params) |p| {
             const type_extra = self.ast.nodes[p].data.rhs >> 8;
             if (type_extra == 0) continue;
-            if (!typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra], known)) return false;
+            if (!typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra], known, missing)) {
+                if (missing == null) return false;
+                all = false;
+            }
         }
         const ret = m.data.lhs + 1 + @as(u32, @intCast(params.len));
-        if (!typeNamesKnown(self, own, self.ast.extra_data[ret], self.ast.extra_data[ret + 1], known)) return false;
+        if (!typeNamesKnown(self, own, self.ast.extra_data[ret], self.ast.extra_data[ret + 1], known, missing)) {
+            if (missing == null) return false;
+            all = false;
+        }
     }
-    return true;
+    return all;
 }
 
-fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32, known: *const std.StringHashMapUnmanaged(void)) bool {
+// with `missing`, the names that aren't known are added to it (once each)
+fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32, known: *const std.StringHashMapUnmanaged(void), missing: ?*std.ArrayListUnmanaged([]const u8)) bool {
+    var all = true;
     var tok = start_tok;
     while (tok < end_tok) {
         const lexeme = self.ast.tokens[tok].lexeme(self.ast.source);
@@ -3012,9 +3129,13 @@ fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32
         const name = if (written[0] == '\\') written[1..] else self.resolveClassName(written);
         if (std.ascii.eqlIgnoreCase(name, own)) continue;
         if (known.contains(name) or @import("../stdlib/builtin_classes.zig").contains(name)) continue;
-        return false;
+        const list = missing orelse return false;
+        all = false;
+        for (list.items) |seen| {
+            if (std.ascii.eqlIgnoreCase(seen, name)) break;
+        } else list.append(self.allocator, name) catch return false;
     }
-    return true;
+    return all;
 }
 
 // attribute arguments are another decl-time construct that can reference
@@ -3059,7 +3180,7 @@ fn interfaceDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
         }
         // its methods are checked against the interfaces it extends, with
         // the classes known where php would bind it
-        if (parent_count > 0 and !methodTypesKnown(self, node, &self.hoisted_names)) return false;
+        if (parent_count > 0 and !methodTypesKnown(self, node, &self.hoisted_names, null)) return false;
     }
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
@@ -3119,34 +3240,42 @@ pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
             .declare_stmt => if (node.data.rhs == 0) {
                 if (try self.declaredTicks(node)) |n| self.ticks = n;
             },
-            .class_decl => if (classDeclEarlyBindable(self, node)) {
-                try notePhpBound(self, node);
-                self.current_source_offset = self.ast.tokens[node.main_token].start;
-                const name = self.declaredName(self.ast.tokenSlice(node.main_token));
-                try compileClassDecl(self, node);
-                try self.hoisted_nodes.put(self.allocator, idx, {});
-                try self.hoisted_names.put(self.allocator, name, {});
-            } else try notePhpBound(self, node),
+            .class_decl => switch (classDeclEarlyBind(self, node)) {
+                .now => {
+                    try notePhpBound(self, node);
+                    try hoistDeclaration(self, idx, node, .class);
+                },
+                .if_present => _ = try emitEarlyBind(self, idx, node, .class, true),
+                .no => try notePhpBound(self, node),
+            },
             // php binds a trait that uses no other trait at compile time.
             // zphp evaluates a trait's defaults where it is declared, so only
             // a trait whose defaults fold moves
             .trait_decl => if (!usesTraits(self, node) and traitDefaultsFold(self, node)) {
-                self.current_source_offset = self.ast.tokens[node.main_token].start;
-                const name = self.declaredName(self.ast.tokenSlice(node.main_token));
-                try compileTraitDecl(self, node);
-                try self.hoisted_nodes.put(self.allocator, idx, {});
-                try self.hoisted_names.put(self.allocator, name, {});
+                try hoistDeclaration(self, idx, node, .trait);
             },
             .interface_decl => if (interfaceDeclEarlyBindable(self, node)) {
-                self.current_source_offset = self.ast.tokens[node.main_token].start;
-                const name = self.declaredName(self.ast.tokenSlice(node.main_token));
-                try compileInterfaceDecl(self, node);
-                try self.hoisted_nodes.put(self.allocator, idx, {});
-                try self.hoisted_names.put(self.allocator, name, {});
+                try hoistDeclaration(self, idx, node, .interface);
             },
             else => {},
         }
     }
+}
+
+// a declaration php binds while compiling the file, unless its name is in
+// use then: the prelude declares it, or its original site does
+fn hoistDeclaration(self: *Compiler, idx: u32, node: Ast.Node, decl: Declaration) Error!void {
+    const name = self.declaredName(self.ast.tokenSlice(node.main_token));
+    if (!try emitEarlyBind(self, idx, node, decl, false)) {
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
+        switch (decl) {
+            .class => try compileClassDecl(self, node),
+            .interface => try compileInterfaceDecl(self, node),
+            .trait => try compileTraitDecl(self, node),
+        }
+        try self.hoisted_nodes.put(self.allocator, idx, {});
+    }
+    try self.hoisted_names.put(self.allocator, name, {});
 }
 
 // php numbers, in the order it compiles them, each anonymous class and each
@@ -3240,7 +3369,7 @@ fn classBindsAtCompileTime(self: *Compiler, node: Ast.Node, bound: *const std.St
     const parent_name = resolveNodeClassName(self, self.ast.nodes[parent_node]) catch return false;
     if (!bound.contains(parent_name) and !@import("../stdlib/builtin_classes.zig").contains(parent_name)) return false;
     // zend_try_early_bind gives up on inheritance checks naming unknown classes
-    return methodTypesKnown(self, node, bound);
+    return methodTypesKnown(self, node, bound, null);
 }
 
 // the token closing the body that starts after `start_tok`

@@ -74,6 +74,8 @@ pub const TypeHint = struct {
 
 // a warning or deprecation php raises while compiling; the runtime raises it
 // each time the compiled file is about to run, at the declaration's line
+pub const EarlyBindSite = struct { slot: u8, start: u32 };
+
 pub const CompileWarning = struct {
     level: u16,
     message: []const u8,
@@ -453,6 +455,11 @@ pub const Compiler = struct {
     // top-level class/interface declaration node indices that were emitted into
     // the early-binding prelude. compileNode skips them at their original site
     hoisted_nodes: std.AutoHashMapUnmanaged(u32, void) = .{},
+    // top-level classes the prelude declares when their parent exists as
+    // the file starts (php binds them while compiling it): the node's
+    // early_bind slot and the prelude offset its original site runs from
+    early_bind_nodes: std.AutoHashMapUnmanaged(u32, EarlyBindSite) = .{},
+    early_bind_slots: u8 = 0,
     // names of classes/interfaces already hoisted, so a later declaration whose
     // parent is one of them is recognized as early-bindable too (PHP only
     // early-binds a class whose parent is already bound at its declaration point)
@@ -1000,6 +1007,13 @@ pub const Compiler = struct {
         // early-bound class/interface declarations are relocated to a prelude
         // (see hoistEarlyClasses); their original location emits nothing
         if (self.hoisted_nodes.contains(idx)) return;
+        if (self.early_bind_nodes.get(idx)) |site| {
+            self.current_source_offset = self.ast.tokens[self.ast.nodes[idx].main_token].start;
+            try self.emitOp(.late_bind);
+            try self.emitByte(site.slot);
+            try self.emitU32(site.start);
+            return;
+        }
         const node = self.ast.nodes[idx];
         self.current_source_offset = self.ast.tokens[node.main_token].start;
         // function declarations stay hoistable through bare blocks and
@@ -2708,6 +2722,7 @@ pub const Compiler = struct {
         self.local_slots.deinit(a);
         if (self.globals_dim_tokens) |*set| set.deinit(a);
         self.hoisted_nodes.deinit(a);
+        self.early_bind_nodes.deinit(a);
         self.hoisted_names.deinit(a);
         self.php_bound_names.deinit(a);
         var it = self.trait_properties.valueIterator();
