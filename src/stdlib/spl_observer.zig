@@ -76,7 +76,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "__debugInfo", debugInfo },
     });
 
-    var mi = ClassDef{ .name = "MultipleIterator", .native_properties = debugProperties };
+    var mi = ClassDef{
+        .name = "MultipleIterator",
+        .native_properties = debugProperties,
+        .native_read_dimension = miReadDimension,
+        .native_write_dimension = miWriteDimension,
+        .native_has_dimension = miHasDimension,
+        .native_unset_dimension = miUnsetDimension,
+    };
     try mi.interfaces.append(a, "Iterator");
     inline for (.{ .{ "MIT_NEED_ANY", MIT_NEED_ANY }, .{ "MIT_NEED_ALL", MIT_NEED_ALL }, .{ "MIT_KEYS_NUMERIC", MIT_KEYS_NUMERIC }, .{ "MIT_KEYS_ASSOC", MIT_KEYS_ASSOC } }) |c| {
         try mi.constants.put(a, c[0], .{ .int = c[1] });
@@ -727,6 +734,62 @@ fn debugInfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 // ==========================================
 // MultipleIterator
 // ==========================================
+
+// MultipleIterator's dimension handlers, SplObjectStorage's with
+// spl_multiple_iterator_write_dimension: an object offset reaches the
+// storage directly; any other offset goes to the standard handler, which
+// refuses an object that isn't ArrayAccess. the two classes share php's
+// flags field, so the MIT_* flags read as SplObjectStorage's "overridden"
+// bits (MIT_NEED_ALL sends reads, MIT_KEYS_ASSOC writes to the standard
+// handler)
+const SOS_OVERRIDDEN_READ_DIMENSION = 1;
+const SOS_OVERRIDDEN_WRITE_DIMENSION = 2;
+const SOS_OVERRIDDEN_UNSET_DIMENSION = 4;
+
+fn miOwnsOffset(obj: *PhpObject, offset: Value, overridden: i64) bool {
+    if (offset != .object and offset != .generator) return false;
+    return miFlags(obj) & overridden == 0;
+}
+
+fn miReadDimension(ctx: *NativeContext, obj: *PhpObject, offset: Value, quiet: bool) RuntimeError!?Value {
+    if (!miOwnsOffset(obj, offset, SOS_OVERRIDDEN_READ_DIMENSION)) return null;
+    const k = (try hashKey(ctx, obj, offset)) orelse return .null;
+    defer freeKey(ctx, obj, k);
+    const st = try storageOf(ctx, obj);
+    const i = st.find(k) orelse {
+        if (quiet) return .null;
+        try sic.raise(ctx, "UnexpectedValueException", "Object not found", .{});
+        return error.RuntimeError;
+    };
+    return st.infAt(i);
+}
+
+fn miWriteDimension(ctx: *NativeContext, obj: *PhpObject, offset: Value, inf: Value) RuntimeError!bool {
+    if (!miOwnsOffset(obj, offset, SOS_OVERRIDDEN_WRITE_DIMENSION)) return false;
+    if (try mutatingInGetHash(ctx)) return true;
+    if (offset == .object and !ctx.vm.isInstanceOf(offset.object.class_name, "Iterator")) {
+        try sic.raise(ctx, "TypeError", "Can only attach objects that implement the Iterator interface", .{});
+        return error.RuntimeError;
+    }
+    _ = try storageAttach(ctx, obj, offset, inf);
+    return true;
+}
+
+fn miHasDimension(ctx: *NativeContext, obj: *PhpObject, offset: Value, check_empty: bool) RuntimeError!?bool {
+    if (!miOwnsOffset(obj, offset, SOS_OVERRIDDEN_READ_DIMENSION)) return null;
+    const k = (try hashKey(ctx, obj, offset)) orelse return false;
+    defer freeKey(ctx, obj, k);
+    const st = try storageOf(ctx, obj);
+    const i = st.find(k) orelse return false;
+    return if (check_empty) st.infAt(i).isTruthy() else true;
+}
+
+fn miUnsetDimension(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!bool {
+    if (!miOwnsOffset(obj, offset, SOS_OVERRIDDEN_UNSET_DIMENSION)) return false;
+    _ = try storageDetach(ctx, obj, offset);
+    if (sic.pending(ctx)) return error.RuntimeError;
+    return true;
+}
 
 fn miFlags(obj: *PhpObject) i64 {
     const v = obj.get(P.flags);

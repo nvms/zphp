@@ -742,6 +742,14 @@ pub const ClassDef = struct {
     // offsetUnset() when it returns true (SplObjectStorage's, which keeps
     // the iteration position)
     native_unset_dimension: ?*const fn (*NativeContext, *PhpObject, Value) RuntimeError!bool = null,
+    // the read, write and has dimension handlers of a class that answers
+    // `$obj[$k]` without ArrayAccess (MultipleIterator's, from
+    // SplObjectStorage): null or false when the offset goes to the standard
+    // handler (an Error for an object without ArrayAccess). read's flag is
+    // a quiet fetch (`??`), has's an empty() check
+    native_read_dimension: ?*const fn (*NativeContext, *PhpObject, Value, bool) RuntimeError!?Value = null,
+    native_write_dimension: ?*const fn (*NativeContext, *PhpObject, Value, Value) RuntimeError!bool = null,
+    native_has_dimension: ?*const fn (*NativeContext, *PhpObject, Value, bool) RuntimeError!?bool = null,
     // (int), (float), (bool), and the numeric conversion array_sum uses, for a
     // class whose value lives in its native handle (GMP)
     native_cast: ?*const fn (*PhpObject, @import("value.zig").NumericCast) ?Value = null,
@@ -7788,6 +7796,17 @@ pub const VM = struct {
                             .resumed => continue,
                         }
                     } else if (arr_val == .object) {
+                        if (self.classHook(arr_val.object.class_name, "native_read_dimension")) |hook| {
+                            var ctx = self.makeContext(null);
+                            const got = hook(&ctx, arr_val.object, key, false) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (got) |v| {
+                                self.push(v);
+                                continue;
+                            }
+                        }
                         const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{arr_val.object.class_name});
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
@@ -7926,6 +7945,33 @@ pub const VM = struct {
                         if (op == .array_get_unset) {
                             try self.pushOverloadedElement(arr_val.object, result) orelse continue;
                         } else self.pushCallResult(result);
+                    } else if (arr_val == .object and op != .array_get_unset and self.classHook(arr_val.object.class_name, "native_read_dimension") != null and
+                        (key == .object or key == .generator))
+                    {
+                        // a quiet fetch through the class's own handlers:
+                        // empty() asks has_dimension, `??` reads quietly
+                        var ctx = self.makeContext(null);
+                        if (op == .array_get_empty) {
+                            const has = self.classHook(arr_val.object.class_name, "native_has_dimension").?(&ctx, arr_val.object, key, true) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (has) |h| {
+                                self.push(.{ .bool = h });
+                                continue;
+                            }
+                        } else {
+                            const got = self.classHook(arr_val.object.class_name, "native_read_dimension").?(&ctx, arr_val.object, key, true) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (got) |v| {
+                                self.push(v);
+                                continue;
+                            }
+                        }
+                        if (try self.throwBadArrayAccess(arr_val.object.class_name)) continue;
+                        return error.RuntimeError;
                     } else if (op == .array_get_list and arr_val != .object) {
                         if (arr_val != .null) self.warnListFromScalar(arr_val) catch if (try self.resumeRaised()) continue;
                         self.push(.null);
@@ -8792,6 +8838,11 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                    } else if (arr_val == .object and try self.nativeWriteDimension(arr_val.object, key, val)) {
+                        if (self.pending_exception != null) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
                     } else if (try self.refuseDimWrite(arr_val)) |handled| {
                         if (handled) continue;
                         return error.RuntimeError;
@@ -8958,6 +9009,14 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        self.push(val);
+                        continue;
+                    }
+                    if (cur == .object and try self.nativeWriteDimension(cur.object, key, val)) {
+                        if (self.pending_exception != null) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
                         self.push(val);
                         continue;
                     }
@@ -11837,6 +11896,20 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         self.push(.{ .bool = result.isTruthy() });
+                    } else if (arr_val == .object and self.classHook(arr_val.object.class_name, "native_has_dimension") != null) {
+                        var ctx = self.makeContext(null);
+                        const has = self.classHook(arr_val.object.class_name, "native_has_dimension").?(&ctx, arr_val.object, key, false) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        if (has) |h| {
+                            self.push(.{ .bool = h });
+                            continue;
+                        }
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{arr_val.object.class_name});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     } else if (arr_val == .array) {
                         // zend_find_array_dim_slow: an array a handler of
                         // the float's warning destroyed holds nothing
@@ -18393,6 +18466,17 @@ pub const VM = struct {
     // and false (zend_use_scalar_as_array) or an object without dimension
     // handlers (zend_bad_array_access). null when the container is
     // acceptable, else as throwBuiltinException returns
+    // a class's native write_dimension: true when it took the write (an
+    // exception it raised is pending)
+    fn nativeWriteDimension(self: *VM, obj: *PhpObject, key: Value, val: Value) RuntimeError!bool {
+        const hook = self.classHook(obj.class_name, "native_write_dimension") orelse return false;
+        var ctx = self.makeContext(null);
+        return hook(&ctx, obj, key, val) catch |err| {
+            if (self.pending_exception != null) return true;
+            return err;
+        };
+    }
+
     pub fn refuseDimWrite(self: *VM, container: Value) RuntimeError!?bool {
         switch (container) {
             .int, .float, .resource => {},
