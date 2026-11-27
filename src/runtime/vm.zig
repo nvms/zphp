@@ -36489,10 +36489,12 @@ pub const VM = struct {
         return self.hasCallRoomAt(self.sp, frames);
     }
 
-    // for the fast loop, which keeps sp in a local
+    // for the fast loop, which keeps sp in a local. a pending out of memory
+    // error sends every call to growCallRoom, which reports it: php checks
+    // for it as a function is entered (ZEND_VM_ENTER's interrupt check)
     pub inline fn hasCallRoomAt(self: *VM, sp: usize, frames: usize) bool {
         const ic = self.ic.?;
-        return self.frame_count + frames < self.frame_room.committed and
+        return !self.oom_pending and self.frame_count + frames < self.frame_room.committed and
             sp + stack_headroom <= self.stack_room.committed and
             ic.fga_sp + fga_headroom * frames <= ic.fga_room.committed;
     }
@@ -36527,10 +36529,18 @@ pub const VM = struct {
             ic.fga_room.committed * @sizeOf(Value);
     }
 
+    // charged as the pages php's VM stack grows by (ZEND_VM_STACK_PAGE_SIZE,
+    // 256KB), so memory_limit is crossed by a page, as php's is
     fn chargeRegionGrowth(self: *VM, before: usize) RuntimeError!void {
         const after = self.callRegionBytes();
         const account = self.memory orelse return;
-        if (after > before and !account.chargeExternal(after - before)) return error.OutOfMemory;
+        const page: usize = 256 * 1024;
+        var left = after -| before;
+        while (left > 0) {
+            const step = @min(left, page);
+            if (!account.chargeExternal(step)) return error.OutOfMemory;
+            left -= step;
+        }
     }
 
     // a region grows only when it is short, and then by doubling
@@ -36541,6 +36551,7 @@ pub const VM = struct {
 
     // commits in doubling steps; false when a limit would be crossed
     fn growCallRoom(self: *VM, frames: usize) RuntimeError!bool {
+        if (self.oom_pending) return self.raisePendingOom();
         const ic = self.ic.?;
         const want_frames = self.frame_count + frames + 1;
         const want_slots = self.sp + stack_headroom;
@@ -36559,6 +36570,8 @@ pub const VM = struct {
             (ic.stack_fetch_room.ensureFilled(slot_target, false) catch return error.OutOfMemory) and
             (ic.fga_room.ensureFilled(fga_target, .null) catch return error.OutOfMemory);
         try self.chargeRegionGrowth(before);
+        // the growth crossed memory_limit: reported as the frame is entered
+        if (self.oom_pending) return self.raisePendingOom();
         return ok;
     }
 
