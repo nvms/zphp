@@ -37,6 +37,10 @@ for ($g = 0; $g < 140; $g++) {
     $groups[] = '(' . implode(' + ', $terms) . ')';
 }
 $code[] = 'function big_sum($x) { return $x + ' . implode(' + ', $groups) . '; }';
+// and as constant expressions: a constant, a class constant, a default
+$code[] = 'const BIG_TOTAL = ' . implode(' + ', $groups) . ';';
+$code[] = 'class BigConst { const TOTAL = ' . implode(' + ', $groups) . '; }';
+$code[] = 'function big_default($x = ' . implode(' + ', $groups) . ') { return $x; }';
 $groups = [];
 for ($g = 0; $g < 140; $g++) {
     $words = [];
@@ -52,6 +56,7 @@ var_dump(big_strings());
 var_dump(big_floats());
 var_dump(big_ints());
 var_dump(big_sum(1));
+var_dump(BIG_TOTAL, BigConst::TOTAL, big_default(), big_default(3));
 var_dump(big_concat(['a', 'b', 'c']));
 
 // the same shapes at the top level of an included file, with a class
