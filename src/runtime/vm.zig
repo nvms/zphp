@@ -784,7 +784,7 @@ pub const ClassDef = struct {
     static_prop_final: std.StringHashMapUnmanaged(void) = .{},
     // how many of the class's instance properties precede a static one in
     // its declaration (none when absent), for php's listing order
-    static_prop_positions: std.StringHashMapUnmanaged(u8) = .{},
+    static_prop_positions: std.StringHashMapUnmanaged(u32) = .{},
     const_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
     constant_types: std.StringHashMapUnmanaged([]const u8) = .{},
     static_prop_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
@@ -22761,7 +22761,7 @@ pub const VM = struct {
         const static_prop_count = self.readU16();
         const sprop_names = try self.allocator.alloc([]const u8, static_prop_count);
         const sprop_has_default = try self.allocator.alloc(u8, static_prop_count);
-        const sprop_is_const = try self.allocator.alloc(u8, static_prop_count);
+        const sprop_is_const = try self.allocator.alloc(u32, static_prop_count);
         const sprop_visibility = try self.allocator.alloc(u8, static_prop_count);
         const sprop_type = try self.allocator.alloc([]const u8, static_prop_count);
         const sprop_doc = try self.allocator.alloc([]const u8, static_prop_count);
@@ -22778,7 +22778,7 @@ pub const VM = struct {
             sprop_names[pi] = self.currentChunk().constants.items[pname_idx].string.bytes();
             sprop_has_default[pi] = self.readByte();
             sprop_visibility[pi] = self.readByte();
-            sprop_is_const[pi] = self.readByte();
+            sprop_is_const[pi] = self.readU32();
 
             const t_idx = self.readU16();
             sprop_type[pi] = if (t_idx == 0xffff)

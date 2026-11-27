@@ -74,3 +74,10 @@ echo $e->getCase('K299')->getAttributes()[0]->newInstance()->n, ' ', $e->getRefl
 
 echo Constants::X0, ' ', Constants::X16999, ' ', Constants::X12345, "\n";
 echo count(Huge::cases()), ' ', Huge::H1999->value, ' ', Huge::from('h1234')->name, ' ', Huge::tryFrom('nope') === null ? 'null' : '?', "\n";
+
+// static properties declared after more instance properties than a byte
+// counts keep their place in the listings
+$s = "class Ordered {\n" . each_of(200, fn($i) => "public \$p$i = $i;") . "public static \$st = 's';\n" . each_of(10, fn($i) => "public \$q$i = $i;") . "public static \$st2 = 's2'; }";
+eval($s);
+echo implode(',', array_slice(array_map(fn($p) => $p->name, (new ReflectionClass('Ordered'))->getProperties()), 197, 10)), "\n";
+echo implode(',', array_slice(array_keys(get_class_vars('Ordered')), 205, 10)), "\n";
