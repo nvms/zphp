@@ -201,6 +201,10 @@ pub const PhpArray = struct {
     // smaller than zphp's entries, and memory_get_usage() and memory_limit
     // follow php. undone when the storage is freed
     mem_adj: i64 = 0,
+    // the same for the part of it in huge blocks: php's table may be one
+    // where zphp's storage is (or isn't), and memory_limit counts huge
+    // blocks beside the chunks
+    huge_adj: i64 = 0,
     // php's nTableSize for the array: a power of two of at least 8, doubled
     // as elements outgrow it or raised to what was reserved
     php_table: u32 = 0,
@@ -334,9 +338,13 @@ pub const PhpArray = struct {
         for (self.entries.items) |entry| {
             if (entry.key == .string) entry.key.string.release();
         }
-        if (self.mem_adj != 0) {
-            if (memory.accountOf(allocator)) |account| account.skew(-self.mem_adj);
+        if (self.mem_adj != 0 or self.huge_adj != 0) {
+            if (memory.accountOf(allocator)) |account| {
+                account.skew(-self.mem_adj);
+                account.skewHuge(-self.huge_adj);
+            }
             self.mem_adj = 0;
+            self.huge_adj = 0;
         }
         self.php_table = 0;
         self.entries.deinit(allocator);
@@ -361,27 +369,43 @@ pub const PhpArray = struct {
         return memory.phpSize(if (is_packed) size * 16 + 8 else size * 40);
     }
 
+    fn rawIndexBytes(index_capacity: usize) usize {
+        return if (index_capacity > 0) memory.phpSize(3 * @sizeOf(usize) + index_capacity * (1 + @sizeOf([]const u8) + @sizeOf(usize))) else 0;
+    }
+
     fn rawStorageBytes(entry_capacity: usize, index_capacity: usize) usize {
-        var bytes = memory.phpSize(entry_capacity * @sizeOf(Entry));
-        if (index_capacity > 0) bytes += memory.phpSize(3 * @sizeOf(usize) + index_capacity * (1 + @sizeOf([]const u8) + @sizeOf(usize)));
-        return bytes;
+        return memory.phpSize(entry_capacity * @sizeOf(Entry)) + rawIndexBytes(index_capacity);
+    }
+
+    fn hugePart(bytes: usize) i64 {
+        return if (memory.isHuge(bytes)) @intCast(bytes) else 0;
+    }
+
+    // php's table against zphp's two blocks, for what is in huge blocks
+    fn hugeSkew(php: usize, entry_capacity: usize, index_capacity: usize) i64 {
+        return hugePart(php) - hugePart(memory.phpSize(entry_capacity * @sizeOf(Entry))) - hugePart(rawIndexBytes(index_capacity));
     }
 
     fn isPacked(self: *const PhpArray) bool {
         return self.string_index.count() == 0 and (self.entries.items.len == 0 or (self.has_int_keys and self.next_int_key == self.entries.items.len));
     }
 
-    fn skewTo(self: *PhpArray, account: *memory.MemoryAccount, want: i64) void {
+    fn skewTo(self: *PhpArray, account: *memory.MemoryAccount, want: i64, want_huge: i64) void {
         account.skew(want - self.mem_adj);
         self.mem_adj = want;
+        if (want_huge != self.huge_adj) {
+            account.skewHuge(want_huge - self.huge_adj);
+            self.huge_adj = want_huge;
+        }
     }
 
     // count the storage at php's size again after it grew or shrank
     pub fn settleMemory(self: *PhpArray, allocator: std.mem.Allocator) void {
         const account = memory.accountOf(allocator) orelse return;
         if (self.entries.items.len > self.php_table) self.php_table = phpTableFor(self.entries.items.len);
-        const php: i64 = if (self.entries.capacity == 0) 0 else @intCast(phpStorageBytes(@max(self.php_table, 8), self.isPacked()));
-        self.skewTo(account, php - @as(i64, @intCast(rawStorageBytes(self.entries.capacity, self.string_index.capacity()))));
+        const php: usize = if (self.entries.capacity == 0) 0 else phpStorageBytes(@max(self.php_table, 8), self.isPacked());
+        const index_capacity = self.string_index.capacity();
+        self.skewTo(account, @as(i64, @intCast(php)) - @as(i64, @intCast(rawStorageBytes(self.entries.capacity, index_capacity))), hugeSkew(php, self.entries.capacity, index_capacity));
     }
 
     // room for `total` entries. the storage is counted at php's size for
@@ -389,20 +413,45 @@ pub const PhpArray = struct {
     // rather than zphp's larger entries
     pub fn reserve(self: *PhpArray, allocator: std.mem.Allocator, total: usize, string_key: bool) !void {
         const grew_table = total > self.php_table;
+        const old_table = self.php_table;
         if (grew_table) self.php_table = phpTableFor(total);
         if (self.entries.capacity >= total) {
-            if (grew_table) self.settleMemory(allocator);
+            if (!grew_table) return;
+            // php's table doubles here though zphp's storage has room
+            if (memory.accountOf(allocator)) |account| if (self.entries.capacity > 0) {
+                const is_packed = !string_key and self.isPacked();
+                if (!account.admitTableGrowth(phpStorageBytes(@max(old_table, 8), is_packed), phpStorageBytes(self.php_table, is_packed))) {
+                    self.php_table = old_table;
+                    return error.OutOfMemory;
+                }
+            };
+            self.settleMemory(allocator);
             return;
         }
-        if (memory.accountOf(allocator)) |account| {
-            const capacity = std.ArrayListUnmanaged(Entry).growCapacity(total);
-            const php: i64 = @intCast(phpStorageBytes(self.php_table, !string_key and self.isPacked()));
-            self.skewTo(account, php - @as(i64, @intCast(rawStorageBytes(capacity, self.string_index.capacity()))));
+        const account = memory.accountOf(allocator) orelse return self.entries.ensureTotalCapacity(allocator, total);
+        const index_capacity = self.string_index.capacity();
+        // what the table was counted at, and will be once it has grown
+        const old_php: usize = if (self.entries.capacity == 0) 0 else @intCast(@max(0, self.mem_adj + @as(i64, @intCast(rawStorageBytes(self.entries.capacity, index_capacity)))));
+        const capacity = std.ArrayListUnmanaged(Entry).growCapacity(total);
+        const php = phpStorageBytes(self.php_table, !string_key and self.isPacked());
+        const want: i64 = @as(i64, @intCast(php)) - @as(i64, @intCast(rawStorageBytes(capacity, index_capacity)));
+        const want_huge = hugeSkew(php, capacity, index_capacity);
+        // memory_limit checks the table php would allocate, not zphp's
+        // entries, and the count moves to php's size with the allocation
+        const outer = account.php_request;
+        account.php_request = .{ .old = old_php, .new = php, .skew = want - self.mem_adj, .huge_skew = want_huge - self.huge_adj };
+        defer account.php_request = outer;
+        const grown = self.entries.ensureTotalCapacity(allocator, total);
+        if (account.php_request.?.applied) {
+            self.mem_adj = want;
+            self.huge_adj = want_huge;
         }
-        self.entries.ensureTotalCapacity(allocator, total) catch |err| {
+        grown catch |err| {
             self.settleMemory(allocator);
             return err;
         };
+        // a growth that took a block of another size than expected
+        if (self.entries.capacity != capacity) self.settleMemory(allocator);
     }
 
     pub fn retain(self: *PhpArray) void {

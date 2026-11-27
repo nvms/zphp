@@ -58,7 +58,7 @@ pub fn phpSize(len: usize) usize {
     return std.mem.alignForward(usize, len, page_size);
 }
 
-fn isHuge(size: usize) bool {
+pub fn isHuge(size: usize) bool {
     return size > max_large_size;
 }
 
@@ -71,6 +71,12 @@ pub const MemoryAccount = struct {
     adjusted: std.atomic.Value(isize) = .init(0),
     peak: std.atomic.Value(usize) = .init(0),
     baseline: usize = 0,
+    // the part of `used` in huge blocks, which php maps one by one beside
+    // its 2MB chunks (heap->real_size counts both)
+    huge: std.atomic.Value(usize) = .init(0),
+    // arrays' huge tables counted at php's size, as `adjusted` is
+    huge_adjusted: std.atomic.Value(isize) = .init(0),
+    huge_baseline: isize = 0,
     // bytes allowed above the baseline; 0 is unlimited
     limit: usize = 0,
     // the size of the allocation that first crossed the limit: php's
@@ -86,7 +92,30 @@ pub const MemoryAccount = struct {
     // some internal functions): past the hard limit php ends the process
     // (zend_mm_hard_limit_error) instead of failing the allocation
     infallible: u32 = 0,
+    // set around one growth of storage counted at php's layout (an array's
+    // table): the sizes php's allocator is asked for, which the limit checks
+    // and an exhaustion reports in place of zphp's own
+    // what the storage's count moves by once it is allocated (skew and
+    // skewHuge, applied with the allocation that grows it)
+    php_request: ?PhpRequest = null,
     on_hard_limit: ?*const fn (owner: *anyopaque, add: usize) noreturn = null,
+
+    pub const PhpRequest = struct {
+        old: usize,
+        new: usize,
+        skew: i64 = 0,
+        huge_skew: i64 = 0,
+        applied: bool = false,
+    };
+
+    // the storage was allocated: it counts at php's size from now on
+    fn applyPhpRequest(self: *MemoryAccount) void {
+        const request = &(self.php_request orelse return);
+        if (request.applied) return;
+        request.applied = true;
+        _ = self.adjusted.fetchAdd(@intCast(request.skew), .monotonic);
+        self.skewHuge(request.huge_skew);
+    }
 
     const vtable: Allocator.VTable = .{
         .alloc = alloc,
@@ -110,12 +139,29 @@ pub const MemoryAccount = struct {
         return @as(isize, @intCast(self.used.load(.monotonic))) + self.adjusted.load(.monotonic) - @as(isize, @intCast(self.baseline));
     }
 
-    // the real size once `add` more bytes are in use, the room php's
-    // chunks had left taken first when usage is below zero
-    fn realWith(in_use: isize, add: usize) usize {
-        if (in_use >= 0) return realOf(@intCast(in_use)) +| add;
-        const after = in_use + @as(isize, @intCast(@min(add, std.math.maxInt(isize))));
-        return realOf(if (after < 0) 0 else @intCast(after));
+    fn hugeTotal(self: *const MemoryAccount) isize {
+        return @as(isize, @intCast(self.huge.load(.monotonic))) + self.huge_adjusted.load(.monotonic);
+    }
+
+    fn hugeUsage(self: *const MemoryAccount) usize {
+        const in_use = self.hugeTotal() - self.huge_baseline;
+        return if (in_use < 0) 0 else @intCast(in_use);
+    }
+
+    // the huge blocks an array's table is counted at, beside skew()
+    pub fn skewHuge(self: *MemoryAccount, delta: i64) void {
+        _ = self.huge_adjusted.fetchAdd(@intCast(delta), .monotonic);
+    }
+
+    // usage outside huge blocks, which php's chunks hold (may run below zero)
+    fn chunkedUsage(self: *const MemoryAccount) isize {
+        return self.signedUsage() - @as(isize, @intCast(self.hugeUsage()));
+    }
+
+    // heap->real_size for `chunked` bytes in chunks: at least one chunk,
+    // and the huge blocks beside them
+    fn realFor(self: *const MemoryAccount, chunked: isize) usize {
+        return realOf(if (chunked < 0) 0 else @intCast(chunked)) +| self.hugeUsage();
     }
 
     // bytes in use above the baseline (heap->size)
@@ -127,9 +173,10 @@ pub const MemoryAccount = struct {
         return self.peak.load(.monotonic) -| self.baseline;
     }
 
-    // heap->real_size: the 2MB chunks the memory in use takes, at least one
+    // heap->real_size: the 2MB chunks the memory in use takes, at least
+    // one, and the huge blocks
     pub fn realUsage(self: *const MemoryAccount) usize {
-        return realOf(self.usage());
+        return self.realFor(self.chunkedUsage());
     }
 
     fn realOf(bytes: usize) usize {
@@ -143,6 +190,7 @@ pub const MemoryAccount = struct {
     // start counting from what is held now, as a fresh request does
     pub fn rebase(self: *MemoryAccount) void {
         self.baseline = self.total();
+        self.huge_baseline = self.hugeTotal();
         self.resetPeak();
         self.refused = null;
         self.reporting = false;
@@ -203,14 +251,14 @@ pub const MemoryAccount = struct {
     // hard limit it fails
     fn admit(self: *MemoryAccount, size: usize) bool {
         if (self.limit == 0 or self.reporting) return true;
-        const in_use = self.signedUsage();
+        const chunked = self.chunkedUsage();
         var add = size;
         if (!isHuge(size)) {
             // the chunks in use have room: no new memory from the system
-            if (in_use < 0 or realOf(@as(usize, @intCast(in_use)) + size) <= realOf(@intCast(in_use))) return true;
+            if (chunked < 0 or realOf(@as(usize, @intCast(chunked)) + size) <= realOf(@intCast(chunked))) return true;
             add = chunk_size;
         }
-        const need = realWith(in_use, add);
+        const need = self.realFor(chunked) +| add;
         if (need <= self.limit) return true;
         return self.admitPastLimit(need, add);
     }
@@ -241,18 +289,24 @@ pub const MemoryAccount = struct {
     }
 
     fn chargeSized(self: *MemoryAccount, size: usize) void {
+        if (isHuge(size)) _ = self.huge.fetchAdd(size, .monotonic);
         self.charge(withHugeList(size));
     }
 
     fn dischargeSized(self: *MemoryAccount, size: usize) void {
+        if (isHuge(size)) {
+            var current = self.huge.load(.monotonic);
+            while (self.huge.cmpxchgWeak(current, current -| size, .monotonic, .monotonic)) |seen| current = seen;
+        }
         self.discharge(withHugeList(size));
     }
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *MemoryAccount = @ptrCast(@alignCast(ctx));
         const size = phpSize(len);
-        if (!self.admit(size)) return null;
+        if (!self.admit(if (self.php_request) |r| phpSize(r.new) else size)) return null;
         const ptr = self.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.applyPhpRequest();
         self.chargeSized(size);
         return ptr;
     }
@@ -260,9 +314,19 @@ pub const MemoryAccount = struct {
     // a block growing within its php size needs nothing more; a huge block
     // growing in place is checked for its growth (zend_mm_realloc_huge),
     // anything else as the new allocation php's realloc makes
+    // a table php grows (from `old` bytes to `new`, php's sizes) where
+    // zphp's storage already has room: checked as php's realloc would be
+    pub fn admitTableGrowth(self: *MemoryAccount, old: usize, new: usize) bool {
+        const outer = self.php_request;
+        self.php_request = .{ .old = old, .new = new };
+        defer self.php_request = outer;
+        return if (old == 0) self.admit(phpSize(new)) else self.admitGrowth(old, new);
+    }
+
     fn admitGrowth(self: *MemoryAccount, old_len: usize, new_len: usize) bool {
-        const old_size = phpSize(old_len);
-        const new_size = phpSize(new_len);
+        const php = self.php_request;
+        const old_size = phpSize(if (php) |r| r.old else old_len);
+        const new_size = phpSize(if (php) |r| r.new else new_len);
         if (new_size <= old_size) return true;
         if (isHuge(old_size)) return self.admitHugeGrowth(new_size - old_size);
         return self.admit(new_size);
@@ -270,7 +334,7 @@ pub const MemoryAccount = struct {
 
     fn admitHugeGrowth(self: *MemoryAccount, add: usize) bool {
         if (self.limit == 0 or self.reporting) return true;
-        const need = realWith(self.signedUsage(), add);
+        const need = self.realFor(self.chunkedUsage()) +| add;
         if (need <= self.limit) return true;
         return self.admitPastLimit(need, add);
     }
@@ -279,6 +343,7 @@ pub const MemoryAccount = struct {
         const self: *MemoryAccount = @ptrCast(@alignCast(ctx));
         if (new_len > memory.len and !self.admitGrowth(memory.len, new_len)) return false;
         if (!self.parent.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        self.applyPhpRequest();
         self.adjust(memory.len, new_len);
         return true;
     }
@@ -287,6 +352,7 @@ pub const MemoryAccount = struct {
         const self: *MemoryAccount = @ptrCast(@alignCast(ctx));
         if (new_len > memory.len and !self.admitGrowth(memory.len, new_len)) return null;
         const ptr = self.parent.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        self.applyPhpRequest();
         self.adjust(memory.len, new_len);
         return ptr;
     }
@@ -552,7 +618,8 @@ test "the account counts, limits and rebases" {
     // past the soft limit: let through, the exhaustion left pending
     const second = try a.alloc(u8, 3 << 20);
     try std.testing.expectEqual(@as(?usize, 3 << 20), account.refused);
-    try std.testing.expectEqual(@as(usize, 4 << 20), account.realUsage());
+    // a huge block is mapped beside the chunks
+    try std.testing.expectEqual(@as(usize, 5 << 20), account.realUsage());
     // past the hard limit (twice the soft one): refused
     try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 5 << 20));
     try std.testing.expectEqual(@as(?usize, 3 << 20), account.refused);
@@ -562,6 +629,7 @@ test "the account counts, limits and rebases" {
     a.free(second);
     a.free(first);
     try std.testing.expectEqual(@as(usize, 0), account.used.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), account.huge.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 8), phpSize(1));
     try std.testing.expectEqual(@as(usize, 2560), phpSize(2049));
     try std.testing.expectEqual(@as(usize, 3072), phpSize(3072));
