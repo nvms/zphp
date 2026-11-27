@@ -730,7 +730,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ag_key = stack[sp - 1];
                     const ag_arr = stack[sp - 2];
                     const ag_elem: ?Value = switch (ag_arr) {
-                        .array => |arr| if (ag_key == .resource or ag_key == .float or ag_key == .null or ag_key == .array or ag_key == .object or arr == self.globals_array)
+                        // a temporary array waiting for its release is freed
+                        // as it is read, in runLoop
+                        .array => |arr| if (ag_key == .resource or ag_key == .float or ag_key == .null or ag_key == .array or ag_key == .object or arr == self.globals_array or (arr.refcount == 0 and arr.release_queued))
                             null
                         else if (arr.getPtr(Value.toArrayKey(ag_key))) |entry| entry.value else null,
                         .string => |str| if (isOpAt(code, ip - op_bytes, .array_get) and ag_key == .int and ag_key.int >= 0 and @as(usize, @intCast(ag_key.int)) < str.len) blk: {

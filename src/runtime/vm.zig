@@ -7732,6 +7732,16 @@ pub const VM = struct {
                             } else self.emitUndefinedKeyWarning(ak) catch if (try self.resumeRaised()) continue;
                         }
                         self.push(arr_val.array.get(ak));
+                        // FETCH_DIM_R frees a temporary array as it reads
+                        // it: what only the array held goes now, before the
+                        // rest of the expression runs
+                        if (!capturing and arr_val.array.refcount == 0 and arr_val.array.release_queued and !arr_val.array.elements_released) {
+                            self.drainPendingDestruct();
+                            if (self.drainRaised()) {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
+                        }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
