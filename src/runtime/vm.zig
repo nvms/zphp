@@ -2180,6 +2180,22 @@ pub const VM = struct {
         const entry = arr.getPtr(key) orelse return;
         try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .array = .{ .array = arr, .key = entry.key } });
     }
+    // the name a reference to obj->name binds under: the property the
+    // running scope sees, which for a private property shadowing another of
+    // its name (an ancestor's) is "\x00Class\x00name" (PhpObject.set finds
+    // that slot by it)
+    fn scopedPropertyName(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError![]const u8 {
+        const layout = obj.slot_layout orelse return name;
+        const scope = self.currentDefiningClass() orelse return name;
+        const idx = obj.getSlotIndexForScope(name, scope) orelse return name;
+        if (!layout.is_private[idx]) return name;
+        const first = obj.getSlotIndex(name) orelse return name;
+        if (first == idx) return name;
+        const mangled = try std.fmt.allocPrint(self.allocator, "\x00{s}\x00{s}", .{ layout.declaring_classes[idx], name });
+        defer self.allocator.free(mangled);
+        return self.internName(mangled);
+    }
+
     fn regRefObject(self: *VM, owner: RefIndex.OwnerId, cell: *Value, obj: *PhpObject, prop_name: []const u8) RuntimeError!void {
         const target: BindingTarget = .{ .object = .{ .object = obj, .prop_name = prop_name } };
         try (try self.refIndex()).addOwned(self.allocator, owner, cell, target);
@@ -10321,10 +10337,11 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         const cell = try self.newRefCell();
-                        self.setCell(cell, src_val.object.get(key_val.string.bytes()));
+                        const bound = try self.scopedPropertyName(src_val.object, key_val.string.bytes());
+                        self.setCell(cell, src_val.object.getForScope(key_val.string.bytes(), self.currentDefiningClass()));
 
                         try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell);
-                        try self.regRefObject(try self.ensureRefOwner(self.currentFrame()), cell, src_val.object, key_val.string.bytes());
+                        try self.regRefObject(try self.ensureRefOwner(self.currentFrame()), cell, src_val.object, bound);
                     }
                 },
 
@@ -10951,24 +10968,27 @@ pub const VM = struct {
                             try obj_ptr.set(self.allocator, prop_name, .null);
                         }
                         try self.initializeForReference(obj_ptr, prop_name);
+                        // a private property of the scope that shadows another
+                        // of the name is bound under its mangled name
+                        const bound = try self.scopedPropertyName(obj_ptr, prop_name);
                         const cell = blk: {
                             if (self.ref_index) |ri| {
-                                if (ri.prop_rev.get(.{ .object = obj_ptr, .class_name = "", .prop_name = prop_name })) |cells| {
+                                if (ri.prop_rev.get(.{ .object = obj_ptr, .class_name = "", .prop_name = bound })) |cells| {
                                     if (cells.items.len > 0) break :blk cells.items[0];
                                 }
                             }
                             const fresh = try self.newRefCell();
-                            var value = obj_ptr.get(prop_name);
+                            var value = if (bound.ptr == prop_name.ptr) obj_ptr.get(prop_name) else obj_ptr.getForScope(prop_name, self.currentDefiningClass());
                             if (value == .array and value.array.refcount > 1) {
                                 value = .{ .array = try self.shallowCloneCow(value.array) };
-                                try obj_ptr.set(self.allocator, prop_name, value);
+                                try obj_ptr.set(self.allocator, bound, value);
                             }
                             self.setCell(fresh, value);
                             break :blk fresh;
                         };
 
                         try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
-                        try self.regRefObject(try self.ensureRefOwner(frame), cell, obj_ptr, prop_name);
+                        try self.regRefObject(try self.ensureRefOwner(frame), cell, obj_ptr, bound);
                         self.obj_ref_active = true;
                     }
                 },
@@ -26434,7 +26454,10 @@ pub const VM = struct {
     fn syncObjPropRefs(self: *VM, obj: *PhpObject, prop_name: []const u8, val: Value) void {
         if (!self.obj_ref_active) return;
         const ri = self.ref_index orelse return;
-        const cells = ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = prop_name }) orelse return;
+        // the write reached the slot the running scope sees, which a
+        // shadowing private property's references name by its mangled name
+        const bound = self.scopedPropertyName(obj, prop_name) catch prop_name;
+        const cells = ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = bound }) orelse return;
         for (cells.items) |cell| {
             self.setCell(cell, val);
             self.propagateCellWrite(cell, val) catch {};

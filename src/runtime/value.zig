@@ -1663,6 +1663,14 @@ pub const PhpObject = struct {
         // reference to the value (callers pass raw values, never copyValue'd
         // ones) and the value it replaces is released through the VM's hook
         retainStored(value);
+        // a reference bound to a private property that shadows another of
+        // its name names the slot as "\x00Class\x00name"
+        if (name.len > 0 and name[0] == 0) if (self.mangledPrivateSlot(name)) |idx| {
+            const old = self.slots.?[idx];
+            self.slots.?[idx] = value;
+            releaseReplaced(old);
+            return;
+        };
         // a write resurrects a previously-unset property
         self.clearUnset(allocator, name);
         if (self.slots) |s| {
@@ -1674,6 +1682,20 @@ pub const PhpObject = struct {
             }
         }
         try self.putProperty(allocator, name, value);
+    }
+
+    // the private slot "\x00Class\x00name" stands for
+    pub fn mangledPrivateSlot(self: *const PhpObject, mangled: []const u8) ?u16 {
+        const layout = self.slot_layout orelse return null;
+        if (self.slots == null or mangled.len < 3 or mangled[0] != 0) return null;
+        // an anonymous class's name holds a NUL of its own; the name follows the last
+        const sep = 1 + (std.mem.lastIndexOfScalar(u8, mangled[1..], 0) orelse return null);
+        const class = mangled[1..sep];
+        const prop = mangled[sep + 1 ..];
+        for (layout.names, 0..) |n, i| {
+            if (layout.is_private[i] and std.mem.eql(u8, n, prop) and std.mem.eql(u8, layout.declaring_classes[i], class)) return @intCast(i);
+        }
+        return null;
     }
 
     // scope-aware variant for the set_prop opcode path where we know the
