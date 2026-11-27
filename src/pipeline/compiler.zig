@@ -884,10 +884,13 @@ pub const Compiler = struct {
     pub fn failFmt(self: *Compiler, token: u32, comptime fmt: []const u8, args: anytype) error{CompileError} {
         if (self.diagnostic) |slot| {
             if (slot.* == null) {
-                var d: Diagnostic = .{ .token = token };
+                // built in place: a Diagnostic is kilobytes, and a copy on
+                // the stack would be in the frame of every function this
+                // inlines into, the recursive compile functions included
+                slot.* = .{ .token = token };
+                const d = &slot.*.?;
                 // a message too long for the buffer keeps what fits
                 d.len = if (std.fmt.bufPrint(&d.text, fmt, args)) |written| written.len else |_| d.text.len;
-                slot.* = d;
             }
         }
         return error.CompileError;
