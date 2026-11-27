@@ -9647,34 +9647,12 @@ pub const VM = struct {
                         } else if (iterable == .array) {
                             self.push(.{ .int = 0 });
                         } else if (iterable == .object) {
-                            // a lazy object, and the instance of a proxy if it
-                            // is lazy too, initialize as the loop starts
-                            var obj = iterable.object;
-                            const init_failed = while (true) {
-                                self.triggerLazyInit(obj) catch break true;
-                                if (obj.storage() == obj) break false;
-                                obj = obj.storage();
-                            };
-                            if (init_failed) {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            }
-                            // php's FE_RESET over the property table: the loop
-                            // holds the object and reads it as it goes; the
-                            // slot gets an empty array that carries the state
-                            const state = try object_iter.create(self, obj, self.currentDefiningClass(), by_ref);
-                            const arr = self.allocArray() catch |err| {
-                                state.destroy(self);
-                                return err;
-                            };
-                            arr.object_iter = true;
-                            self.ic.?.object_iters.put(self.allocator, arr, state) catch |err| {
-                                arr.object_iter = false;
-                                state.destroy(self);
-                                return err;
-                            };
                             // the object's reference moves to the carrier, so it
                             // lives as long as the loop does
+                            const arr = self.objectLoopCarrier(iterable.object, by_ref) catch |err| {
+                                if (err == error.RuntimeError and self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return err;
+                            };
                             try self.ic.?.foreach_pins.put(self.allocator, arr, self.stack[self.sp - 1]);
                             self.stack[self.sp - 1] = .{ .array = arr };
                             self.push(.{ .int = 0 });
@@ -9689,6 +9667,39 @@ pub const VM = struct {
                     const offset = self.readU16();
                     if (op == .iter_check_live) {
                         const current = self.pop();
+                        const slot = self.stack[self.sp - 2];
+                        // FE_FETCH_RW iterates what the variable holds now: an
+                        // object put there is iterated from its start, an array
+                        // from its internal pointer
+                        if (slot == .array and slot.array.object_iter) carrier: {
+                            const pinned = self.ic.?.foreach_pins.get(slot.array) orelse break :carrier;
+                            if (current == .object and pinned == .object and pinned.object == current.object) break :carrier;
+                            if (current == .object) {
+                                const arr = self.objectLoopCarrier(current.object, true) catch |err| {
+                                    if (err == error.RuntimeError and self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return err;
+                                };
+                                retainValue(current);
+                                try self.ic.?.foreach_pins.put(self.allocator, arr, current);
+                                self.stack[self.sp - 2] = .{ .array = arr };
+                                self.stack[self.sp - 1] = .{ .int = 0 };
+                                self.stackRelease(slot);
+                                break :carrier;
+                            }
+                            // a serial no array's log has
+                            self.stack[self.sp - 2] = .{ .int = 0 };
+                            self.stack[self.sp - 1] = .{ .int = 0 };
+                            self.stackRelease(slot);
+                        } else if (slot == .int and current == .object) {
+                            const arr = self.objectLoopCarrier(current.object, true) catch |err| {
+                                if (err == error.RuntimeError and self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return err;
+                            };
+                            retainValue(current);
+                            try self.ic.?.foreach_pins.put(self.allocator, arr, current);
+                            self.stack[self.sp - 2] = .{ .array = arr };
+                            self.stack[self.sp - 1] = .{ .int = 0 };
+                        }
                         if (self.stack[self.sp - 2] == .int) {
                             // FE_FETCH_RW re-reads the variable: anything but an
                             // array or object ends the loop with php's warning
@@ -24646,6 +24657,31 @@ pub const VM = struct {
     // the array the variable holds now (its own, a copy made of it while the
     // loop ran, or a new one, where it starts over), pushes the next key and
     // value and moves past them. false when the loop is done
+    // php's FE_RESET over an object's property table: the loop holds the
+    // object and reads it as it goes; the loop's slot gets an empty array
+    // that carries the state (the caller pins the object to it). a lazy
+    // object, and the instance of a proxy if it is lazy too, initialize first
+    fn objectLoopCarrier(self: *VM, iterable: *PhpObject, by_ref: bool) RuntimeError!*PhpArray {
+        var obj = iterable;
+        while (true) {
+            try self.triggerLazyInit(obj);
+            if (obj.storage() == obj) break;
+            obj = obj.storage();
+        }
+        const state = try object_iter.create(self, obj, self.currentDefiningClass(), by_ref);
+        const arr = self.allocArray() catch |err| {
+            state.destroy(self);
+            return err;
+        };
+        arr.object_iter = true;
+        self.ic.?.object_iters.put(self.allocator, arr, state) catch |err| {
+            arr.object_iter = false;
+            state.destroy(self);
+            return err;
+        };
+        return arr;
+    }
+
     fn liveIterStep(self: *VM, current: Value) bool {
         if (current != .array) return false;
         const arr = current.array;
