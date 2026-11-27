@@ -7,6 +7,7 @@ const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const value_mod = @import("../runtime/value.zig");
 const vm_mod = @import("../runtime/vm.zig");
+const stack_grow = @import("../runtime/stack_grow.zig");
 const NativeContext = vm_mod.NativeContext;
 const VM = vm_mod.VM;
 const NativeResult = vm_mod.NativeResult;
@@ -1592,6 +1593,7 @@ fn array_replace_recursive(ctx: *NativeContext, args: []const Value) RuntimeErro
 // null an array holding null) and src's value is merged into it, an array
 // recursively and anything else appended
 fn mergeRecursiveInto(ctx: *NativeContext, dest: *PhpArray, src: *PhpArray) RuntimeError!void {
+    if (stack_grow.needed()) return stack_grow.callAlways(mergeRecursiveInto, .{ ctx, dest, src }) orelse checkStackLimit(ctx);
     for (src.entries.items) |entry| {
         const value = if (entry.ref) |ref| ref.* else entry.value;
         switch (entry.key) {

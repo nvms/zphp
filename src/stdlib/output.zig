@@ -15,6 +15,7 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 // every walk shares
 const Recursion = value_mod.Recursion;
 const stack_limit = @import("../runtime/stack_limit.zig");
+const stack_grow = @import("../runtime/stack_grow.zig");
 
 fn objectFlag(vm: ?*@import("../runtime/vm.zig").VM, obj: *value_mod.PhpObject, kind: u8) u8 {
     if (vm) |v| if (v.usesRecursionGuards(obj)) return kind;
@@ -453,7 +454,12 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
     return printRValueImpl(a, out, val, depth, null);
 }
 
-pub fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, vm: ?*@import("../runtime/vm.zig").VM) !void {
+const PrintRError = error{OutOfMemory} || @typeInfo(@typeInfo(@TypeOf(object_properties.list)).@"fn".return_type.?).error_union.error_set;
+
+pub fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, vm: ?*@import("../runtime/vm.zig").VM) PrintRError!void {
+    // php's print_r doesn't check the native stack: a value nested deeper
+    // than the running stack holds is printed on more of it
+    if (stack_grow.needed()) return stack_grow.callAlways(printRValueImpl, .{ a, out, val, depth, vm }) orelse error.OutOfMemory;
     switch (val) {
         .null, .undef => {},
         .bool => |b| if (b) try out.appendSlice(a, "1"),
