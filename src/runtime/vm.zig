@@ -29336,6 +29336,19 @@ pub const VM = struct {
         defer self.allocator.free(saved);
         for (saved) |v| retainValue(v);
         defer for (saved) |v| self.releaseValue(v);
+        // the references slots are bound to: a revert puts the slots back in
+        // them, typed again (zend_lazy_object_revert_init restores the
+        // reference zvals and their type sources)
+        const bound = try self.allocator.alloc(?*Value, slots.len);
+        defer self.allocator.free(bound);
+        @memset(bound, null);
+        if (self.ref_index) |ri| if (obj.slot_layout) |layout| for (bound, 0..) |*b, i| {
+            const cells = ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = layout.names[i] }) orelse continue;
+            if (cells.items.len == 0) continue;
+            b.* = cells.items[0];
+            self.bindCell(cells.items[0]);
+        };
+        defer for (bound) |b| if (b) |cell| self.unbindCell(cell);
         var props: std.StringArrayHashMapUnmanaged(Value) = .{};
         defer props.deinit(self.allocator);
         defer freeOwnedKeys(self.allocator, &props);
@@ -29365,12 +29378,27 @@ pub const VM = struct {
         // a failed initializer's changes are reverted, a proxy's as a
         // ghost's (php 8.6's zend_lazy_object_revert_init on both)
         errdefer {
-            for (slots, saved, 0..) |*slot, v, i| {
-                if (self.ref_index) |ri| {
-                    if (obj.slot_layout) |layout| {
-                        if (ri.prop_rev.contains(.{ .object = obj, .class_name = "", .prop_name = layout.names[i] })) continue;
+            for (slots, saved, bound, 0..) |*slot, v, cell, i| {
+                // a reference the initializer bound the slot to lets go of it
+                if (obj.slot_layout) |layout| if (self.ref_index != null) {
+                    const name = layout.names[i];
+                    self.detachPropRefs(obj, name, cell);
+                    if (cell) |c| {
+                        const still = if (self.ref_index.?.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = name })) |cells|
+                            std.mem.indexOfScalar(*Value, cells.items, c) != null
+                        else
+                            false;
+                        if (!still) {
+                            const persistent = self.persistentRefOwner() catch null;
+                            if (persistent) |owner| self.regRefObject(owner, c, obj, name) catch {};
+                            self.obj_ref_active = true;
+                        }
+                        self.releaseValue(slot.*);
+                        retainValue(c.*);
+                        slot.* = c.*;
+                        continue;
                     }
-                }
+                };
                 self.releaseValue(slot.*);
                 retainValue(v);
                 slot.* = v;
