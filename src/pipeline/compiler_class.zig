@@ -4249,7 +4249,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         .attributes_at = attributes_at,
     });
 
-    self.patchJump(declared_jump);
+    try self.patchJump(declared_jump);
 
     const ctor_args_slice = self.ast.extra_data[ctor_args_start .. ctor_args_start + ctor_arg_count];
     try self.emitOp(.new_reserve);

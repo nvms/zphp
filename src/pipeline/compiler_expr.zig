@@ -185,7 +185,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.bury);
             try self.emitByte(2);
             try self.emitOp(.array_set);
-            self.patchJump(skip_jump);
+            try self.patchJump(skip_jump);
             return;
         }
         {
@@ -470,11 +470,11 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.set_prop);
             try self.emitU16(name_idx);
             const end_jump = try self.emitJump(.jump);
-            self.patchJump(skip_jump);
+            try self.patchJump(skip_jump);
             // not-null path: stack has [obj, prop_value], need to remove obj
             try self.emitOp(.swap);
             try self.emitOp(.pop);
-            self.patchJump(end_jump);
+            try self.patchJump(end_jump);
             return;
         }
         try compilePropWriteBase(self, target.data.lhs);
@@ -514,13 +514,13 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.compileNode(node.data.rhs);
                 try self.emitOp(.set_static_prop_dyn);
                 const end_jump = try self.emitJump(.jump);
-                self.patchJump(skip_jump);
+                try self.patchJump(skip_jump);
                 // the value it already held, without the class and name
                 try self.emitOp(.bury);
                 try self.emitByte(2);
                 try self.emitOp(.pop);
                 try self.emitOp(.pop);
-                self.patchJump(end_jump);
+                try self.patchJump(end_jump);
                 return;
             }
             try self.compileNode(node.data.rhs);
@@ -550,7 +550,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.set_static_prop);
             try self.emitU16(class_idx);
             try self.emitU16(prop_idx);
-            self.patchJump(skip_jump);
+            try self.patchJump(skip_jump);
             return;
         }
         if (op_tag != .equal) {
@@ -582,7 +582,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 const name = self.ast.tokenSlice(target.main_token);
                 try self.emitSetVar(name);
             }
-            self.patchJump(skip_jump);
+            try self.patchJump(skip_jump);
         }
         return;
     }
@@ -1027,12 +1027,12 @@ fn emitCoalesceAssignTail(self: *Compiler, rhs: u32, store: OpCode) Error!void {
     if (store == .set_prop_dynamic) try self.emitOp(.swap);
     try self.emitOp(store);
     const end_jump = try self.emitJump(.jump);
-    self.patchJump(skip_jump);
+    try self.patchJump(skip_jump);
     try self.emitOp(.bury);
     try self.emitByte(2);
     try self.emitOp(.pop);
     try self.emitOp(.pop);
-    self.patchJump(end_jump);
+    try self.patchJump(end_jump);
 }
 
 // whether emitPlaceOperands takes the target
@@ -1460,7 +1460,7 @@ fn compileShortCircuitChain(self: *Compiler, top: Ast.Node, comptime is_and: boo
         const end_jump = try self.emitJump(if (is_and) .jump_if_false else .jump_if_true);
         try self.emitOp(.pop_boundary);
         try self.compileNode(s.data.rhs);
-        self.patchJump(end_jump);
+        try self.patchJump(end_jump);
         try self.emitOp(.cast_bool);
     }
 }
@@ -1484,7 +1484,7 @@ fn compileLogicalAndOne(self: *Compiler, node: Ast.Node) Error!void {
     const end_jump = try self.emitJump(.jump_if_false);
     try self.emitOp(.pop_boundary);
     try self.compileNode(node.data.rhs);
-    self.patchJump(end_jump);
+    try self.patchJump(end_jump);
     try self.emitOp(.cast_bool);
 }
 
@@ -1497,7 +1497,7 @@ fn compileLogicalOrOne(self: *Compiler, node: Ast.Node) Error!void {
     const end_jump = try self.emitJump(.jump_if_true);
     try self.emitOp(.pop_boundary);
     try self.compileNode(node.data.rhs);
-    self.patchJump(end_jump);
+    try self.patchJump(end_jump);
     try self.emitOp(.cast_bool);
 }
 
@@ -1512,7 +1512,7 @@ pub fn compileNullCoalesce(self: *Compiler, node: Ast.Node) Error!void {
     const end_jump = try self.emitJump(.jump_if_not_null);
     try self.emitOp(.pop);
     try self.compileNode(node.data.rhs);
-    self.patchJump(end_jump);
+    try self.patchJump(end_jump);
 }
 
 // the container of an isset/empty/?? fetch: `$this` there is php's FETCH_THIS
@@ -1689,16 +1689,16 @@ pub fn compileTernary(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.pop_boundary);
         try self.compileNode(then_node);
         const end_jump = try self.emitJump(.jump);
-        self.patchJump(else_jump);
+        try self.patchJump(else_jump);
         try self.emitOp(.pop_boundary);
         try self.compileNode(else_node);
-        self.patchJump(end_jump);
+        try self.patchJump(end_jump);
     } else {
         // short ternary: $a ?: $b - reuse the condition value if truthy
         const end_jump = try self.emitJump(.jump_if_true);
         try self.emitOp(.pop_boundary);
         try self.compileNode(else_node);
-        self.patchJump(end_jump);
+        try self.patchJump(end_jump);
     }
 }
 
@@ -1736,14 +1736,9 @@ fn emitArgGuard(self: *Compiler, guard: ArgGuard, op: OpCode) Error!void {
     try self.emitByte(guard.pos);
 }
 
-fn patchArgGuards(self: *Compiler, guards: *ArgGuards, call_ip: usize) void {
-    for (guards.items) |field| {
-        const delta = call_ip - field;
-        if (delta > 0xFFFF) continue;
-        self.chunk.code.items[field] = @intCast(delta >> 8);
-        self.chunk.code.items[field + 1] = @intCast(delta & 0xff);
-    }
-    guards.deinit(self.allocator);
+fn patchArgGuards(self: *Compiler, guards: *ArgGuards, call_ip: usize) Error!void {
+    defer guards.deinit(self.allocator);
+    for (guards.items) |field| try self.setDistance(field, call_ip - field);
 }
 
 const CallOperands = struct { a: ?u16 = null, b: ?u16 = null, argc: ?u8 = null };
@@ -1754,7 +1749,7 @@ fn emitCallOp(self: *Compiler, guards: *ArgGuards, op: OpCode, operands: CallOpe
     if (operands.a) |a| try self.emitU16(a);
     if (operands.b) |b| try self.emitU16(b);
     if (operands.argc) |argc| try self.emitByte(argc);
-    patchArgGuards(self, guards, call_ip);
+    try patchArgGuards(self, guards, call_ip);
 }
 
 // one argument of a call. $GLOBALS itself is no variable since php 8.1 (a
@@ -2025,7 +2020,7 @@ fn compileAssert(self: *Compiler, node: Ast.Node) Error!void {
     const arg_tag = if (args.len == 1) self.ast.nodes[args[0]].tag else Ast.Node.Tag.splat_expr;
     if (arg_tag == .splat_expr) {
         try compileCallPlain(self, node);
-        self.patchJump(check);
+        try self.patchJump(check);
         return;
     }
     const message = try @import("ast_export.zig").assertMessage(self.allocator, self.ast, args[0]);
@@ -2049,7 +2044,7 @@ fn compileAssert(self: *Compiler, node: Ast.Node) Error!void {
         self.current_source_offset = call_offset;
         try emitCallOp(self, &guards, .call, .{ .a = name_idx, .argc = 2 });
     }
-    self.patchJump(check);
+    try self.patchJump(check);
 }
 
 fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
@@ -2132,7 +2127,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
                     try self.emitOp(.pop);
                 }
             }
-            for (end_jumps[0..jump_count]) |j| self.patchJump(j);
+            for (end_jumps[0..jump_count]) |j| try self.patchJump(j);
             return;
         }
     }
@@ -2544,7 +2539,7 @@ fn compileArrayMapLoop(self: *Compiler, call_node: Ast.Node, args: []const u32) 
     try self.emitByte(2);
     try self.emitOp(.iter_advance);
     try self.emitLoop(loop_top);
-    self.patchJump(exit_jump);
+    try self.patchJump(exit_jump);
     try self.emitOp(.iter_end);
     if (memo) {
         try self.emitOp(.swap);
@@ -3141,7 +3136,7 @@ pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
     const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
-        for (local_jumps.items) |j| self.patchJump(j);
+        for (local_jumps.items) |j| self.patchJumpLate(j);
         self.nullsafe_chain_jumps = null;
         local_jumps.deinit(self.allocator);
     };
@@ -3696,7 +3691,7 @@ fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error
     const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
-        for (local_jumps.items) |j| self.patchJump(j);
+        for (local_jumps.items) |j| self.patchJumpLate(j);
         self.nullsafe_chain_jumps = null;
         local_jumps.deinit(self.allocator);
     };
@@ -3747,7 +3742,7 @@ pub fn compileStaticMemberOnChain(self: *Compiler, node: Ast.Node, comptime comp
     const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
-        for (local_jumps.items) |j| self.patchJump(j);
+        for (local_jumps.items) |j| self.patchJumpLate(j);
         self.nullsafe_chain_jumps = null;
         local_jumps.deinit(self.allocator);
     };
@@ -3769,7 +3764,7 @@ pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
     const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
-        for (local_jumps.items) |j| self.patchJump(j);
+        for (local_jumps.items) |j| self.patchJumpLate(j);
         self.nullsafe_chain_jumps = null;
         local_jumps.deinit(self.allocator);
     };
@@ -3818,7 +3813,7 @@ fn compileNullsafePropertyFetch(self: *Compiler, node: Ast.Node, quiet: bool) Er
     const owns_chain = self.nullsafe_chain_jumps == null;
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
-        for (local_jumps.items) |j| self.patchJump(j);
+        for (local_jumps.items) |j| self.patchJumpLate(j);
         self.nullsafe_chain_jumps = null;
         local_jumps.deinit(self.allocator);
     };
@@ -3826,7 +3821,7 @@ fn compileNullsafePropertyFetch(self: *Compiler, node: Ast.Node, quiet: bool) Er
     if (quiet) try compileCoalesceFetch(self, node.data.lhs) else try self.compileNode(node.data.lhs);
     const skip_jump = try self.emitJump(.jump_if_not_null);
     const end_jump = try self.emitJump(.jump);
-    self.patchJump(skip_jump);
+    try self.patchJump(skip_jump);
     if (self.const_expr and !quiet) {
         try constExprPropFetch(self, node);
         return self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
@@ -3852,7 +3847,7 @@ pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
     const owns_chain = self.nullsafe_chain_jumps == null;
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
-        for (local_jumps.items) |j| self.patchJump(j);
+        for (local_jumps.items) |j| self.patchJumpLate(j);
         self.nullsafe_chain_jumps = null;
         local_jumps.deinit(self.allocator);
     };
@@ -3860,7 +3855,7 @@ pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
     const skip_jump = try self.emitJump(.jump_if_not_null);
     const end_jump = try self.emitJump(.jump);
-    self.patchJump(skip_jump);
+    try self.patchJump(skip_jump);
     const args = self.ast.extraSlice(node.data.rhs);
     const method_name = self.ast.tokenSlice(node.main_token);
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
@@ -3938,7 +3933,7 @@ fn compileParentHookCall(self: *Compiler, node: Ast.Node) Error!bool {
     }
     const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop) });
     // hook parameters are never by reference (callSiteByValue)
-    patchArgGuards(self, &guards, self.chunk.offset());
+    try patchArgGuards(self, &guards, self.chunk.offset());
     try self.emitOp(.parent_hook_call);
     try self.emitU16(prop_idx);
     try self.emitByte(@intFromBool(is_set));
@@ -3989,7 +3984,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
             };
             if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
             defer if (owns_chain) {
-                for (local_jumps.items) |j| self.patchJump(j);
+                for (local_jumps.items) |j| self.patchJumpLate(j);
                 self.nullsafe_chain_jumps = null;
                 local_jumps.deinit(self.allocator);
             };

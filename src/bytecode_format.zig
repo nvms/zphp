@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 109;
+pub const FORMAT_VERSION: u16 = 110;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -257,6 +257,14 @@ fn serializeChunk(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab
     try writeU32(buf, allocator, @intCast(chunk.lines.items.len));
     for (chunk.lines.items) |byte_offset| {
         try writeU32(buf, allocator, if (lines.starts.len > 0) lines.line(byte_offset) else byte_offset);
+    }
+
+    // distances too long for their u16 operand
+    try writeU32(buf, allocator, chunk.far.count());
+    var far = chunk.far.iterator();
+    while (far.next()) |entry| {
+        try writeU32(buf, allocator, entry.key_ptr.*);
+        try writeU32(buf, allocator, entry.value_ptr.*);
     }
 }
 
@@ -677,6 +685,14 @@ fn deserializeChunk(r: *Reader, ctx: *DeserCtx) !Chunk {
     const line_count = try r.readU32();
     for (0..line_count) |_| {
         try chunk.lines.append(ctx.allocator, try r.readU32());
+    }
+
+    const far_count = try r.readU32();
+    for (0..far_count) |_| {
+        const field = try r.readU32();
+        const dist = try r.readU32();
+        if (@as(usize, field) + 2 > code_len) return error.InvalidFormat;
+        try chunk.far.put(ctx.allocator, field, dist);
     }
 
     return chunk;

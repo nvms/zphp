@@ -409,6 +409,9 @@ pub const Compiler = struct {
     // `$x?->y()->z()` chain short-circuit ALL of `z()` (and further links)
     // when $x is null, matching PHP's nullsafe semantics
     nullsafe_chain_jumps: ?*std.ArrayListUnmanaged(usize) = null,
+    // a patch made in a defer that failed, reported when the function's
+    // compile finishes (buildSlotNames)
+    late_error: ?Error = null,
     // set while compiling the variable of an isset, ??, or empty(): its read
     // doesn't warn when the variable holds nothing
     quiet_reads: bool = false,
@@ -619,10 +622,10 @@ pub const Compiler = struct {
     }
 
     // the handler of scope id starts here: point the gotos' push_handlers at it
-    pub fn handlerPatched(self: *Compiler, id: u32) void {
+    pub fn handlerPatched(self: *Compiler, id: u32) Error!void {
         if (self.handler_patches.fetchRemove(id)) |entry| {
             var list = entry.value;
-            for (list.items) |pos| self.patchJump(pos);
+            for (list.items) |pos| try self.patchJump(pos);
             list.deinit(self.allocator);
         }
     }
@@ -1387,7 +1390,7 @@ pub const Compiler = struct {
                         try gop.value_ptr.append(self.allocator, self.chunk.offset());
                         try self.emitU16(0xffff);
                     }
-                    self.patchJump(skip);
+                    try self.patchJump(skip);
                 }
                 const target = self.chunk.offset();
                 if (!has_handlers) @memset(entries, target);
@@ -1411,7 +1414,7 @@ pub const Compiler = struct {
                         const k = sharedScopes(pg.scopes, here);
                         const leave = pg.scopes.len - k;
                         for (pg.jumps, 0..) |j, n| {
-                            if (n < leave) self.patchJumpTo(j, j + 2) else self.patchJumpTo(j, entries[k]);
+                            if (n < leave) try self.patchJumpTo(j, j + 2) else try self.patchJumpTo(j, entries[k]);
                         }
                         self.allocator.free(pg.scopes);
                         self.allocator.free(pg.jumps);
@@ -2671,7 +2674,7 @@ pub const Compiler = struct {
             if (bj.depth < self.loop_depth) {
                 try prev_breaks.append(self.allocator, bj);
             } else {
-                self.patchJump(bj.offset);
+                try self.patchJump(bj.offset);
             }
         }
         self.break_jumps.deinit(self.allocator);
@@ -2682,7 +2685,7 @@ pub const Compiler = struct {
             if (bj.depth < self.loop_depth) {
                 try prev_breaks.append(self.allocator, bj);
             } else {
-                self.patchJumpTo(bj.offset, target);
+                try self.patchJumpTo(bj.offset, target);
             }
         }
         self.break_jumps.deinit(self.allocator);
@@ -2693,7 +2696,7 @@ pub const Compiler = struct {
             if (cj.depth < self.loop_depth) {
                 try prev_continues.append(self.allocator, cj);
             } else {
-                self.patchJump(cj.offset);
+                try self.patchJump(cj.offset);
             }
         }
         self.continue_jumps.deinit(self.allocator);
@@ -2893,6 +2896,7 @@ pub const Compiler = struct {
     }
 
     pub fn buildSlotNames(self: *Compiler) Error![]const []const u8 {
+        if (self.late_error) |err| return err;
         if (self.next_slot == 0) return &.{};
         const names = try self.allocator.alloc([]const u8, self.next_slot);
         @memset(names, "");
@@ -3180,22 +3184,34 @@ pub const Compiler = struct {
         return self.chunk.offset() - 2;
     }
 
-    pub fn patchJump(self: *Compiler, offset: usize) void {
-        const dist = self.chunk.offset() - offset - 2;
-        self.chunk.code.items[offset] = @intCast(dist >> 8);
-        self.chunk.code.items[offset + 1] = @intCast(dist & 0xff);
+    pub fn patchJump(self: *Compiler, offset: usize) Error!void {
+        return try self.patchJumpTo(offset, self.chunk.offset());
     }
 
-    pub fn patchJumpTo(self: *Compiler, offset: usize, target: usize) void {
-        const dist = target -| offset -| 2;
-        self.chunk.code.items[offset] = @intCast(dist >> 8);
-        self.chunk.code.items[offset + 1] = @intCast(dist & 0xff);
+    // patchJump for a defer, which can't fail
+    pub fn patchJumpLate(self: *Compiler, offset: usize) void {
+        self.patchJump(offset) catch |err| {
+            if (self.late_error == null) self.late_error = err;
+        };
+    }
+
+    pub fn patchJumpTo(self: *Compiler, offset: usize, target: usize) Error!void {
+        return self.setDistance(offset, target -| offset -| 2);
     }
 
     pub fn emitLoop(self: *Compiler, loop_start_val: usize) Error!void {
         try self.emitOp(.jump_back);
-        const dist = self.chunk.offset() - loop_start_val + 2;
-        try self.emitU16(@intCast(dist));
+        const field = self.chunk.offset();
+        try self.emitU16(0);
+        try self.setDistance(field, field + 2 - loop_start_val);
+    }
+
+    // a distance operand: past what u16 holds it goes to the chunk's far table
+    pub fn setDistance(self: *Compiler, field: usize, dist: usize) Error!void {
+        self.chunk.setDistance(self.allocator, field, dist) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.TooFar => self.fail(self.tokenAtOffset(self.current_source_offset), "Function body too large to compile; split it into smaller functions"),
+        };
     }
 
     pub fn addConstant(self: *Compiler, value: Value) Error!u16 {

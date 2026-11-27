@@ -6959,11 +6959,11 @@ pub const VM = struct {
                 },
 
                 .jump => {
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     self.currentFrame().ip += offset;
                 },
                 .jump_back => {
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     // a timeout is reported at the jump, the loop's own line
                     try self.pollExecutionDeadline();
                     self.currentFrame().ip -= offset;
@@ -6978,13 +6978,13 @@ pub const VM = struct {
                     }
                 },
                 .jump_if_false => {
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     self.warnNanToBool(self.peek()) catch if (try self.resumeRaised()) continue;
                     if (!self.peek().isTruthy()) self.currentFrame().ip += offset;
                 },
                 .jump_if_class_declared => {
                     const class = self.currentChunk().constants.items[self.readU16()].string.bytes();
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     if (self.classes.contains(class)) self.currentFrame().ip += offset;
                 },
                 .early_bind => {
@@ -7034,17 +7034,17 @@ pub const VM = struct {
                     }
                 },
                 .jump_if_true => {
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     self.warnNanToBool(self.peek()) catch if (try self.resumeRaised()) continue;
                     if (self.peek().isTruthy()) self.currentFrame().ip += offset;
                 },
                 .jump_if_not_null => {
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     if (!self.peek().isNull()) self.currentFrame().ip += offset;
                 },
 
                 .assert_check => {
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     if (self.assertionsMode() != 1) {
                         self.push(.{ .bool = true });
                         self.currentFrame().ip += offset;
@@ -7941,7 +7941,7 @@ pub const VM = struct {
                         // (zend_wrong_string_offset): an offset of a string
                         // variable or element can't be referenced, and a
                         // string reached through an offset is no container
-                        const intermediate = self.argChainContinues(self.currentChunk().code.items, self.currentFrame().ip, self.arg_capture_call, self.arg_capture_pos);
+                        const intermediate = self.argChainContinues(self.currentChunk(), self.currentFrame().ip, self.arg_capture_call, self.arg_capture_pos);
                         const msg = if (intermediate) "Cannot use string offset as an array" else "Cannot create references to/from string offsets";
                         if (self.throwWrongStringOffset(key, msg) catch try self.resumeRaised()) continue;
                         return error.RuntimeError;
@@ -10037,7 +10037,7 @@ pub const VM = struct {
                     }
                 },
                 .iter_check, .iter_check_nokey, .iter_check_live => {
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     if (op == .iter_check_live) {
                         const current = self.pop();
                         const slot = self.stack[self.sp - 2];
@@ -11279,7 +11279,7 @@ pub const VM = struct {
                     const class_idx = self.readU16();
                     const prop_idx = self.readU16();
                     const field = self.currentFrame().ip;
-                    const delta = self.readU16();
+                    const delta = self.readDistance();
                     const pos = self.readByte();
                     if (self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1)) {
                         const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
@@ -11932,7 +11932,7 @@ pub const VM = struct {
                 .less_local_local_jif => {
                     const slot_a = self.readU16();
                     const slot_b = self.readU16();
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     const frame_lj = self.currentFrame();
                     const a = try self.fusedRead(frame_lj, slot_a);
                     const b = try self.fusedRead(frame_lj, slot_b);
@@ -12517,7 +12517,7 @@ pub const VM = struct {
                 },
 
                 .push_handler => {
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     try self.ensureHandlerRoom(1);
                     self.exception_handlers[self.handler_count] = .{
                         .catch_ip = self.currentFrame().ip + offset,
@@ -12584,7 +12584,7 @@ pub const VM = struct {
 
                 .jump_if_static_bound => {
                     const var_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
-                    const offset = self.readU16();
+                    const offset = self.readDistance();
                     var key_buf: [256]u8 = undefined;
                     if (self.statics_bound.contains(self.staticStorageKey(&key_buf, var_name))) self.currentFrame().ip += offset;
                 },
@@ -12856,7 +12856,7 @@ pub const VM = struct {
 
                 .arg_unpack => {
                     const field = self.currentFrame().ip;
-                    const delta = self.readU16();
+                    const delta = self.readDistance();
                     const slot = self.readU16();
                     const chunk = self.currentChunk();
                     const site: UnpackSite = .{ .chunk = chunk, .call_ip = field + delta, .args_base = self.sp - 2 };
@@ -14058,7 +14058,7 @@ pub const VM = struct {
                 .arg_variable => {
                     const name_idx = self.readU16();
                     const field = self.currentFrame().ip;
-                    const delta = self.readU16();
+                    const delta = self.readDistance();
                     const pos = self.readByte();
                     if (self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1)) {
                         const name = self.currentChunk().constants.items[name_idx].string.bytes();
@@ -14076,7 +14076,7 @@ pub const VM = struct {
                 },
                 .arg_append => {
                     const field = self.currentFrame().ip;
-                    const delta = self.readU16();
+                    const delta = self.readDistance();
                     const pos = self.readByte();
                     if (!self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1)) {
                         if (try self.throwBuiltinException("Error", "Cannot use [] for reading")) continue;
@@ -14124,7 +14124,7 @@ pub const VM = struct {
                 },
                 .arg_temp_container => {
                     const field = self.currentFrame().ip;
-                    const delta = self.readU16();
+                    const delta = self.readDistance();
                     const pos = self.readByte();
                     if (!self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1)) continue;
                     if (try self.throwBuiltinException("Error", "Cannot use temporary expression in write context")) continue;
@@ -14132,7 +14132,7 @@ pub const VM = struct {
                 },
                 .arg_value, .arg_call_result => {
                     const field = self.currentFrame().ip;
-                    const delta = self.readU16();
+                    const delta = self.readDistance();
                     const pos = self.readByte();
                     const chunk = self.currentChunk();
                     if (!self.tempArgNeedsCheck(chunk, field, delta, pos)) continue;
@@ -14208,7 +14208,7 @@ pub const VM = struct {
                 },
                 .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => {
                     const field = self.currentFrame().ip;
-                    const delta = self.readU16();
+                    const delta = self.readDistance();
                     const pos = self.readByte();
                     const operands: usize = if (op == .arg_guard_prop) 1 else 2;
                     self.arg_capture_pending = self.argNeedsCapture(self.currentChunk(), field, delta, pos, operands);
@@ -21798,7 +21798,7 @@ pub const VM = struct {
         if (!bytecode.opIs(code, frame.ip, .arg_variable)) return false;
         const field = frame.ip + bytecode.op_bytes + 2;
         if (field + 2 >= code.len) return false;
-        const delta = (@as(u16, code[field]) << 8) | code[field + 1];
+        const delta = frame.chunk.distanceAt(field);
         // the value isn't on the stack yet
         return self.argNeedsCapture(frame.chunk, field, delta, code[field + 2], 0);
     }
@@ -27150,14 +27150,15 @@ pub const VM = struct {
     // whether a fetch of a by-reference argument's chain is followed by
     // another of the same argument before the call: an intermediate fetch
     // (php's FETCH_DIM_W with ZEND_FETCH_DIM_DIM) rather than the last one
-    fn argChainContinues(_: *VM, code: []const u8, from: usize, call_ip: usize, pos: u8) bool {
+    fn argChainContinues(_: *VM, chunk: *const Chunk, from: usize, call_ip: usize, pos: u8) bool {
+        const code = chunk.code.items;
         var ip = from;
         while (ip < call_ip and ip < code.len) {
             const op = bytecode.opAt(code, ip) orelse return false;
             switch (op) {
                 .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => {
                     const field = ip + bytecode.op_bytes;
-                    const delta = (@as(usize, code[field]) << 8) | code[field + 1];
+                    const delta = chunk.distanceAt(field);
                     if (field + delta == call_ip and code[field + 2] == pos) return true;
                 },
                 else => {},
@@ -27167,7 +27168,7 @@ pub const VM = struct {
         return false;
     }
 
-    pub fn argNeedsCapture(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8, operands: usize) bool {
+    pub fn argNeedsCapture(self: *VM, chunk: *const Chunk, field: usize, delta: u32, pos: u8, operands: usize) bool {
         return self.resolveArgIntent(chunk, field, delta, pos, operands, false);
     }
 
@@ -27175,11 +27176,11 @@ pub const VM = struct {
     // to a registered callee, so a name no by-reference callee goes by
     // settles it. a variable can't skip resolving: a callee autoloaded or
     // declared by the call itself still takes it by reference
-    fn tempArgNeedsCheck(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8) bool {
+    fn tempArgNeedsCheck(self: *VM, chunk: *const Chunk, field: usize, delta: u32, pos: u8) bool {
         return self.resolveArgIntent(chunk, field, delta, pos, 1, true);
     }
 
-    fn resolveArgIntent(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8, operands: usize, temporary: bool) bool {
+    fn resolveArgIntent(self: *VM, chunk: *const Chunk, field: usize, delta: u32, pos: u8, operands: usize, temporary: bool) bool {
         if (self.argCaptureCached(chunk, field, delta, pos, operands)) |cached| return cached;
         const code = chunk.code.items;
         const call_ip = field + delta;
@@ -27199,7 +27200,7 @@ pub const VM = struct {
     }
 
     // the cached answer for a guard site, or null when the site must resolve
-    pub inline fn argCaptureCached(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8, operands: usize) ?bool {
+    pub inline fn argCaptureCached(self: *VM, chunk: *const Chunk, field: usize, delta: u32, pos: u8, operands: usize) ?bool {
         if (delta == 0) return true;
         const ic = self.ic orelse return null;
         const chunk_key = @intFromPtr(chunk);
@@ -36370,6 +36371,14 @@ pub const VM = struct {
         const hi: u16 = self.readByte();
         const lo: u16 = self.readByte();
         return (hi << 8) | lo;
+    }
+
+    // a jump or argument guard's distance operand (Chunk.distanceAt)
+    inline fn readDistance(self: *VM) u32 {
+        const frame = &self.frames[self.frame_count - 1];
+        const field = frame.ip;
+        frame.ip += 2;
+        return frame.chunk.distanceAt(field);
     }
 
     fn readU32(self: *VM) u32 {

@@ -996,10 +996,16 @@ pub const SourceLocation = struct {
     line_end: usize,
 };
 
+// a jump or argument-guard distance that doesn't fit its u16 operand: the
+// operand holds far_operand and the distance is in Chunk.far, keyed by the
+// operand's offset. read distances only through Chunk.distanceAt
+pub const far_operand: u16 = 0xFFFF;
+
 pub const Chunk = struct {
     code: std.ArrayListUnmanaged(u8) = .empty,
     constants: std.ArrayListUnmanaged(Value) = .empty,
     lines: std.ArrayListUnmanaged(u32) = .empty,
+    far: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     // compile time only: once the pool reaches narrow_split entries, the
     // rest of what u16 operands reach is reserved for them, filled from
     // narrow_next, and literals go past it (addLiteral, constant_w)
@@ -1015,6 +1021,7 @@ pub const Chunk = struct {
         self.code.deinit(allocator);
         self.constants.deinit(allocator);
         self.lines.deinit(allocator);
+        self.far.deinit(allocator);
         self.narrow_strings.deinit(allocator);
     }
 
@@ -1063,6 +1070,33 @@ pub const Chunk = struct {
             const gop = try self.narrow_strings.getOrPut(allocator, c.string.bytes());
             if (!gop.found_existing) gop.value_ptr.* = @intCast(i);
         }
+    }
+
+    // the distance a jump or argument guard's u16 operand at `field` holds
+    pub inline fn distanceAt(self: *const Chunk, field: usize) u32 {
+        const raw = std.mem.readInt(u16, self.code.items[field..][0..2], .big);
+        if (raw != far_operand) return raw;
+        return self.farDistance(field);
+    }
+
+    pub fn farDistance(self: *const Chunk, field: usize) u32 {
+        @branchHint(.cold);
+        // a placeholder the compiler never patched reads as it always did
+        return self.far.get(@intCast(field)) orelse far_operand;
+    }
+
+    // store a distance in the u16 operand at `field`, or in `far` when it
+    // doesn't fit
+    pub fn setDistance(self: *Chunk, allocator: std.mem.Allocator, field: usize, dist: usize) error{ OutOfMemory, TooFar }!void {
+        if (dist > std.math.maxInt(u32)) return error.TooFar;
+        if (dist >= far_operand) {
+            try self.far.put(allocator, @intCast(field), @intCast(dist));
+            std.mem.writeInt(u16, self.code.items[field..][0..2], far_operand, .big);
+            return;
+        }
+        // a field patched twice may have been far the first time
+        if (self.far.count() != 0) _ = self.far.remove(@intCast(field));
+        std.mem.writeInt(u16, self.code.items[field..][0..2], @intCast(dist), .big);
     }
 
     pub fn offset(self: *const Chunk) usize {

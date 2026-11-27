@@ -15,9 +15,9 @@ pub fn compileIfSimple(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.pop_boundary);
     try self.compileNode(node.data.rhs);
     const end_jump = try self.emitJump(.jump);
-    self.patchJump(then_jump);
+    try self.patchJump(then_jump);
     try self.emitOp(.pop_boundary);
-    self.patchJump(end_jump);
+    try self.patchJump(end_jump);
 }
 
 pub fn compileIfElse(self: *Compiler, node: Ast.Node) Error!void {
@@ -29,10 +29,10 @@ pub fn compileIfElse(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.pop_boundary);
     try self.compileNode(then_node);
     const else_jump = try self.emitJump(.jump);
-    self.patchJump(then_jump);
+    try self.patchJump(then_jump);
     try self.emitOp(.pop_boundary);
     try self.compileNode(else_node);
-    self.patchJump(else_jump);
+    try self.patchJump(else_jump);
 }
 
 pub fn compileWhile(self: *Compiler, node: Ast.Node) Error!void {
@@ -59,7 +59,7 @@ pub fn compileWhile(self: *Compiler, node: Ast.Node) Error!void {
     try self.patchContinues(&prev_continues);
 
     try self.emitLoop(loop_top);
-    self.patchJump(exit_jump);
+    try self.patchJump(exit_jump);
     try self.emitOp(.pop_boundary);
 
     try self.patchBreaks(&prev_breaks);
@@ -95,7 +95,7 @@ pub fn compileDoWhile(self: *Compiler, node: Ast.Node) Error!void {
     const exit_jump = try self.emitJump(.jump_if_false);
     try self.emitOp(.pop_boundary);
     try self.emitLoop(loop_top);
-    self.patchJump(exit_jump);
+    try self.patchJump(exit_jump);
     try self.emitOp(.pop_boundary);
 
     try self.patchBreaks(&prev_breaks);
@@ -211,7 +211,7 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitLoop(loop_top);
 
     if (exit_jump) |ej| {
-        self.patchJump(ej);
+        try self.patchJump(ej);
         if (cond_super == null) {
             try self.emitOp(.pop_boundary);
         }
@@ -447,7 +447,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitLoop(loop_top);
     self.current_source_offset = body_offset;
 
-    self.patchJump(exit_jump);
+    try self.patchJump(exit_jump);
 
     // true-ref binding propagates writes live, so there is no end-of-iteration
     // writeback to route break jumps through (the old copy+writeback model
@@ -537,11 +537,11 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
             } else {
                 const skip = try self.emitJump(.jump_if_false);
                 // matched: patch all hit_jumps to here
-                for (hit_jumps.items) |hj| self.patchJump(hj);
+                for (hit_jumps.items) |hj| try self.patchJump(hj);
                 try self.emitOp(.pop);
                 const body_jmp = try self.emitJump(.jump);
                 try body_jumps.append(self.allocator, body_jmp);
-                self.patchJump(skip);
+                try self.patchJump(skip);
                 try self.emitOp(.pop);
             }
         }
@@ -560,7 +560,7 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
     // phase 2: emit bodies sequentially (enables fallthrough)
     for (case_nodes, 0..) |case_idx, i| {
         const case_node = self.ast.nodes[case_idx];
-        self.patchJump(body_jumps.items[i]);
+        try self.patchJump(body_jumps.items[i]);
 
         const stmts = if (case_node.tag == .switch_default)
             self.ast.extraSlice(case_node.data.lhs)
@@ -570,21 +570,21 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
         for (stmts) |stmt| try self.compileNode(stmt);
     }
 
-    if (end_no_match) |j| self.patchJump(j);
+    if (end_no_match) |j| try self.patchJump(j);
     self.loop_depth -= 1;
     if (self.loop_depth < 32) self.loop_is_switch[self.loop_depth] = false;
     self.popJumpScope();
     const switch_depth = self.loop_depth;
     for (self.break_jumps.items) |bj| {
         if (bj.depth > switch_depth) {
-            self.patchJump(bj.offset);
+            try self.patchJump(bj.offset);
         } else {
             try prev_breaks.append(self.allocator, bj);
         }
     }
     for (self.continue_jumps.items) |cj| {
         if (cj.depth > switch_depth) {
-            self.patchJump(cj.offset);
+            try self.patchJump(cj.offset);
         } else {
             try prev_continue_jumps.append(self.allocator, cj);
         }
@@ -633,12 +633,12 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.pop);
             } else {
                 const skip = try self.emitJump(.jump_if_false);
-                for (hit_jumps.items) |hj| self.patchJump(hj);
+                for (hit_jumps.items) |hj| try self.patchJump(hj);
                 try self.emitOp(.pop);
                 try self.compileNode(arm.data.rhs);
                 const end_j = try self.emitJump(.jump);
                 try end_jumps.append(self.allocator, end_j);
-                self.patchJump(skip);
+                try self.patchJump(skip);
                 try self.emitOp(.pop);
             }
         }
@@ -663,7 +663,7 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.throw);
     }
 
-    for (end_jumps.items) |ej| self.patchJump(ej);
+    for (end_jumps.items) |ej| try self.patchJump(ej);
 }
 
 pub fn compileThrow(self: *Compiler, node: Ast.Node) Error!void {
@@ -781,8 +781,8 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     const skip_catches = try self.emitJump(.jump);
 
     // patch catch offset to here
-    self.patchJump(handler_offset_pos);
-    self.handlerPatched(try_scope);
+    try self.patchJump(handler_offset_pos);
+    try self.handlerPatched(try_scope);
     // the loops the exception left free what they held, as php's live
     // ranges do before the catch runs
     for (self.foreach_holders.items[holders_before..]) |holder| try self.emitHolderRelease(holder);
@@ -838,7 +838,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
             const skip = try self.emitJump(.jump);
 
             // match: stack: [exc, bool(true)]
-            for (match_jumps.items) |mj| self.patchJump(mj);
+            for (match_jumps.items) |mj| try self.patchJump(mj);
             try self.emitOp(.pop); // remove bool -> [exc]
 
             if (catch_node.main_token != 0) {
@@ -855,7 +855,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
             try end_jumps.append(self.allocator, ej);
 
             // skip lands here, stack: [exc] (preserved for next catch)
-            self.patchJump(skip);
+            try self.patchJump(skip);
         } else {
             // untyped catch-all
             if (catch_node.main_token != 0) {
@@ -881,28 +881,28 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.throw);
 
         // catch body completed normally: pop catch-body handler, jump to normal finally
-        for (end_jumps.items) |ej| self.patchJump(ej);
+        for (end_jumps.items) |ej| try self.patchJump(ej);
         try self.emitOp(.pop_handler);
         const skip_to_normal = try self.emitJump(.jump);
 
         // exception from catch body: patch the catch-body handler to here
         // exception is on the stack, run finally then re-throw
-        self.patchJump(finally_handler_offset);
-        for (catch_scopes.items) |id| self.handlerPatched(id);
+        try self.patchJump(finally_handler_offset);
+        for (catch_scopes.items) |id| try self.handlerPatched(id);
         try self.emitOp(.hold_exception);
         try compileFinallyCopy(self, finally_node);
         try self.emitOp(.throw);
 
         // normal path: try completed or catch completed without throwing
-        self.patchJump(skip_catches);
-        self.patchJump(skip_to_normal);
+        try self.patchJump(skip_catches);
+        try self.patchJump(skip_to_normal);
         try compileFinallyCopy(self, finally_node);
     } else {
         // no finally: just re-throw
         try self.emitOp(.throw);
 
-        self.patchJump(skip_catches);
-        for (end_jumps.items) |ej| self.patchJump(ej);
+        try self.patchJump(skip_catches);
+        for (end_jumps.items) |ej| try self.patchJump(ej);
     }
 }
 
@@ -996,12 +996,12 @@ pub fn compileStaticVar(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(var_idx);
         try self.emitOp(.pop);
         const done = try self.emitJump(.jump);
-        self.patchJump(initialized);
+        try self.patchJump(initialized);
         try self.emitOp(.pop);
-        self.patchJump(skip);
+        try self.patchJump(skip);
         try self.emitOp(.get_static);
         try self.emitU16(var_idx);
-        self.patchJump(done);
+        try self.patchJump(done);
     } else {
         try self.emitOp(.get_static);
         try self.emitU16(var_idx);
