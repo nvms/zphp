@@ -712,6 +712,11 @@ pub const OpCode = enum(u16) {
     // u8 slot, u32 start: where an early_bind class stands in the file: runs
     // its declaration there unless the prelude did
     late_bind,
+    // [name] -> [value]: the ${...} variable fetched for writing (FETCH_W),
+    // created null when it holds nothing, without a warning
+    get_var_var_w,
+    // u16 dst: make_var_ref with the source variable's name popped
+    make_var_var_ref,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -724,6 +729,7 @@ pub const OpCode = enum(u16) {
             .tick, .separate_live_iterable => 4,
             .jump_if_class_declared, .bind_const_attributes => 6,
             .early_bind_end => 3,
+            .make_var_var_ref => 4,
             .late_bind => 7,
             // the class names follow
             .early_bind => 8,

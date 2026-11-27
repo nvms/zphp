@@ -6079,6 +6079,28 @@ pub const VM = struct {
                         }
                     }
                 },
+                .get_var_var_w => {
+                    const name_val = self.pop();
+                    defer self.stackRelease(name_val);
+                    var text_buf: [32]u8 = undefined;
+                    const raw_name = self.varVarNameText(name_val, &text_buf) catch {
+                        _ = try self.resumeRaised();
+                        continue;
+                    };
+                    var buf: [256]u8 = undefined;
+                    const dollar_name = varVarName(raw_name, &buf);
+                    const frame = self.currentFrame();
+                    if (isSuperglobal(dollar_name) and self.frameInGlobalScope(frame)) {
+                        self.push(if (self.globals_cells.get(dollar_name)) |cell| cell.* else .null);
+                        continue;
+                    }
+                    if (self.frameVariable(frame, dollar_name)) |val| {
+                        self.push(val);
+                        continue;
+                    }
+                    try self.setVariableByName(frame, try self.internName(dollar_name), .null);
+                    self.push(.null);
+                },
                 .ensure_array_var_var, .separate_var_var => |vv_op| {
                     // the variable a ${...}[k] write lands in: made an array when
                     // it holds nothing, separated from co-holders, written back.
@@ -10036,11 +10058,20 @@ pub const VM = struct {
                     self.unbindRefSlot(&self.currentFrame().ref_slots, name);
                 },
 
-                .make_var_ref => {
+                .make_var_ref, .make_var_var_ref => |ref_op| {
                     const dst_idx = self.readU16();
-                    const src_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
-                    const src_name = self.currentChunk().constants.items[src_idx].string.bytes();
+                    const src_name = if (ref_op == .make_var_ref) self.currentChunk().constants.items[self.readU16()].string.bytes() else src: {
+                        const name_val = self.pop();
+                        defer self.stackRelease(name_val);
+                        var text_buf: [32]u8 = undefined;
+                        const raw_name = self.varVarNameText(name_val, &text_buf) catch {
+                            _ = try self.resumeRaised();
+                            continue;
+                        };
+                        var buf: [256]u8 = undefined;
+                        break :src try self.internName(varVarName(raw_name, &buf));
+                    };
                     const frame = self.currentFrame();
                     const cell = try self.getOrCreateVarCell(frame, src_name);
                     if (cell.* == .array) _ = try self.separateReferencedArray(frame, src_name, cell, cell.array);
@@ -10425,6 +10456,14 @@ pub const VM = struct {
                     if (source != .cell) return error.RuntimeError;
                     try self.checkArgCell(source.cell.denial);
                     const cell = source.cell.value;
+                    // ASSIGN_OBJ_REF refuses anything but an object
+                    if (obj_val != .object) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to modify property \"{s}\" on {s}", .{ prop_name, obj_val.valueName() });
+                        defer self.allocator.free(msg);
+                        self.stackRelease(obj_val);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     if (obj_val == .object) {
                         if (!self.inPropHook(obj_val.object, prop_name) and
                             (self.hasPropHook(obj_val.object.class_name, prop_name, .get) or self.hasPropHook(obj_val.object.class_name, prop_name, .set)))

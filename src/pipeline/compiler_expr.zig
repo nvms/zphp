@@ -385,8 +385,9 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 return;
             }
             switch (ref_inner.tag) {
-                .property_access, .array_access, .static_prop_access, .call, .method_call, .static_call => {
-                    try self.compileNode(target.data.lhs);
+                .property_access, .array_access, .static_prop_access, .call, .method_call, .static_call, .variable_variable => {
+                    // the object is fetched for writing (ASSIGN_OBJ_REF)
+                    try compilePropWriteBase(self, target.data.lhs);
                     const dynamic = self.isDynamicProp(target);
                     if (dynamic) try self.compileNode(target.data.rhs);
                     try compileReferenceSource(self, self.ast.nodes[node.data.rhs].data.lhs);
@@ -3054,7 +3055,13 @@ pub fn compilePropWriteBase(self: *Compiler, node_idx: u32) Error!void {
 // BP_VAR_RW, which warns when it is undefined
 fn compilePropFetchBase(self: *Compiler, node_idx: u32, rw: bool) Error!void {
     const node = self.ast.nodes[node_idx];
-    if (!rw and ((node.tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "$this")) or node.tag == .variable_variable)) {
+    // FETCH_W of a ${...} variable creates it
+    if (!rw and node.tag == .variable_variable) {
+        try self.compileNode(node.data.lhs);
+        try self.emitOp(.get_var_var_w);
+        return;
+    }
+    if (!rw and node.tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "$this")) {
         const saved = self.quiet_reads;
         self.quiet_reads = true;
         defer self.quiet_reads = saved;
@@ -3274,6 +3281,11 @@ pub fn compileReferenceBinding(self: *Compiler, source: u32, dst: u16) Error!boo
             try self.emitOp(.make_var_ref);
             try self.emitU16(dst);
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(node.main_token)) }));
+        },
+        .variable_variable => {
+            try self.compileNode(node.data.lhs);
+            try self.emitOp(.make_var_var_ref);
+            try self.emitU16(dst);
         },
         .array_access, .array_push_target => {
             // $GLOBALS['x'] is the global variable x itself
