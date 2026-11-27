@@ -725,12 +725,72 @@ pub const OpCode = enum(u16) {
     // u32 n: the declaration that follows pushes up to n values, more than
     // the headroom a frame keeps: make room for them
     reserve_stack,
+    // the far forms of the distance-carrying opcodes the fast loop runs, the
+    // same width and operands: Chunk.setDistance rewrites an instruction to
+    // one when its distance went to Chunk.far, so the near forms read their
+    // u16 unchecked and the fast loop leaves the far ones to runLoop
+    jump_far,
+    jump_back_far,
+    jump_if_false_far,
+    jump_if_true_far,
+    less_local_local_jif_far,
+    arg_variable_far,
+    arg_guard_prop_far,
+    arg_value_far,
+    arg_call_result_far,
+    arg_guard_prop_dynamic_far,
+    arg_guard_dim_far,
+
+    // the far form of an opcode whose distance may go to Chunk.far
+    pub fn farForm(self: OpCode) ?OpCode {
+        return switch (self) {
+            .jump => .jump_far,
+            .jump_back => .jump_back_far,
+            .jump_if_false => .jump_if_false_far,
+            .jump_if_true => .jump_if_true_far,
+            .less_local_local_jif => .less_local_local_jif_far,
+            .arg_variable => .arg_variable_far,
+            .arg_guard_prop => .arg_guard_prop_far,
+            .arg_value => .arg_value_far,
+            .arg_call_result => .arg_call_result_far,
+            .arg_guard_prop_dynamic => .arg_guard_prop_dynamic_far,
+            .arg_guard_dim => .arg_guard_dim_far,
+            else => null,
+        };
+    }
+
+    // the opcode a far form stands for, or the opcode itself
+    pub fn nearForm(self: OpCode) OpCode {
+        return switch (self) {
+            .jump_far => .jump,
+            .jump_back_far => .jump_back,
+            .jump_if_false_far => .jump_if_false,
+            .jump_if_true_far => .jump_if_true,
+            .less_local_local_jif_far => .less_local_local_jif,
+            .arg_variable_far => .arg_variable,
+            .arg_guard_prop_far => .arg_guard_prop,
+            .arg_value_far => .arg_value,
+            .arg_call_result_far => .arg_call_result,
+            .arg_guard_prop_dynamic_far => .arg_guard_prop_dynamic,
+            .arg_guard_dim_far => .arg_guard_dim,
+            else => self,
+        };
+    }
+
+    // where the distance operand of a farForm-able instruction starts
+    pub fn distanceOperand(self: OpCode) usize {
+        return switch (self.nearForm()) {
+            .less_local_local_jif => op_bytes + 4,
+            .arg_variable => op_bytes + 2,
+            else => op_bytes,
+        };
+    }
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .partial_closure, .jump_if_static_bound => 6,
             .static_bind => 4,
-            .arg_variable => 7,
+            .arg_variable, .arg_variable_far => 7,
             .arg_unpack => 6,
             .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread, .class_ref_check, .pick, .array_add_below => 3,
             .type_assert_array => 5,
@@ -744,6 +804,9 @@ pub const OpCode = enum(u16) {
             .early_bind => 8,
             .parent_hook_call => 8,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result, .arg_temp_container => 5,
+            .arg_guard_prop_far, .arg_guard_prop_dynamic_far, .arg_guard_dim_far, .arg_value_far, .arg_call_result_far => 5,
+            .jump_far, .jump_back_far, .jump_if_false_far, .jump_if_true_far => 4,
+            .less_local_local_jif_far => 8,
             .reference_source,
             .enter_class_scope,
             .constant,
@@ -1011,6 +1074,9 @@ pub const Chunk = struct {
     constants: std.ArrayListUnmanaged(Value) = .empty,
     lines: std.ArrayListUnmanaged(u32) = .empty,
     far: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    // compile time only: where each instruction with a farForm starts, in
+    // code order (noteFarForm), for setDistance to rewrite one that goes far
+    far_forms: std.ArrayListUnmanaged(u32) = .empty,
     // compile time only: once the pool reaches narrow_split entries, the
     // rest of what u16 operands reach is reserved for them, filled from
     // narrow_next, and literals go past it (addLiteral, constant_w)
@@ -1027,6 +1093,7 @@ pub const Chunk = struct {
         self.constants.deinit(allocator);
         self.lines.deinit(allocator);
         self.far.deinit(allocator);
+        self.far_forms.deinit(allocator);
         self.narrow_strings.deinit(allocator);
     }
 
@@ -1090,18 +1157,46 @@ pub const Chunk = struct {
         return self.far.get(@intCast(field)) orelse far_operand;
     }
 
+    // an instruction starting at `at` (the end of the code) has a farForm
+    pub fn noteFarForm(self: *Chunk, allocator: std.mem.Allocator, at: usize) !void {
+        try self.far_forms.append(allocator, @intCast(at));
+    }
+
+    // the start of the farForm-able instruction whose distance operand is
+    // at `field`
+    fn farFormAt(self: *const Chunk, field: usize) ?usize {
+        const starts = self.far_forms.items;
+        // the last start before the field
+        var lo: usize = 0;
+        var hi: usize = starts.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (starts[mid] < field) lo = mid + 1 else hi = mid;
+        }
+        if (lo == 0) return null;
+        const at: usize = starts[lo - 1];
+        const op = opAt(self.code.items, at) orelse return null;
+        return if (at + op.distanceOperand() == field) at else null;
+    }
+
     // store a distance in the u16 operand at `field`, or in `far` when it
-    // doesn't fit
+    // doesn't fit (an instruction with a far form takes it)
     pub fn setDistance(self: *Chunk, allocator: std.mem.Allocator, field: usize, dist: usize) error{ OutOfMemory, TooFar }!void {
         if (dist > std.math.maxInt(u32)) return error.TooFar;
-        if (dist >= far_operand) {
+        const far = dist >= far_operand;
+        if (far) {
             try self.far.put(allocator, @intCast(field), @intCast(dist));
             std.mem.writeInt(u16, self.code.items[field..][0..2], far_operand, .big);
-            return;
+        } else {
+            // a field patched twice may have been far the first time
+            if (self.far.count() != 0) _ = self.far.remove(@intCast(field));
+            std.mem.writeInt(u16, self.code.items[field..][0..2], @intCast(dist), .big);
         }
-        // a field patched twice may have been far the first time
-        if (self.far.count() != 0) _ = self.far.remove(@intCast(field));
-        std.mem.writeInt(u16, self.code.items[field..][0..2], @intCast(dist), .big);
+        if (!far and self.far.count() == 0) return;
+        const at = self.farFormAt(field) orelse return;
+        const op = readOp(self.code.items, at).nearForm();
+        const form = if (far) op.farForm().? else op;
+        std.mem.writeInt(u16, self.code.items[at..][0..2], @backingInt(form), .little);
     }
 
     pub fn offset(self: *const Chunk) usize {
@@ -1449,4 +1544,39 @@ test "a distance too long for its operand goes to the far table" {
     try chunk.setDistance(alloc, 2, 12);
     try std.testing.expectEqual(@as(u32, 12), chunk.distanceAt(2));
     try std.testing.expect(!chunk.far.contains(2));
+}
+
+test "an instruction the fast loop runs takes its far form while its distance is far" {
+    const alloc = std.testing.allocator;
+    var chunk: Chunk = .{};
+    defer chunk.deinit(alloc);
+    // jump_if_false, then less_local_local_jif (its distance after two slots)
+    try chunk.noteFarForm(alloc, 0);
+    try chunk.code.appendSlice(alloc, &.{ 0, 0, 0, 0 });
+    std.mem.writeInt(u16, chunk.code.items[0..2], @backingInt(OpCode.jump_if_false), .little);
+    try chunk.noteFarForm(alloc, 4);
+    try chunk.code.appendSlice(alloc, &.{ 0, 0, 0, 1, 0, 2, 0, 0 });
+    std.mem.writeInt(u16, chunk.code.items[4..6], @backingInt(OpCode.less_local_local_jif), .little);
+    try chunk.setDistance(alloc, 2, 100000);
+    try std.testing.expectEqual(OpCode.jump_if_false_far, readOp(chunk.code.items, 0));
+    try std.testing.expectEqual(@as(u32, 100000), chunk.distanceAt(2));
+    try chunk.setDistance(alloc, 10, 0x10000);
+    try std.testing.expectEqual(OpCode.less_local_local_jif_far, readOp(chunk.code.items, 4));
+    // the slots are left alone
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, chunk.code.items[6..8], .big));
+    try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, chunk.code.items[8..10], .big));
+    try std.testing.expectEqual(OpCode.jump_if_false_far.width(), OpCode.jump_if_false.width());
+    try std.testing.expectEqual(OpCode.less_local_local_jif_far.width(), OpCode.less_local_local_jif.width());
+    // patched near again, the near form comes back
+    try chunk.setDistance(alloc, 2, 8);
+    try std.testing.expectEqual(OpCode.jump_if_false, readOp(chunk.code.items, 0));
+    try std.testing.expectEqual(@as(u32, 8), chunk.distanceAt(2));
+    // every far form is the same shape as its near form
+    for (std.enums.values(OpCode)) |op| {
+        if (op.farForm()) |far| {
+            try std.testing.expectEqual(op.width(), far.width());
+            try std.testing.expectEqual(op, far.nearForm());
+            try std.testing.expectEqual(op.stackEffect(), far.stackEffect());
+        }
+    }
 }

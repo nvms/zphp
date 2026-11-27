@@ -64,7 +64,9 @@ $code[] = 'function refs() { $p = 0; $q = 0; byref($p, ' . $huge . ', $q);'
     . ' $arr = [3, 1, 2]; array_splice($arr, 1, 1, ' . $huge . ');'
     . ' $vals = [1, 2, 3]; addAll(...$vals, ...' . $huge . ');'
     . ' $m = []; preg_match("/(b)(c)/", "abc" . implode(",", ' . $huge . '), $m);'
-    . ' return [$p, $q, count($arr), $arr[0], $arr[20000], $vals, $m]; }';
+    . ' $o = new stdClass(); $d = []; byref($o->p, ' . $huge . ', $d["k"]); byref($d["a"]["b"], ' . $huge . ', $o->{"q"});'
+    . ' $f = "byref"; $f($o->r, ' . $huge . ', $d["z"]);'
+    . ' return [$p, $q, count($arr), $arr[0], $arr[20000], $vals, $m, $o, $d]; }';
 
 // closures, generators and method calls placed past the first 64 KB
 $code[] = 'class Far { public $v = 5; function twice($x) { return $x * 2; } static function make() { return new self(); } }';

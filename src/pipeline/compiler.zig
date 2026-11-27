@@ -2908,6 +2908,8 @@ pub const Compiler = struct {
 
     pub fn buildSlotNames(self: *Compiler) Error![]const []const u8 {
         if (self.late_error) |err| return err;
+        // every distance is patched by now
+        self.chunk.far_forms.clearAndFree(self.allocator);
         if (self.next_slot == 0) return &.{};
         const names = try self.allocator.alloc([]const u8, self.next_slot);
         @memset(names, "");
@@ -3197,6 +3199,7 @@ pub const Compiler = struct {
     }
 
     pub fn emitJump(self: *Compiler, op: OpCode) Error!usize {
+        try self.noteFarForm(op);
         try self.emitOp(op);
         try self.emitU16(0xffff);
         return self.chunk.offset() - 2;
@@ -3218,10 +3221,17 @@ pub const Compiler = struct {
     }
 
     pub fn emitLoop(self: *Compiler, loop_start_val: usize) Error!void {
+        try self.noteFarForm(.jump_back);
         try self.emitOp(.jump_back);
         const field = self.chunk.offset();
         try self.emitU16(0);
         try self.setDistance(field, field + 2 - loop_start_val);
+    }
+
+    // the instruction about to be emitted takes its far form should its
+    // distance not fit (Chunk.setDistance)
+    pub fn noteFarForm(self: *Compiler, op: OpCode) Error!void {
+        if (op.farForm() != null) try self.chunk.noteFarForm(self.allocator, self.chunk.offset());
     }
 
     // a distance operand: past what u16 holds it goes to the chunk's far table

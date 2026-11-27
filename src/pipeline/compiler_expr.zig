@@ -1730,6 +1730,7 @@ pub const ArgPos = struct {
 const ArgGuard = struct { pos: u8, guards: *ArgGuards, by_value: bool = false };
 
 fn emitArgGuard(self: *Compiler, guard: ArgGuard, op: OpCode) Error!void {
+    try self.noteFarForm(op);
     try self.emitOp(op);
     try guard.guards.append(self.allocator, @intCast(self.chunk.offset()));
     try self.emitU16(0);
@@ -1818,6 +1819,7 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
         },
         .variable => {
             try self.compileNode(arg_idx);
+            try self.noteFarForm(.arg_variable);
             try self.emitOp(.arg_variable);
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(arg.main_token)) }));
             try guard.guards.append(self.allocator, @intCast(self.chunk.offset()));
@@ -1837,6 +1839,7 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
                     // it assigned
                     const node = self.ast.nodes[arg_idx];
                     if (node.tag == .assign and self.ast.nodes[node.data.lhs].tag == .variable) {
+                        try self.noteFarForm(.arg_variable);
                         try self.emitOp(.arg_variable);
                         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(self.ast.nodes[node.data.lhs].main_token)) }));
                         try guard.guards.append(self.allocator, @intCast(self.chunk.offset()));

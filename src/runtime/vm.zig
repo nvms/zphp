@@ -6959,11 +6959,11 @@ pub const VM = struct {
                     self.push(.{ .bool = !v.isTruthy() });
                 },
 
-                .jump => {
+                .jump, .jump_far => {
                     const offset = self.readDistance();
                     self.currentFrame().ip += offset;
                 },
-                .jump_back => {
+                .jump_back, .jump_back_far => {
                     const offset = self.readDistance();
                     // a timeout is reported at the jump, the loop's own line
                     try self.pollExecutionDeadline();
@@ -6978,7 +6978,7 @@ pub const VM = struct {
                         if (self.frame_count <= base_frame) return;
                     }
                 },
-                .jump_if_false => {
+                .jump_if_false, .jump_if_false_far => {
                     const offset = self.readDistance();
                     self.warnNanToBool(self.peek()) catch if (try self.resumeRaised()) continue;
                     if (!self.peek().isTruthy()) self.currentFrame().ip += offset;
@@ -7034,7 +7034,7 @@ pub const VM = struct {
                         frame.ip = start;
                     }
                 },
-                .jump_if_true => {
+                .jump_if_true, .jump_if_true_far => {
                     const offset = self.readDistance();
                     self.warnNanToBool(self.peek()) catch if (try self.resumeRaised()) continue;
                     if (self.peek().isTruthy()) self.currentFrame().ip += offset;
@@ -11930,7 +11930,7 @@ pub const VM = struct {
                         if (try self.fusedArith(frame_al, .{ .op = arith, .src = src_slot, .dst = dst_slot, .base_frame = base_frame })) continue;
                     }
                 },
-                .less_local_local_jif => {
+                .less_local_local_jif, .less_local_local_jif_far => {
                     const slot_a = self.readU16();
                     const slot_b = self.readU16();
                     const offset = self.readDistance();
@@ -14079,7 +14079,7 @@ pub const VM = struct {
                     self.push(.{ .object = obj });
                 },
 
-                .arg_variable => {
+                .arg_variable, .arg_variable_far => {
                     const name_idx = self.readU16();
                     const field = self.currentFrame().ip;
                     const delta = self.readDistance();
@@ -14154,7 +14154,7 @@ pub const VM = struct {
                     if (try self.throwBuiltinException("Error", "Cannot use temporary expression in write context")) continue;
                     return error.RuntimeError;
                 },
-                .arg_value, .arg_call_result => {
+                .arg_value, .arg_call_result, .arg_value_far, .arg_call_result_far => {
                     const field = self.currentFrame().ip;
                     const delta = self.readDistance();
                     const pos = self.readByte();
@@ -14178,7 +14178,7 @@ pub const VM = struct {
                         pos;
                     if (at_pos != pos and (self.callSiteByValue(chunk, call_ip, at_pos, args_base) orelse true)) continue;
                     if (std.ascii.eqlIgnoreCase(callee, "array_multisort") or std.ascii.eqlIgnoreCase(callee, "extract")) continue;
-                    if (op == .arg_call_result) {
+                    if (op.nearForm() == .arg_call_result) {
                         // SEND_VAR_NO_REF: a call that returned a reference
                         // passes it; any other result is a temporary the
                         // callee gets to itself, with php's notice
@@ -14230,11 +14230,11 @@ pub const VM = struct {
                     const raised = if (at_end) if (self.currentFrame().func) |f| self.raiseErrorAt(8, msg, .{ .file = f.file_path, .line = f.end_line }) else self.raiseError(8, msg) else self.raiseError(8, msg);
                     raised catch if (try self.resumeRaised()) continue;
                 },
-                .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => {
+                .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_guard_prop_far, .arg_guard_prop_dynamic_far, .arg_guard_dim_far => {
                     const field = self.currentFrame().ip;
                     const delta = self.readDistance();
                     const pos = self.readByte();
-                    const operands: usize = if (op == .arg_guard_prop) 1 else 2;
+                    const operands: usize = if (op.nearForm() == .arg_guard_prop) 1 else 2;
                     self.arg_capture_pending = self.argNeedsCapture(self.currentChunk(), field, delta, pos, operands);
                     self.arg_capture_call = field + delta;
                     self.arg_capture_pos = pos;
@@ -21819,7 +21819,7 @@ pub const VM = struct {
     fn nextArgIsByRef(self: *VM) bool {
         const frame = self.currentFrame();
         const code = frame.chunk.code.items;
-        if (!bytecode.opIs(code, frame.ip, .arg_variable)) return false;
+        if (!bytecode.opIs(code, frame.ip, .arg_variable) and !bytecode.opIs(code, frame.ip, .arg_variable_far)) return false;
         const field = frame.ip + bytecode.op_bytes + 2;
         if (field + 2 >= code.len) return false;
         const delta = frame.chunk.distanceAt(field);
@@ -27175,7 +27175,7 @@ pub const VM = struct {
         while (ip < call_ip and ip < code.len) {
             const op = bytecode.opAt(code, ip) orelse return false;
             switch (op) {
-                .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => {
+                .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_guard_prop_far, .arg_guard_prop_dynamic_far, .arg_guard_dim_far => {
                     const field = ip + bytecode.op_bytes;
                     const delta = chunk.distanceAt(field);
                     if (field + delta == call_ip and code[field + 2] == pos) return true;

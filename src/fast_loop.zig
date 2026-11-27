@@ -237,7 +237,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     };
                     sp -= 1;
                     stack[sp - 1] = .{ .bool = compared };
-                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, frame.chunk, &ip, &sp, compared);
+                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
                     const _next = readOp(code, ip);
                     ip += op_bytes;
                     continue :dispatch _next;
@@ -261,7 +261,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 1;
                     const compared = if (byte_eq == .equal) same else !same;
                     stack[sp - 1] = .{ .bool = compared };
-                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, frame.chunk, &ip, &sp, compared);
+                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
                     const _next = readOp(code, ip);
                     ip += op_bytes;
                     continue :dispatch _next;
@@ -281,7 +281,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const compared = Value.identical(a_id, b_id);
                     stack[sp] = .{ .bool = compared };
                     sp += 1;
-                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, frame.chunk, &ip, &sp, compared);
+                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
                     const _next = readOp(code, ip);
                     ip += op_bytes;
                     continue :dispatch _next;
@@ -301,7 +301,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const compared = !Value.identical(a_ni, b_ni);
                     stack[sp] = .{ .bool = compared };
                     sp += 1;
-                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, frame.chunk, &ip, &sp, compared);
+                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
                     const _next = readOp(code, ip);
                     ip += op_bytes;
                     continue :dispatch _next;
@@ -421,7 +421,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     continue :dispatch _next;
                 },
                 .jump_back => {
-                    const offset = distanceAt(frame.chunk, code, ip);
+                    const offset = distanceAt(code, ip);
                     ip += 2;
                     // a timeout is reported at the jump, the loop's own line;
                     // fastLoop owns its ip, so flush it for the exception
@@ -455,7 +455,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 },
                 .jump_if_false => {
                     if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
-                    const offset = distanceAt(frame.chunk, code, ip);
+                    const offset = distanceAt(code, ip);
                     ip += 2;
                     if (!isTruthyAt(&stack[sp - 1])) {
                         ip += offset;
@@ -478,7 +478,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 },
                 .jump_if_true => {
                     if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
-                    const offset = distanceAt(frame.chunk, code, ip);
+                    const offset = distanceAt(code, ip);
                     ip += 2;
                     if (isTruthyAt(&stack[sp - 1])) {
                         ip += offset;
@@ -500,7 +500,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     continue :dispatch _next;
                 },
                 .jump => {
-                    const offset = distanceAt(frame.chunk, code, ip);
+                    const offset = distanceAt(code, ip);
                     ip += 2;
                     ip += offset;
                     const _next = readOp(code, ip);
@@ -1670,7 +1670,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     const slot_a = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     const slot_b = (@as(u16, code[ip + 2]) << 8) | code[ip + 3];
-                    const offset = distanceAt(frame.chunk, code, ip + 4);
+                    const offset = distanceAt(code, ip + 4);
                     ip += 6;
                     const a = locals[slot_a];
                     const b = locals[slot_b];
@@ -1760,7 +1760,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .arg_variable => {
                     const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     const field = ip + 2;
-                    const delta = distanceAt(frame.chunk, code, ip + 2);
+                    const delta = distanceAt(code, ip + 2);
                     const pos = code[ip + 4];
                     self.sp = sp;
                     const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse {
@@ -1779,7 +1779,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 // one, so the operand count is fixed per arm
                 .arg_guard_prop => {
                     const field = ip;
-                    const delta = distanceAt(frame.chunk, code, ip);
+                    const delta = distanceAt(code, ip);
                     const pos = code[ip + 2];
                     self.sp = sp;
                     const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse true;
@@ -1796,7 +1796,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 // reference: by value there is nothing to do
                 .arg_value, .arg_call_result => {
                     const field = ip;
-                    const delta = distanceAt(frame.chunk, code, ip);
+                    const delta = distanceAt(code, ip);
                     const pos = code[ip + 2];
                     self.sp = sp;
                     const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse true;
@@ -1811,7 +1811,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 },
                 .arg_guard_prop_dynamic, .arg_guard_dim => {
                     const field = ip;
-                    const delta = distanceAt(frame.chunk, code, ip);
+                    const delta = distanceAt(code, ip);
                     const pos = code[ip + 2];
                     self.sp = sp;
                     const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 2) orelse true;
@@ -2080,20 +2080,14 @@ inline fn isOpAt(code: []const u8, at: usize, op: OpCode) bool {
 
 // a comparison followed by jump_if_false branches on the result it holds,
 // as jump_if_false would, without reading the bool back from the stack
-// Chunk.distanceAt from the code slice the loop holds: a far distance is the
-// rare case
-inline fn distanceAt(chunk: *const bytecode.Chunk, code: []const u8, field: usize) u32 {
-    const raw = std.mem.readInt(u16, code[field..][0..2], .big);
-    if (raw != bytecode.far_operand) {
-        @branchHint(.likely);
-        return raw;
-    }
-    return chunk.farDistance(field);
+// a distance operand of a near form: one too long for it made the
+// instruction its far form (OpCode.farForm), which this loop leaves to runLoop
+inline fn distanceAt(code: []const u8, field: usize) u16 {
+    return std.mem.readInt(u16, code[field..][0..2], .big);
 }
 
-inline fn fuseJumpIfFalse(self: *VM, ic: *InlineCache, chunk: *const bytecode.Chunk, ip: *usize, sp: *usize, result: bool) void {
-    const code = chunk.code.items;
-    const offset = distanceAt(chunk, code, ip.* + op_bytes);
+inline fn fuseJumpIfFalse(self: *VM, ic: *InlineCache, code: []const u8, ip: *usize, sp: *usize, result: bool) void {
+    const offset = distanceAt(code, ip.* + op_bytes);
     ip.* += op_bytes + 2;
     if (!result) {
         ip.* += offset;

@@ -181,6 +181,7 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     var exit_jump: ?usize = null;
     if (cond_n != 0) {
         if (cond_super) |cs| {
+            try self.noteFarForm(.less_local_local_jif);
             try self.emitOp(.less_local_local_jif);
             try self.emitU16(cs.slot_a);
             try self.emitU16(cs.slot_b);
