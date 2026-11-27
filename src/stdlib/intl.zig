@@ -1422,6 +1422,7 @@ fn intlWrapFailing(comptime inner: NativeFn, comptime failure: Value) NativeFn {
     return struct {
         fn wrapped(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
             ctx.vm.last_intl_error_code = 0;
+            ctx.vm.last_intl_error_msg = "";
             return inner(ctx, args) catch |err| {
                 if (!ctx.input_rejected or ctx.vm.pending_exception != null) return err;
                 ctx.input_rejected = false;
@@ -1433,6 +1434,7 @@ fn intlWrapFailing(comptime inner: NativeFn, comptime failure: Value) NativeFn {
 
 pub fn intlRecord(vm: *@import("../runtime/vm.zig").VM, status: UErrorCode) bool {
     vm.last_intl_error_code = @intCast(status);
+    vm.last_intl_error_msg = "";
     return status > U_ZERO_ERROR;
 }
 
@@ -1473,8 +1475,17 @@ fn errorNameForCode(code: i32) []const u8 {
     };
 }
 
+// intl_error_get_message: the custom message a function set, then the name
 fn intlGetErrorMessage(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return try NativeResult.copyString(ctx.allocator, errorNameForCode(ctx.vm.last_intl_error_code));
+    const name = errorNameForCode(ctx.vm.last_intl_error_code);
+    if (ctx.vm.last_intl_error_msg.len == 0) return try NativeResult.copyString(ctx.allocator, name);
+    const func = ctx.vm.last_intl_error_fn;
+    const text = if (func.len > 0)
+        try std.fmt.allocPrint(ctx.allocator, "{s}(): {s}: {s}", .{ func, ctx.vm.last_intl_error_msg, name })
+    else
+        try std.fmt.allocPrint(ctx.allocator, "{s}: {s}", .{ ctx.vm.last_intl_error_msg, name });
+    defer ctx.allocator.free(text);
+    return try NativeResult.copyString(ctx.allocator, text);
 }
 
 fn intlGetErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -2074,166 +2085,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try registerMessageFormatterClass(vm, a);
     try registerIntlCalendarClass(vm, a);
     try registerBreakIteratorClass(vm, a);
-    try registerIntlCharStub(vm, a);
+    try @import("intlchar.zig").register(vm, a);
     try registerConstants(vm, a);
-}
-
-fn registerIntlCharStub(vm: *VM, a: Allocator) !void {
-    // small subset of IntlChar's utility methods (ord/chr + the common
-    // category predicates). full ICU UChar database integration is much
-    // bigger but these covers what most apps actually use
-    var def = ClassDef{ .name = "IntlChar" };
-    inline for (.{ "ord", "chr", "isalpha", "isdigit", "isalnum", "isupper", "islower", "isspace", "iscntrl", "ispunct", "isgraph", "isprint", "isxdigit", "isblank", "tolower", "toupper" }) |m| {
-        try def.methods.put(a, m, .{ .name = m, .arity = 1, .is_static = true });
-    }
-    try def.methods.put(a, "getUnicodeVersion", .{ .name = "getUnicodeVersion", .arity = 0, .is_static = true });
-    try vm.classes.put(a, "IntlChar", def);
-    try vm.native_fns.put(a, "IntlChar::ord", intlCharOrd);
-    try vm.native_fns.put(a, "IntlChar::chr", intlCharChr);
-    try vm.native_fns.put(a, "IntlChar::isalpha", intlCharIsalpha);
-    try vm.native_fns.put(a, "IntlChar::isdigit", intlCharIsdigit);
-    try vm.native_fns.put(a, "IntlChar::isalnum", intlCharIsalnum);
-    try vm.native_fns.put(a, "IntlChar::isupper", intlCharIsupper);
-    try vm.native_fns.put(a, "IntlChar::islower", intlCharIslower);
-    try vm.native_fns.put(a, "IntlChar::isspace", intlCharIsspace);
-    try vm.native_fns.put(a, "IntlChar::iscntrl", intlCharIscntrl);
-    try vm.native_fns.put(a, "IntlChar::ispunct", intlCharIspunct);
-    try vm.native_fns.put(a, "IntlChar::isgraph", intlCharIsgraph);
-    try vm.native_fns.put(a, "IntlChar::isprint", intlCharIsprint);
-    try vm.native_fns.put(a, "IntlChar::isxdigit", intlCharIsxdigit);
-    try vm.native_fns.put(a, "IntlChar::isblank", intlCharIsblank);
-    try vm.native_fns.put(a, "IntlChar::tolower", intlCharTolower);
-    try vm.native_fns.put(a, "IntlChar::toupper", intlCharToupper);
-    try vm.native_fns.put(a, "IntlChar::getUnicodeVersion", intlCharGetUnicodeVersion);
-}
-
-fn intlCharGetUnicodeVersion(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const arr = try ctx.createArray();
-    for ([_]i64{ 17, 0, 0, 0 }) |part| try arr.append(ctx.allocator, .{ .int = part });
-    return NativeResult.borrowed(.{ .array = arr });
-}
-
-// decode the first UTF-8 codepoint of a string, or accept an int directly.
-// returns null on empty/invalid input. matches PHP's IntlChar input rules
-fn intlCharCodepoint(v: Value) ?u32 {
-    if (v == .int) {
-        if (v.int < 0 or v.int > 0x10ffff) return null;
-        return @intCast(v.int);
-    }
-    if (v != .string or v.string.bytes().len == 0) return null;
-    const s = v.string.bytes();
-    const len = std.unicode.utf8ByteSequenceLength(s[0]) catch return null;
-    if (len > s.len) return null;
-    return std.unicode.utf8Decode(s[0..len]) catch null;
-}
-
-fn intlCharOrd(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const cp = intlCharCodepoint(args[0]) orelse return NativeResult.scalar(.null);
-    return NativeResult.scalar(.{ .int = @intCast(cp) });
-}
-
-fn intlCharChr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const cp = intlCharCodepoint(args[0]) orelse return NativeResult.scalar(.null);
-    var buf: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(@intCast(cp), &buf) catch return NativeResult.scalar(.null);
-    const owned = try ctx.allocator.dupe(u8, buf[0..n]);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));
-}
-
-fn intlBoolPredicate(args: []const Value, comptime pred: fn (u32) bool) Value {
-    if (args.len == 0) return .{ .bool = false };
-    const cp = intlCharCodepoint(args[0]) orelse return .{ .bool = false };
-    return .{ .bool = pred(cp) };
-}
-
-fn isAlphaCp(cp: u32) bool {
-    return (cp >= 'A' and cp <= 'Z') or (cp >= 'a' and cp <= 'z') or cp >= 0x80;
-}
-fn isDigitCp(cp: u32) bool {
-    return cp >= '0' and cp <= '9';
-}
-fn isAlnumCp(cp: u32) bool {
-    return isAlphaCp(cp) or isDigitCp(cp);
-}
-fn isUpperCp(cp: u32) bool {
-    return cp >= 'A' and cp <= 'Z';
-}
-fn isLowerCp(cp: u32) bool {
-    return cp >= 'a' and cp <= 'z';
-}
-fn isSpaceCp(cp: u32) bool {
-    return cp == ' ' or cp == '\t' or cp == '\n' or cp == '\r' or cp == 0x0b or cp == 0x0c or cp == 0xa0 or cp == 0x1680 or (cp >= 0x2000 and cp <= 0x200a) or cp == 0x2028 or cp == 0x2029 or cp == 0x202f or cp == 0x205f or cp == 0x3000;
-}
-fn isCntrlCp(cp: u32) bool {
-    return cp < 0x20 or cp == 0x7f or (cp >= 0x80 and cp < 0xa0);
-}
-fn isBlankCp(cp: u32) bool {
-    return cp == ' ' or cp == '\t';
-}
-fn isPunctCp(cp: u32) bool {
-    return (cp >= 0x21 and cp <= 0x2f) or (cp >= 0x3a and cp <= 0x40) or (cp >= 0x5b and cp <= 0x60) or (cp >= 0x7b and cp <= 0x7e);
-}
-fn isGraphCp(cp: u32) bool {
-    return cp > 0x20 and cp != 0x7f and !isCntrlCp(cp);
-}
-fn isPrintCp(cp: u32) bool {
-    return isGraphCp(cp) or cp == ' ';
-}
-fn isXDigitCp(cp: u32) bool {
-    return isDigitCp(cp) or (cp >= 'a' and cp <= 'f') or (cp >= 'A' and cp <= 'F');
-}
-
-fn intlCharIsalpha(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isAlphaCp));
-}
-fn intlCharIsdigit(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isDigitCp));
-}
-fn intlCharIsalnum(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isAlnumCp));
-}
-fn intlCharIsupper(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isUpperCp));
-}
-fn intlCharIslower(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isLowerCp));
-}
-fn intlCharIsspace(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isSpaceCp));
-}
-fn intlCharIscntrl(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isCntrlCp));
-}
-fn intlCharIsblank(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isBlankCp));
-}
-fn intlCharIspunct(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isPunctCp));
-}
-fn intlCharIsgraph(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isGraphCp));
-}
-fn intlCharIsprint(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isPrintCp));
-}
-fn intlCharIsxdigit(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(intlBoolPredicate(args, isXDigitCp));
-}
-
-fn intlCharTolower(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const cp = intlCharCodepoint(args[0]) orelse return NativeResult.scalar(.null);
-    const out: u32 = if (cp >= 'A' and cp <= 'Z') cp + 32 else cp;
-    return NativeResult.scalar(.{ .int = @intCast(out) });
-}
-
-fn intlCharToupper(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const cp = intlCharCodepoint(args[0]) orelse return NativeResult.scalar(.null);
-    const out: u32 = if (cp >= 'a' and cp <= 'z') cp - 32 else cp;
-    return NativeResult.scalar(.{ .int = @intCast(out) });
 }
 
 fn registerBreakIteratorClass(vm: *VM, a: Allocator) !void {

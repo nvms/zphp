@@ -358,3 +358,112 @@ int32_t zphp_ubrk_getLocaleByType(zphp_brk* w, ULocDataLocaleType ltype, char* b
     buf[n] = 0;
     return (int32_t)n;
 }
+
+/* ----- IntlChar (unicode/uchar.h) ----- */
+
+#include <unicode/uchar.h>
+
+struct zphp_intlchar_constant {
+    const char* name;
+    int kind;
+    int64_t int_value;
+    double float_value;
+    const char* string_value;
+};
+
+#include "intlchar_constants_generated.h"
+
+const struct zphp_intlchar_constant* zphp_intlchar_constant_at(size_t i) {
+    if (i >= sizeof(zphp_intlchar_constants) / sizeof(zphp_intlchar_constants[0])) return NULL;
+    return &zphp_intlchar_constants[i];
+}
+
+UBool zphp_u_hasBinaryProperty(UChar32 c, int32_t which) { return u_hasBinaryProperty(c, (UProperty)which); }
+int32_t zphp_u_getIntPropertyValue(UChar32 c, int32_t which) { return u_getIntPropertyValue(c, (UProperty)which); }
+int32_t zphp_u_getIntPropertyMinValue(int32_t which) { return u_getIntPropertyMinValue((UProperty)which); }
+int32_t zphp_u_getIntPropertyMaxValue(int32_t which) { return u_getIntPropertyMaxValue((UProperty)which); }
+double zphp_u_getNumericValue(UChar32 c) { return u_getNumericValue(c); }
+int32_t zphp_ublock_getCode(UChar32 c) { return (int32_t)ublock_getCode(c); }
+
+typedef UBool (*zphp_char_types_fn)(void* context, int32_t start, int32_t limit, int32_t type);
+struct zphp_char_types_ctx { zphp_char_types_fn fn; void* context; };
+static UBool zphp_char_types_trampoline(const void* context, UChar32 start, UChar32 limit, UCharCategory type) {
+    const struct zphp_char_types_ctx* c = (const struct zphp_char_types_ctx*)context;
+    return c->fn(c->context, start, limit, (int32_t)type);
+}
+void zphp_u_enumCharTypes(zphp_char_types_fn fn, void* context) {
+    struct zphp_char_types_ctx c = { fn, context };
+    u_enumCharTypes(zphp_char_types_trampoline, &c);
+}
+
+int32_t zphp_u_charName(UChar32 code, int32_t choice, char* buffer, int32_t cap, UErrorCode* err) {
+    return u_charName(code, (UCharNameChoice)choice, buffer, cap, err);
+}
+UChar32 zphp_u_charFromName(int32_t choice, const char* name, UErrorCode* err) {
+    return u_charFromName((UCharNameChoice)choice, name, err);
+}
+
+typedef UBool (*zphp_char_names_fn)(void* context, int32_t code, int32_t choice, const char* name, int32_t length);
+struct zphp_char_names_ctx { zphp_char_names_fn fn; void* context; };
+static UBool zphp_char_names_trampoline(void* context, UChar32 code, UCharNameChoice choice, const char* name, int32_t length) {
+    struct zphp_char_names_ctx* c = (struct zphp_char_names_ctx*)context;
+    return c->fn(c->context, code, (int32_t)choice, name, length);
+}
+void zphp_u_enumCharNames(UChar32 start, UChar32 limit, zphp_char_names_fn fn, void* context, int32_t choice, UErrorCode* err) {
+    struct zphp_char_names_ctx c = { fn, context };
+    u_enumCharNames(start, limit, zphp_char_names_trampoline, &c, (UCharNameChoice)choice, err);
+}
+
+const char* zphp_u_getPropertyName(int32_t property, int32_t choice) { return u_getPropertyName((UProperty)property, (UPropertyNameChoice)choice); }
+int32_t zphp_u_getPropertyEnum(const char* alias) { return (int32_t)u_getPropertyEnum(alias); }
+const char* zphp_u_getPropertyValueName(int32_t property, int32_t value, int32_t choice) {
+    return u_getPropertyValueName((UProperty)property, value, (UPropertyNameChoice)choice);
+}
+int32_t zphp_u_getPropertyValueEnum(int32_t property, const char* alias) { return u_getPropertyValueEnum((UProperty)property, alias); }
+UChar32 zphp_u_foldCase(UChar32 c, uint32_t options) { return u_foldCase(c, options); }
+int32_t zphp_u_digit(UChar32 c, int8_t radix) { return u_digit(c, radix); }
+UChar32 zphp_u_forDigit(int32_t digit, int8_t radix) { return u_forDigit(digit, radix); }
+void zphp_u_charAge(UChar32 c, uint8_t* version) { u_charAge(c, version); }
+void zphp_u_getUnicodeVersion(uint8_t* version) { u_getUnicodeVersion(version); }
+int32_t zphp_u_getFC_NFKC_Closure(UChar32 c, UChar* dest, int32_t cap, UErrorCode* err) { return u_getFC_NFKC_Closure(c, dest, cap, err); }
+
+#define ZPHP_UCHAR_BOOL(name) UBool zphp_u_##name(UChar32 c) { return u_##name(c); }
+ZPHP_UCHAR_BOOL(isUAlphabetic)
+ZPHP_UCHAR_BOOL(isULowercase)
+ZPHP_UCHAR_BOOL(isUUppercase)
+ZPHP_UCHAR_BOOL(isUWhiteSpace)
+ZPHP_UCHAR_BOOL(islower)
+ZPHP_UCHAR_BOOL(isupper)
+ZPHP_UCHAR_BOOL(istitle)
+ZPHP_UCHAR_BOOL(isdigit)
+ZPHP_UCHAR_BOOL(isalpha)
+ZPHP_UCHAR_BOOL(isalnum)
+ZPHP_UCHAR_BOOL(isxdigit)
+ZPHP_UCHAR_BOOL(ispunct)
+ZPHP_UCHAR_BOOL(isgraph)
+ZPHP_UCHAR_BOOL(isblank)
+ZPHP_UCHAR_BOOL(isdefined)
+ZPHP_UCHAR_BOOL(isspace)
+ZPHP_UCHAR_BOOL(isJavaSpaceChar)
+ZPHP_UCHAR_BOOL(isWhitespace)
+ZPHP_UCHAR_BOOL(iscntrl)
+ZPHP_UCHAR_BOOL(isISOControl)
+ZPHP_UCHAR_BOOL(isprint)
+ZPHP_UCHAR_BOOL(isbase)
+ZPHP_UCHAR_BOOL(isMirrored)
+ZPHP_UCHAR_BOOL(isIDStart)
+ZPHP_UCHAR_BOOL(isIDPart)
+ZPHP_UCHAR_BOOL(isIDIgnorable)
+ZPHP_UCHAR_BOOL(isJavaIDStart)
+ZPHP_UCHAR_BOOL(isJavaIDPart)
+#undef ZPHP_UCHAR_BOOL
+
+int32_t zphp_u_charDirection(UChar32 c) { return (int32_t)u_charDirection(c); }
+int32_t zphp_u_charType(UChar32 c) { return (int32_t)u_charType(c); }
+int32_t zphp_u_getCombiningClass(UChar32 c) { return (int32_t)u_getCombiningClass(c); }
+int32_t zphp_u_charDigitValue(UChar32 c) { return u_charDigitValue(c); }
+UChar32 zphp_u_charMirror(UChar32 c) { return u_charMirror(c); }
+UChar32 zphp_u_tolower(UChar32 c) { return u_tolower(c); }
+UChar32 zphp_u_toupper(UChar32 c) { return u_toupper(c); }
+UChar32 zphp_u_totitle(UChar32 c) { return u_totitle(c); }
+UChar32 zphp_u_getBidiPairedBracket(UChar32 c) { return u_getBidiPairedBracket(c); }

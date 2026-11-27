@@ -60,6 +60,10 @@ php-method-order: ## Regenerate the declaration order of internal classes' metho
 php-deprecations: ## Regenerate the internal functions, methods and constants php marks #[\Deprecated], from the php release's stubs (run when src/php_version.zig moves)
 	python3 scripts/gen-php-deprecations
 
+.PHONY: php-intlchar
+php-intlchar: ## Regenerate IntlChar's class constants from the php release's ext/intl/uchar/uchar_arginfo.h (run when src/php_version.zig moves)
+	python3 scripts/gen-intlchar-constants
+
 .PHONY: mb-encodings
 mb-encodings: ## Regenerate mbstring's encoding names, MIME names and aliases from a php with mbstring
 	python3 scripts/gen-mb-encodings

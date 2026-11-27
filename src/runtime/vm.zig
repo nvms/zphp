@@ -1743,6 +1743,10 @@ pub const VM = struct {
     // to each intl call (except intl_get_error_*/intl_is_failure/intl_error_name)
     // and bumped to the failing status when an op fails
     last_intl_error_code: i32 = 0,
+    // intl_error_set_custom_msg's text (static), shown before the code's name
+    last_intl_error_msg: []const u8 = "",
+    // the function that set it, named before it (static)
+    last_intl_error_fn: []const u8 = "",
     // the slot_names of the top script frame (frame[0]). global_slot_names
     // is temporarily overridden during require/include to point at the inner
     // file's slot_names; writebacks to frame[0]'s locals must use the top
@@ -4643,6 +4647,7 @@ pub const VM = struct {
         self.clearLastError();
         self.last_dt.deinit(self.allocator);
         self.last_intl_error_code = 0;
+        self.last_intl_error_msg = "";
         self.exit_code = 0;
         self.statics.clearRetainingCapacity();
         self.statics_cells.clearRetainingCapacity();
