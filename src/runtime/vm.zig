@@ -22636,6 +22636,9 @@ pub const VM = struct {
             defer self.allocator.free(msg);
             try self.raiseErrorAt(E_DEPRECATED, msg, .{ .file = def.file_path, .line = def.start_line });
         }
+        // an error handler that threw during the checks left the class
+        // declared: its exception is thrown now
+        if (self.pending_exception != null) return error.RuntimeError;
     }
 
     fn hasOverrideAttribute(attrs: []const AttributeDef) bool {

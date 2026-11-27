@@ -447,7 +447,11 @@ fn checkMethodWith(p: *Pending, arena: std.mem.Allocator, child: Method, parent:
         .failure => return fatal(vm, child, "Declaration of {s} must be compatible with {s}", .{ try declaration(p, arena, child), try declaration(p, arena, parent) }),
         .warning => if (!hasReturnTypeWillChange(p, child)) {
             const msg = try std.fmt.allocPrint(arena, "Return type of {s} should either be compatible with {s}, or the #[\\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice", .{ try declaration(p, arena, child), try declaration(p, arena, parent) });
-            try vm.raiseErrorAt(VM.E_DEPRECATED, msg, .{ .file = if (child.file.len > 0) child.file else vm.currentSourcePosition().file, .line = child.line });
+            // an error handler's exception leaves the class to link: it is
+            // thrown once the declaration is done
+            vm.raiseErrorAt(VM.E_DEPRECATED, msg, .{ .file = if (child.file.len > 0) child.file else vm.currentSourcePosition().file, .line = child.line }) catch |err| {
+                if (err != error.RuntimeError or vm.pending_exception == null or vm.uncatchable_fatal) return err;
+            };
         },
         .unresolved => {
             // a class it needs may still load: checked again once the class
