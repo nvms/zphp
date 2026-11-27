@@ -143,7 +143,11 @@ fn buildRootWrapper(ctx: *NativeContext, doc: *c.xmlDoc, node: *c.xmlNode) !*Php
 const IterMode = enum { siblings, children };
 
 fn buildWrapperMode(ctx: *NativeContext, doc: *c.xmlDoc, node: *c.xmlNode, mode: IterMode) !*PhpObject {
-    const obj = try ctx.createObject("SimpleXMLElement");
+    return buildWrapperOf(ctx, "SimpleXMLElement", doc, node, mode);
+}
+
+fn buildWrapperOf(ctx: *NativeContext, class: []const u8, doc: *c.xmlDoc, node: *c.xmlNode, mode: IterMode) !*PhpObject {
+    const obj = try ctx.createObject(class);
     try obj.set(ctx.allocator, "__is_attr", .{ .bool = false });
     try obj.set(ctx.allocator, "__iter_children", .{ .bool = mode == .children });
     try setHandle(obj, doc, node);
@@ -151,7 +155,11 @@ fn buildWrapperMode(ctx: *NativeContext, doc: *c.xmlDoc, node: *c.xmlNode, mode:
 }
 
 fn buildAttrWrapper(ctx: *NativeContext, doc: *c.xmlDoc, owner: *c.xmlNode, attr_name: []const u8) !*PhpObject {
-    const obj = try ctx.createObject("SimpleXMLElement");
+    return buildAttrWrapperOf(ctx, "SimpleXMLElement", doc, owner, attr_name);
+}
+
+fn buildAttrWrapperOf(ctx: *NativeContext, class: []const u8, doc: *c.xmlDoc, owner: *c.xmlNode, attr_name: []const u8) !*PhpObject {
+    const obj = try ctx.createObject(class);
     try obj.set(ctx.allocator, "__is_attr", .{ .bool = true });
     try obj.setCopiedString(ctx.allocator, "__attr_name", attr_name);
     try setHandle(obj, doc, owner);
@@ -953,73 +961,6 @@ fn sxmlOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     return NativeResult.scalar(.null);
 }
 
-// iterator support: walks same-named siblings starting from this node,
-// or all children if used as `foreach ($root as $k => $v)`
-fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
-    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
-
-    // attribute view still uses the ArrayIterator path because attribute names
-    // are unique per element (so dedup in a PhpArray is harmless and the
-    // existing iter contract is what userland expects)
-    if (obj.get("__attr_view") == .bool and obj.get("__attr_view").bool) {
-        const ns_v = obj.get("__ns");
-        const ns_filter: ?[]const u8 = if (ns_v == .string) ns_v.string.bytes() else null;
-        const arr = try ctx.createArray();
-        var attr = node.properties;
-        while (attr != null) : (attr = attr.*.next) {
-            if (attr.*.name == null) continue;
-            if (ns_filter) |ns| {
-                const has_ns = attr.*.ns != null and attr.*.ns.*.href != null;
-                if (ns.len == 0 and has_ns) continue;
-                if (ns.len > 0) {
-                    if (!has_ns) continue;
-                    const href = attr.*.ns.*.href;
-                    if (!std.mem.eql(u8, href[0..cstrLen(href)], ns)) continue;
-                }
-            }
-            const an = attr.*.name[0..cstrLen(attr.*.name)];
-            const wrapped_obj = try buildAttrWrapper(ctx, doc, node, an);
-            // remember which namespace the attr was sourced from so __toString
-            // can resolve via xmlGetNsProp instead of xmlGetProp
-            if (attr.*.ns != null and attr.*.ns.*.href != null) {
-                const href = attr.*.ns.*.href;
-                try wrapped_obj.setCopiedString(ctx.allocator, "__attr_ns", href[0..cstrLen(href)]);
-            }
-            try arr.set(ctx.allocator, .{ .string = try dupString(ctx, an) }, .{ .object = wrapped_obj });
-        }
-        const iter_obj = try ctx.createObject("ArrayIterator");
-        try iter_obj.set(ctx.allocator, "__data", .{ .array = arr });
-        try iter_obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-        try iter_obj.set(ctx.allocator, "__flags", .{ .int = 0 });
-        return NativeResult.borrowed(.{ .object = iter_obj });
-    }
-
-    // children / sibling iteration uses a custom xml-tree walker so duplicate-
-    // name children each get their own (name, child) pair in foreach
-    const iter_obj = try ctx.createObject("SimpleXMLChildrenIter");
-    // forward namespace filter from the wrapper to the iter so sxiAcceptable
-    // can drop nodes outside the requested namespace
-    const fwd_ns = obj.get("__ns");
-    if (fwd_ns == .string) try iter_obj.set(ctx.allocator, "__ns", .{ .string = fwd_ns.string });
-    if (obj.get("__iter_children") == .bool and obj.get("__iter_children").bool) {
-        // start from the node's first child
-        try iter_obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("children") });
-        try setHandle(iter_obj, doc, node);
-    } else {
-        // sibling mode: start from $this and only emit same-named siblings
-        if (node.name == null) {
-            try setHandle(iter_obj, doc, null);
-            return NativeResult.borrowed(.{ .object = iter_obj });
-        }
-        try iter_obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("siblings") });
-        try iter_obj.setCopiedString(ctx.allocator, "__same_name", node.name[0..cstrLen(node.name)]);
-        try setHandle(iter_obj, doc, node);
-    }
-    return NativeResult.borrowed(.{ .object = iter_obj });
-}
-
 // match_ns without a prefix: no filter (children() and attributes() without
 // a namespace) takes nodes outside any prefixed namespace
 fn matchNs(ns: ?*c.xmlNs, filter: ?[]const u8) bool {
@@ -1075,10 +1016,11 @@ fn castObject(obj: *PhpObject, target: @import("../runtime/value.zig").NumericCa
 
 pub fn register(vm: *VM, a: Allocator) !void {
     var def = ClassDef{ .name = "SimpleXMLElement", .native_clone = cloneHandle, .native_cleanup = cleanupWrapper, .native_cast = castObject };
-    try def.interfaces.append(a, "Countable");
-    try def.interfaces.append(a, "IteratorAggregate");
-    try def.interfaces.append(a, "ArrayAccess");
+    // php's dimension handlers are the offset methods below, which no stub
+    // declares, so listings and method_exists() leave them out
     try def.interfaces.append(a, "Stringable");
+    try def.interfaces.append(a, "Countable");
+    try def.interfaces.append(a, "RecursiveIterator");
     try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try def.methods.put(a, "asXML", .{ .name = "asXML", .arity = 0 });
@@ -1096,7 +1038,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
     try def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
-    try def.methods.put(a, "getIterator", .{ .name = "getIterator", .arity = 0 });
+    inline for (.{ "rewind", "valid", "current", "key", "next", "hasChildren", "getChildren" }) |m| {
+        try def.methods.put(a, m, .{ .name = m, .arity = 0 });
+    }
     try def.methods.put(a, "offsetGet", .{ .name = "offsetGet", .arity = 1 });
     try def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
     try def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
@@ -1120,81 +1064,143 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SimpleXMLElement::__get", sxmlGet);
     try vm.native_fns.put(a, "SimpleXMLElement::__set", sxmlSet);
     try vm.native_fns.put(a, "SimpleXMLElement::__isset", sxmlIsset);
-    try vm.native_fns.put(a, "SimpleXMLElement::getIterator", sxmlGetIterator);
+    try vm.native_fns.put(a, "SimpleXMLElement::rewind", sxeRewind);
+    try vm.native_fns.put(a, "SimpleXMLElement::valid", sxeValid);
+    try vm.native_fns.put(a, "SimpleXMLElement::current", sxeCurrent);
+    try vm.native_fns.put(a, "SimpleXMLElement::key", sxeKey);
+    try vm.native_fns.put(a, "SimpleXMLElement::next", sxeNext);
+    try vm.native_fns.put(a, "SimpleXMLElement::hasChildren", sxeHasChildren);
+    try vm.native_fns.put(a, "SimpleXMLElement::getChildren", sxeGetChildren);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetGet", sxmlOffsetGet);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetSet", sxmlOffsetSet);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetExists", sxmlOffsetExists);
     try vm.native_fns.put(a, "SimpleXMLElement::offsetUnset", sxmlOffsetUnset);
 
-    // SimpleXMLChildrenIter - a dedicated iterator that walks xml children/
-    // siblings without going through a deduplicating PhpArray, so duplicate-
-    // name siblings (multiple <a> under a parent) each get their own iteration
-    // step and the foreach key is the actual element name
-    var iter_def = ClassDef{ .name = "SimpleXMLChildrenIter", .native_cleanup = cleanupWrapper };
-    try iter_def.interfaces.append(a, "Iterator");
-    try iter_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
-    try iter_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
-    try iter_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
-    try iter_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
-    try iter_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
-    try vm.classes.put(a, "SimpleXMLChildrenIter", iter_def);
-    try vm.native_fns.put(a, "SimpleXMLChildrenIter::rewind", sxiRewind);
-    try vm.native_fns.put(a, "SimpleXMLChildrenIter::valid", sxiValid);
-    try vm.native_fns.put(a, "SimpleXMLChildrenIter::current", sxiCurrent);
-    try vm.native_fns.put(a, "SimpleXMLChildrenIter::key", sxiKey);
-    try vm.native_fns.put(a, "SimpleXMLChildrenIter::next", sxiNext);
-
-    // SimpleXMLIterator extends SimpleXMLElement and adds hasChildren /
-    // getChildren on top of the regular iteration methods. it's used with
-    // RecursiveIteratorIterator so just expose the class with parent = SXE
-    var sxi_def = ClassDef{ .name = "SimpleXMLIterator", .parent = "SimpleXMLElement", .native_clone = cloneHandle };
-    try sxi_def.interfaces.append(a, "RecursiveIterator");
-    try sxi_def.methods.put(a, "hasChildren", .{ .name = "hasChildren", .arity = 0 });
-    try sxi_def.methods.put(a, "getChildren", .{ .name = "getChildren", .arity = 0 });
-    try sxi_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
-    try sxi_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
-    try sxi_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
-    try sxi_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
-    try sxi_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
+    // php's SimpleXMLIterator adds nothing to SimpleXMLElement
+    const sxi_def = ClassDef{ .name = "SimpleXMLIterator", .parent = "SimpleXMLElement", .native_clone = cloneHandle };
     try vm.classes.put(a, "SimpleXMLIterator", sxi_def);
-    try vm.native_fns.put(a, "SimpleXMLIterator::hasChildren", sxmlIterHasChildren);
-    try vm.native_fns.put(a, "SimpleXMLIterator::getChildren", sxmlIterGetChildren);
-    // share the same node-walker the SimpleXMLChildrenIter helper uses; the
-    // SimpleXMLIterator's $this object keeps its own cursor in its handle
-    try vm.native_fns.put(a, "SimpleXMLIterator::rewind", sxmlIterRewind);
-    try vm.native_fns.put(a, "SimpleXMLIterator::valid", sxiValid);
-    try vm.native_fns.put(a, "SimpleXMLIterator::current", sxmlIterCurrent);
-    try vm.native_fns.put(a, "SimpleXMLIterator::key", sxiKey);
-    try vm.native_fns.put(a, "SimpleXMLIterator::next", sxiNext);
 }
 
-fn sxmlIterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    // SimpleXMLIterator iterates the children of $this. seed __mode and start
+// php's SimpleXMLElement iteration (php_sxe_reset_iterator and
+// php_sxe_iterator_fetch): the object is its own iterator. a list of the
+// elements a name selects walks those siblings, an attribute list the
+// attributes, anything else (the document's element, children(), an element
+// iteration or an offset gave) the children. the position is the cursor of
+// the object's handle; the element it is on is made once, as the position
+// moves, and kept in __iter_data. what it makes is of the object's class
+const IterKind = enum { attributes, siblings, children };
+
+fn flagOf(obj: *PhpObject, comptime name: []const u8) bool {
+    const v = obj.get(name);
+    return v == .bool and v.bool;
+}
+
+fn iterKind(obj: *PhpObject) IterKind {
+    if (flagOf(obj, "__attr_view")) return .attributes;
+    if (flagOf(obj, "__named")) return .siblings;
+    return .children;
+}
+
+// the namespace filter children() and attributes() keep in __ns ("" for none)
+fn nsAccepts(obj: *PhpObject, ns: ?*c.xmlNs) bool {
+    const ns_v = obj.get("__ns");
+    if (ns_v != .string) return true;
+    const has_ns = ns != null and ns.?.href != null;
+    if (ns_v.string.bytes().len == 0) return !has_ns;
+    if (!has_ns) return false;
+    const href = ns.?.href;
+    return std.mem.eql(u8, href[0..cstrLen(href)], ns_v.string.bytes());
+}
+
+fn iterAccepts(obj: *PhpObject, kind: IterKind, n: *c.xmlNode) bool {
+    switch (kind) {
+        .attributes => return n.type == c.XML_ATTRIBUTE_NODE and n.name != null and nsAccepts(obj, n.ns),
+        .siblings, .children => {
+            if (n.type != c.XML_ELEMENT_NODE or n.name == null) return false;
+            if (kind == .siblings) {
+                const self_node = getNodePtr(obj) orelse return false;
+                if (self_node.name == null or !std.mem.eql(u8, n.name[0..cstrLen(n.name)], self_node.name[0..cstrLen(self_node.name)])) return false;
+            }
+            return nsAccepts(obj, n.ns);
+        },
+    }
+}
+
+// the position moves to the first acceptable node from `from`, whose
+// element is made then
+fn iterFetch(ctx: *NativeContext, obj: *PhpObject, kind: IterKind, from: ?*c.xmlNode) RuntimeError!void {
+    var p = from;
+    while (p) |n| : (p = @ptrCast(n.next)) {
+        if (iterAccepts(obj, kind, n)) break;
+    }
+    setCursor(obj, p);
+    const node = p orelse return obj.set(ctx.allocator, "__iter_data", .null);
+    const doc = getDocPtr(obj) orelse return obj.set(ctx.allocator, "__iter_data", .null);
+    const data = if (kind == .attributes) blk: {
+        const owner = getNodePtr(obj) orelse return obj.set(ctx.allocator, "__iter_data", .null);
+        const wrapped = try buildAttrWrapperOf(ctx, obj.class_name, doc, owner, node.name[0..cstrLen(node.name)]);
+        if (node.ns != null and node.ns.*.href != null) {
+            const href = node.ns.*.href;
+            try wrapped.setCopiedString(ctx.allocator, "__attr_ns", href[0..cstrLen(href)]);
+        }
+        break :blk wrapped;
+    } else try buildWrapperOf(ctx, obj.class_name, doc, node, .siblings);
+    try obj.set(ctx.allocator, "__iter_data", .{ .object = data });
+}
+
+fn sxeRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("children") });
-    try obj.set(ctx.allocator, "__same_name", .{ .string = Value.String.borrowed("") });
-    return sxiRewind(ctx, &.{});
+    const kind = iterKind(obj);
+    const node = getNodePtr(obj) orelse {
+        try iterFetch(ctx, obj, kind, null);
+        return NativeResult.scalar(.null);
+    };
+    const start: ?*c.xmlNode = switch (kind) {
+        .attributes => @ptrCast(node.properties),
+        .siblings => if (node.name == null) null else node,
+        .children => @ptrCast(node.children),
+    };
+    try iterFetch(ctx, obj, kind, start);
+    return NativeResult.scalar(.null);
 }
 
-fn sxmlIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    // wrap the child node as another SimpleXMLIterator so the foreach value
-    // also implements RecursiveIterator (needed by RecursiveIteratorIterator)
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const node = getCursor(obj) orelse return NativeResult.scalar(.null);
-    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
-    const wrapper = try ctx.createObject("SimpleXMLIterator");
-    try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
-    try wrapper.set(ctx.allocator, "__iter_children", .{ .bool = true });
-    try setHandle(wrapper, doc, node);
-    return NativeResult.borrowed(.{ .object = wrapper });
-}
-
-// hasChildren / getChildren operate on the CURRENT iteration position (cursor)
-// not the wrapper's own node. zphp's RecursiveIteratorIterator calls these
-// on the iterator itself between valid() and current(), expecting them to
-// describe the element about to be yielded
-fn sxmlIterHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn sxeValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = obj.get("__iter_data") == .object });
+}
+
+fn iterData(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*PhpObject {
+    const data = obj.get("__iter_data");
+    if (data == .object) return data.object;
+    try ctx.vm.setPendingException("Error", "Iterator not initialized or already consumed");
+    return error.RuntimeError;
+}
+
+fn sxeCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(.{ .object = try iterData(ctx, obj) });
+}
+
+fn sxeKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    _ = try iterData(ctx, obj);
+    const node = getCursor(obj) orelse return NativeResult.literal("");
+    if (node.name == null) return NativeResult.literal("");
+    return try NativeResult.copyString(ctx.allocator, node.name[0..cstrLen(node.name)]);
+}
+
+fn sxeNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (obj.get("__iter_data") != .object) return NativeResult.scalar(.null);
+    const cur = getCursor(obj) orelse return NativeResult.scalar(.null);
+    try iterFetch(ctx, obj, iterKind(obj), @ptrCast(cur.next));
+    return NativeResult.scalar(.null);
+}
+
+// whether the element the position is on has an element child
+fn sxeHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (obj.get("__iter_data") != .object or iterKind(obj) == .attributes) return NativeResult.scalar(.{ .bool = false });
     const node = getCursor(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var ch = node.children;
     while (ch != null) : (ch = ch.*.next) {
@@ -1203,95 +1209,13 @@ fn sxmlIterHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Nativ
     return NativeResult.scalar(.{ .bool = false });
 }
 
-fn sxmlIterGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+// the element the position is on, which iterates its children
+fn sxeGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const node = getCursor(obj) orelse return NativeResult.scalar(.null);
-    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
-    const wrapper = try ctx.createObject("SimpleXMLIterator");
-    try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
-    try wrapper.set(ctx.allocator, "__iter_children", .{ .bool = true });
-    try setHandle(wrapper, doc, node);
-    return NativeResult.borrowed(.{ .object = wrapper });
-}
-
-// these walk xml node siblings via the libxml node pointers in the
-// SimpleXMLChildrenIter's handle: ptr is the starting parent or sibling, aux
-// the xmlDoc, extra the cursor (null when done). properties: __mode
-// ("children" | "siblings"), __same_name (the element name to filter by in
-// sibling mode)
-
-fn sxiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const node = getNodePtr(obj) orelse {
-        setCursor(obj, null);
-        return NativeResult.scalar(.null);
-    };
-    const mode = obj.get("__mode");
-    const start_ptr: ?*c.xmlNode = if (mode == .string and std.mem.eql(u8, mode.string.bytes(), "children"))
-        @ptrCast(node.children)
-    else
-        node;
-    var p = start_ptr;
-    while (p != null) : (p = @ptrCast(p.?.next)) {
-        if (sxiAcceptable(obj, p.?)) break;
-    }
-    setCursor(obj, p);
-    return NativeResult.scalar(.null);
-}
-
-fn sxiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = getCursor(obj) != null });
-}
-
-fn sxiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const node = getCursor(obj) orelse return NativeResult.scalar(.null);
-    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
-    const wrapper = try buildWrapper(ctx, doc, node);
-    return NativeResult.borrowed(.{ .object = wrapper });
-}
-
-fn sxiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const node = getCursor(obj) orelse return NativeResult.scalar(.null);
-    if (node.name == null) return NativeResult.scalar(.null);
-    const name = node.name[0..cstrLen(node.name)];
-    return try NativeResult.copyString(ctx.allocator, name);
-}
-
-fn sxiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const cur = getCursor(obj) orelse return NativeResult.scalar(.null);
-    var p: ?*c.xmlNode = @ptrCast(cur.next);
-    while (p != null) : (p = @ptrCast(p.?.next)) {
-        if (sxiAcceptable(obj, p.?)) break;
-    }
-    setCursor(obj, p);
-    return NativeResult.scalar(.null);
-}
-
-fn sxiAcceptable(obj: *PhpObject, n: *c.xmlNode) bool {
-    if (n.type != c.XML_ELEMENT_NODE) return false;
-    if (n.name == null) return false;
-    // sibling mode filters by element name
-    const same = obj.get("__same_name");
-    if (same == .string and same.string.bytes().len > 0) {
-        if (!std.mem.eql(u8, n.name[0..cstrLen(n.name)], same.string.bytes())) return false;
-    }
-    // namespace filter set by children() / attributes() with a $ns arg
-    const ns_v = obj.get("__ns");
-    if (ns_v == .string) {
-        const has_ns = n.ns != null and n.ns.*.href != null;
-        if (ns_v.string.bytes().len == 0) {
-            if (has_ns) return false;
-        } else {
-            if (!has_ns) return false;
-            const href = n.ns.*.href;
-            if (!std.mem.eql(u8, href[0..cstrLen(href)], ns_v.string.bytes())) return false;
-        }
-    }
-    return true;
+    if (iterKind(obj) == .attributes) return NativeResult.scalar(.null);
+    const data = obj.get("__iter_data");
+    if (data != .object) return NativeResult.scalar(.null);
+    return NativeResult.share(data);
 }
 
 // the request-end sweep: wrappers still alive let go of their trees
