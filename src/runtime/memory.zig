@@ -54,9 +54,14 @@ const bin_of = blk: {
 pub fn phpSize(len: usize) usize {
     if (len == 0) return 0;
     if (len <= 3072) return bin_of[(len - 1) >> 3];
-    if (len > std.math.maxInt(usize) - page_size) return len;
-    return std.mem.alignForward(usize, len, page_size);
+    const granularity = if (len > max_large_size) huge_granularity else page_size;
+    if (len > std.math.maxInt(usize) - granularity) return len;
+    return std.mem.alignForward(usize, len, granularity);
 }
+
+// zend_mm_alloc_huge: windows can't grow a mapping in place, so php's huge
+// blocks there come in whole chunks
+const huge_granularity: usize = if (@import("builtin").os.tag == .windows) chunk_size else page_size;
 
 pub fn isHuge(size: usize) bool {
     return size > max_large_size;
