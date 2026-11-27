@@ -1638,6 +1638,9 @@ pub const VM = struct {
     last_fatal_trace: Value = .null,
     // while a fatal error is printed: the stack trace php_error_cb appends
     fatal_trace_text: ?[]const u8 = null,
+    // a frame the next fatal error's trace starts with, which the vm has not
+    // pushed (a trampoline being entered)
+    fatal_trace_top: ?*PhpArray = null,
     prev_error_handler: ?Value = null,
     error_reporting_level: i64 = 30719,
     ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .empty,
@@ -20224,7 +20227,14 @@ pub const VM = struct {
     // writes it; record: keep the trace for error_get_last()
     fn fatalTraceText(self: *VM, record: bool) RuntimeError![]u8 {
         var ctx = self.makeContext(null);
-        const trace = try @import("../stdlib/system.zig").buildBacktraceFrom(&ctx, self.iniFlagOn("zend.exception_ignore_args", "0"), false, 0, false);
+        var trace = try @import("../stdlib/system.zig").buildBacktraceFrom(&ctx, self.iniFlagOn("zend.exception_ignore_args", "0"), false, 0, false);
+        if (self.fatal_trace_top) |top| {
+            const full = try self.allocArray();
+            try full.append(self.allocator, .{ .array = top });
+            for (trace.entries.items) |e| try full.append(self.allocator, e.value);
+            self.releaseUnheldArray(trace);
+            trace = full;
+        }
         const value: Value = .{ .array = trace };
         defer self.releaseUnheldArray(trace);
         var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -26153,6 +26163,7 @@ pub const VM = struct {
 
     // __call for a method the object lacks
     pub fn callTrampoline(self: *VM, obj: *PhpObject, args: []const Value) RuntimeError!Value {
+        if (self.oom_pending and args.len == 2) return self.oomAtTrampolineEntry(self.resolveMethod(obj.class_name, "__call") catch obj.class_name, args[0], args[1], "->");
         if (args.len == 2) if (try self.trampolineName(args[0])) |cut| {
             self.pending_trampoline = true;
             defer self.pending_trampoline = false;
@@ -26164,6 +26175,7 @@ pub const VM = struct {
     }
 
     fn callStaticTrampoline(self: *VM, cs_name: []const u8, called_class: []const u8) RuntimeError!void {
+        if (self.oom_pending) return self.oomAtTrampolineEntry(cs_name, self.stack[self.sp - 2], self.stack[self.sp - 1], "::");
         // the name and the argument array are the top two slots
         if (try self.trampolineName(self.stack[self.sp - 2])) |cut| {
             const old = self.stack[self.sp - 2];
@@ -26175,6 +26187,39 @@ pub const VM = struct {
         self.pending_trampoline = true;
         defer self.pending_trampoline = false;
         return self.callStaticFunction(cs_name, 2, called_class);
+    }
+
+    // php checks for an interrupt as a frame is entered (ZEND_VM_ENTER): a
+    // delayed out of memory error is reported there, with a trampoline's
+    // frame on top, named after the method it stands for (in the class of
+    // its __call or __callStatic) and listing the arguments it was called with
+    fn oomAtTrampolineEntry(self: *VM, magic: []const u8, method: Value, args: Value, type_str: []const u8) RuntimeError {
+        const entry = self.allocArray() catch return self.raisePendingOom();
+        defer if (entry.refcount == 0) self.releaseUnheldArray(entry);
+        fill: {
+            if (self.frame_count > 0) if (self.framePosition(self.frame_count - 1)) |site| {
+                entry.set(self.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) }) catch break :fill;
+                entry.set(self.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line }) catch break :fill;
+            };
+            const name = if (method == .string) method.string.bytes() else "";
+            const shown = name[0 .. std.mem.indexOfScalar(u8, name, 0) orelse name.len];
+            // its own copy: error_get_last() keeps the trace
+            entry.setCopiedString(self.allocator, .{ .string = Value.String.borrowed("function") }, shown) catch break :fill;
+            const sep = std.mem.indexOf(u8, magic, "::") orelse magic.len;
+            entry.set(self.allocator, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(magic[0..sep]) }) catch break :fill;
+            entry.set(self.allocator, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed(type_str) }) catch break :fill;
+            if (!self.iniFlagOn("zend.exception_ignore_args", "0")) {
+                const list = self.allocArray() catch break :fill;
+                entry.set(self.allocator, .{ .string = Value.String.borrowed("args") }, .{ .array = list }) catch {
+                    self.releaseUnheldArray(list);
+                    break :fill;
+                };
+                if (args == .array) for (args.array.entries.items) |e| list.append(self.allocator, if (e.ref) |r| r.* else e.value) catch break :fill;
+            }
+        }
+        self.fatal_trace_top = entry;
+        defer self.fatal_trace_top = null;
+        return self.raisePendingOom();
     }
 
     // zend_get_call_trampoline_func: the method name __call and
