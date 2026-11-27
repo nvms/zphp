@@ -9,7 +9,7 @@ $run = function (string $name, string $code, string $accept, string $flags = '')
     file_put_contents($file, "<?php\n" . $code);
     echo "-- $name ($accept) $flags\n";
     $cmd = escapeshellarg(PHP_BINARY) . " -d display_errors=stderr -d log_errors=0 $flags " . escapeshellarg($file);
-    $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, ['HTTP_ACCEPT_ENCODING' => $accept]);
+    $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, ['HTTP_ACCEPT_ENCODING' => $accept] + getenv());
     $out = stream_get_contents($pipes[1]);
     $err = stream_get_contents($pipes[2]);
     proc_close($proc);
