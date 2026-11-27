@@ -2003,8 +2003,9 @@ pub fn splArrayState(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeRe
     const flags = @import("spl.zig").serializedFlags(obj);
     try state.append(ctx.allocator, .{ .int = flags });
     const data = obj.get("__data");
-    // __serialize exposes a value snapshot, not the mutable internal table
-    try state.append(ctx.allocator, if (flags & @import("spl.zig").IS_SELF != 0) .null else if (data == .array) .{ .array = try splStorageSnapshot(ctx, data.array) } else data);
+    // the storage itself (ZVAL_COPY): it is shared, so a later write to
+    // either side separates it, and a listing sees the one table
+    try state.append(ctx.allocator, if (flags & @import("spl.zig").IS_SELF != 0) .null else data);
     try state.append(ctx.allocator, .{ .array = try splMembers(ctx, obj) });
     try state.append(ctx.allocator, obj.get("__iter_class"));
     return NativeResult.borrowed(.{ .array = state });
@@ -2083,14 +2084,3 @@ fn bindDecodedArrayReference(ctx: *NativeContext, source: *PhpArray, source_key:
     ctx.vm.array_ref_active = true;
 }
 
-fn splStorageSnapshot(ctx: *NativeContext, source: *PhpArray) !*PhpArray {
-    const copy = try ctx.createArray();
-    for (source.entries.items) |entry| {
-        try copy.set(ctx.allocator, entry.key, entry.value);
-        if (entry.ref) |cell| {
-            if (@import("../runtime/value.zig").cellOf(cell).binders > 1)
-                try bindDecodedArrayReference(ctx, source, entry.key, copy, entry.key);
-        }
-    }
-    return copy;
-}
