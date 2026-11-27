@@ -1115,6 +1115,7 @@ pub const VM = struct {
     stack: []Value = &.{},
     stack_room: Region(Value) = .{},
     sp: usize = 0,
+    // name -> function, closure instances included: allocated untracked
     functions: std.StringHashMapUnmanaged(*const ObjFunction) = .{},
     function_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     // per function, the parameters marked #[\SensitiveParameter] (bit i for
@@ -1473,6 +1474,10 @@ pub const VM = struct {
     // obligations the trait method checks of the class being declared began
     trait_deferred: std.ArrayListUnmanaged(*inheritance.Deferred) = .empty,
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
+    // the instance names closures are keyed by (untracked: php has none),
+    // and how many of them a serve worker's builtins made
+    closure_names: std.ArrayListUnmanaged([]const u8) = .empty,
+    builtin_closure_name_hw: usize = 0,
     php_constants: ConstantMap = .{},
     // the constants the script defined, with the file each was defined in
     // (ReflectionConstant::getFileName)
@@ -1736,6 +1741,10 @@ pub const VM = struct {
     uncatchable_fatal: bool = false,
     run_base_frame: usize = 0,
     allocator: Allocator,
+    // the allocator under the memory account: the VM's own bookkeeping
+    // (heap item registries, free lists, release queues, root buffers),
+    // which php's allocator never sees, so memory_get_usage() doesn't either
+    untracked: Allocator,
     string_pool: @import("string_pool.zig") = .{ .backing = undefined },
     global_slot_names: []const []const u8 = &.{},
     script_strict_types: bool = false,
@@ -1968,7 +1977,7 @@ pub const VM = struct {
         const cell = self.free_cells.pop() orelse blk: {
             const c = try self.allocator.create(RefCell);
             errdefer self.allocator.destroy(c);
-            try self.ref_cells.append(self.allocator, c);
+            try self.ref_cells.append(self.untracked, c);
             break :blk c;
         };
         cell.* = .{};
@@ -1997,13 +2006,13 @@ pub const VM = struct {
             // possible root: what it holds may be a cycle through it
             switch (cell.value) {
                 .array => |arr| if (!arr.elements_released and !arr.cycle_queued) {
-                    self.cycle_array_candidates.append(self.allocator, arr) catch return;
+                    self.cycle_array_candidates.append(self.untracked, arr) catch return;
                     arr.cycle_queued = true;
                     arr.gc_slot = self.gcTakeSlot();
                     self.noteRootAdded(.array);
                 },
                 .object => |obj| if (!obj.destructed and !obj.cycle_queued) {
-                    self.cycle_candidates.append(self.allocator, obj) catch return;
+                    self.cycle_candidates.append(self.untracked, obj) catch return;
                     obj.cycle_queued = true;
                     obj.gc_slot = self.gcTakeSlot();
                     self.noteRootAdded(.object);
@@ -2720,12 +2729,12 @@ pub const VM = struct {
         const gen = if (!self.serve_mode) self.free_generators.pop() orelse blk: {
             const created = try self.allocator.create(Generator);
             errdefer self.allocator.destroy(created);
-            try self.generators.append(self.allocator, created);
+            try self.generators.append(self.untracked, created);
             break :blk created;
         } else blk: {
             const created = try self.allocator.create(Generator);
             errdefer self.allocator.destroy(created);
-            try self.generators.append(self.allocator, created);
+            try self.generators.append(self.untracked, created);
             break :blk created;
         };
         gen.* = initial;
@@ -2812,15 +2821,18 @@ pub const VM = struct {
     fn freeHandle(self: *VM, obj: *PhpObject) void {
         if (self.iap_positions.count() > 0) _ = self.iap_positions.remove(obj);
         if (obj.resource or obj.id == 0) return;
-        self.free_handles.append(self.allocator, obj.id) catch {};
+        self.free_handles.append(self.untracked, obj.id) catch {};
         obj.id = 0;
     }
 
     fn allocObjectShell(self: *VM) RuntimeError!*PhpObject {
-        if (self.free_objects.pop()) |obj| return obj;
+        if (self.free_objects.pop()) |obj| {
+            if (self.memory) |account| account.skew(object_shell_raw);
+            return obj;
+        }
         const created = try self.allocator.create(PhpObject);
         errdefer self.allocator.destroy(created);
-        try self.objects.append(self.allocator, created);
+        try self.objects.append(self.untracked, created);
         return created;
     }
 
@@ -2864,16 +2876,30 @@ pub const VM = struct {
         return reusable;
     }
 
+    // what memory_get_usage() counts for an array's shell: php's
+    // sizeof(zend_array) while it lives, nothing once it is pooled (php
+    // freed it). objects keep zphp's shell size while they live
+    const php_array_shell: i64 = 56;
+    const array_shell_raw: i64 = @intCast(memory.phpSize(@sizeOf(PhpArray)));
+    const object_shell_raw: i64 = @intCast(memory.phpSize(@sizeOf(PhpObject)));
+
     pub fn allocArray(self: *VM) RuntimeError!*PhpArray {
         if (self.free_arrays.pop()) |arr| {
             arr.* = .{};
+            if (self.memory) |account| account.skew(php_array_shell);
             return arr;
         }
         const arr = try self.allocator.create(PhpArray);
         errdefer self.allocator.destroy(arr);
         arr.* = .{};
-        try self.arrays.append(self.allocator, arr);
+        try self.arrays.append(self.untracked, arr);
+        if (self.memory) |account| account.skew(php_array_shell - array_shell_raw);
         return arr;
+    }
+
+    // a shell goes back to the pool: freed as far as php's count goes
+    inline fn poolShellUncounted(self: *VM, comptime kind: enum { array, object }) void {
+        if (self.memory) |account| account.skew(-(if (kind == .array) php_array_shell else object_shell_raw));
     }
 
     pub fn init(allocator: Allocator) RuntimeError!VM {
@@ -2883,7 +2909,7 @@ pub const VM = struct {
     // every field defaults to an empty container, so a VM whose init failed
     // part way can be torn down with the ordinary deinit
     pub fn initInPlace(allocator: Allocator) RuntimeError!VM {
-        var vm = VM{ .allocator = allocator };
+        var vm = VM{ .allocator = allocator, .untracked = memory.root(allocator) };
         errdefer vm.deinit();
         try initVm(&vm, allocator);
         return vm;
@@ -2892,7 +2918,7 @@ pub const VM = struct {
     pub fn initOnHeap(allocator: Allocator) RuntimeError!*VM {
         const vm = try allocator.create(VM);
         errdefer allocator.destroy(vm);
-        vm.* = .{ .allocator = allocator };
+        vm.* = .{ .allocator = allocator, .untracked = memory.root(allocator) };
         errdefer vm.deinit();
         try initVm(vm, allocator);
         return vm;
@@ -2938,6 +2964,7 @@ pub const VM = struct {
         vm.builtin_obj_hw = vm.objects.items.len;
         vm.builtin_arr_hw = vm.arrays.items.len;
         vm.builtin_str_hw = vm.strings.items.len;
+        vm.builtin_closure_name_hw = vm.closure_names.items.len;
         vm.builtin_constant_count = vm.php_constants.count();
         for (vm.arrays.items) |arr| arr.builtin = true;
         for (vm.objects.items) |obj| obj.builtin = true;
@@ -4066,6 +4093,7 @@ pub const VM = struct {
         // may reference values that get freed by those passes
         for (self.fibers.items) |f| if (!f.pooled) self.releaseFiberNative(f);
         for (self.strings.items[str_start..]) |s| self.allocator.free(s);
+        for (self.closure_names.items[if (free_all) 0 else self.builtin_closure_name_hw..]) |s| self.untracked.free(s);
         for (self.arrays.items[arr_start..]) |a| {
             if (!a.pooled) {
                 if (self.globals_array == null or a != self.globals_array.?) {
@@ -4078,6 +4106,8 @@ pub const VM = struct {
                 }
                 a.deinit(self.allocator);
             }
+            // undo what the shell was counted at beyond its bytes
+            if (self.memory) |account| account.skew(if (a.pooled) array_shell_raw else array_shell_raw - php_array_shell);
             self.allocator.destroy(a);
         }
         for (self.objects.items[obj_start..]) |o| {
@@ -4108,6 +4138,7 @@ pub const VM = struct {
                 }
                 o.deinit(self.allocator);
             }
+            if (o.pooled) if (self.memory) |account| account.skew(object_shell_raw);
             self.allocator.destroy(o);
         }
         self.drainPendingStringReleases();
@@ -4276,15 +4307,15 @@ pub const VM = struct {
         }
         g_type_info.deinit(self.allocator);
         g_type_info = .{};
-        self.functions.deinit(self.allocator);
+        self.functions.deinit(self.untracked);
         var ctfn_iter = self.chunk_to_func_names.iterator();
-        while (ctfn_iter.next()) |e| e.value_ptr.*.deinit(self.allocator);
-        self.chunk_to_func_names.deinit(self.allocator);
+        while (ctfn_iter.next()) |e| e.value_ptr.*.deinit(self.untracked);
+        self.chunk_to_func_names.deinit(self.untracked);
         var rpn_iter = self.ref_param_names.keyIterator();
         while (rpn_iter.next()) |k| self.allocator.free(k.*);
         self.ref_param_names.deinit(self.allocator);
         self.clearMethodNameIndex();
-        self.method_names_by_class.deinit(self.allocator);
+        self.method_names_by_class.deinit(self.untracked);
         self.chunk_to_result.deinit(self.allocator);
         self.clearPharAliases();
         self.phar_aliases.deinit(self.allocator);
@@ -4314,10 +4345,11 @@ pub const VM = struct {
         self.strings.deinit(self.allocator);
         for (self.persistent_strings.items) |s| self.allocator.free(s);
         self.persistent_strings.deinit(self.allocator);
-        self.captures.deinit(self.allocator);
-        self.capture_index.deinit(self.allocator);
+        self.captures.deinit(self.untracked);
+        self.capture_index.deinit(self.untracked);
         self.interned_names.deinit(self.allocator);
-        self.free_closure_names.deinit(self.allocator);
+        self.free_closure_names.deinit(self.untracked);
+        self.closure_names.deinit(self.untracked);
         self.php_constants.deinit(self.allocator);
         self.user_constants.deinit(self.allocator);
         self.deprecated_traits.deinit(self.allocator);
@@ -4329,8 +4361,8 @@ pub const VM = struct {
         self.shutdown_callbacks.deinit(self.allocator);
         self.tick_functions.deinit(self.allocator);
         self.error_handler_stack.deinit(self.allocator);
-        self.arrays.deinit(self.allocator);
-        self.free_arrays.deinit(self.allocator);
+        self.arrays.deinit(self.untracked);
+        self.free_arrays.deinit(self.untracked);
         self.lazy_operands.deinit(self.allocator);
         {
             var frozen = self.frozen_tables.valueIterator();
@@ -4340,23 +4372,23 @@ pub const VM = struct {
             while (orders.next()) |keys| freeTableOrder(self.allocator, keys.*);
             self.table_orders.deinit(self.allocator);
         }
-        self.released_arrays.deinit(self.allocator);
-        self.objects.deinit(self.allocator);
-        self.free_generators.deinit(self.allocator);
-        self.free_fibers.deinit(self.allocator);
+        self.released_arrays.deinit(self.untracked);
+        self.objects.deinit(self.untracked);
+        self.free_generators.deinit(self.untracked);
+        self.free_fibers.deinit(self.untracked);
         for (self.free_fiber_natives.items) |nat| self.destroyFiberNative(nat);
         self.free_fiber_natives.deinit(self.allocator);
         self.native_holds.deinit(self.allocator);
-        self.free_objects.deinit(self.allocator);
-        self.free_handles.deinit(self.allocator);
-        self.released_objects.deinit(self.allocator);
-        self.pending_destruct.deinit(self.allocator);
+        self.free_objects.deinit(self.untracked);
+        self.free_handles.deinit(self.untracked);
+        self.released_objects.deinit(self.untracked);
+        self.pending_destruct.deinit(self.untracked);
         self.default_holds.deinit(self.allocator);
-        self.pending_array_release.deinit(self.allocator);
+        self.pending_array_release.deinit(self.untracked);
         self.pending_string_release.deinit(memory.root(self.allocator));
         self.string_pool.deinit();
-        self.pending_gen_release.deinit(self.allocator);
-        self.pending_fiber_release.deinit(self.allocator);
+        self.pending_gen_release.deinit(self.untracked);
+        self.pending_fiber_release.deinit(self.untracked);
         self.deferred_local_releases.deinit(self.allocator);
         self.stale_mirrors.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
@@ -4377,11 +4409,11 @@ pub const VM = struct {
         self.trait_method_copies.deinit(self.allocator);
         for (self.trait_method_stale.items) |copy| self.allocator.destroy(copy);
         self.trait_method_stale.deinit(self.allocator);
-        self.cycle_candidates.deinit(self.allocator);
-        self.gc_slot_unused.deinit(self.allocator);
+        self.cycle_candidates.deinit(self.untracked);
+        self.gc_slot_unused.deinit(self.untracked);
         self.cycle_dtor_order.deinit(self.allocator);
-        self.cycle_array_candidates.deinit(self.allocator);
-        self.deferred_roots.deinit(self.allocator);
+        self.cycle_array_candidates.deinit(self.untracked);
+        self.deferred_roots.deinit(self.untracked);
         self.cycle_gen_candidates.deinit(self.allocator);
         self.cycle_fiber_candidates.deinit(self.allocator);
         self.cycle_work.deinit(self.allocator);
@@ -4399,9 +4431,9 @@ pub const VM = struct {
             self.allocator.destroy(pc);
             self.proc_children = null;
         }
-        self.generators.deinit(self.allocator);
-        self.fibers.deinit(self.allocator);
-        self.ref_cells.deinit(self.allocator);
+        self.generators.deinit(self.untracked);
+        self.fibers.deinit(self.untracked);
+        self.ref_cells.deinit(self.untracked);
         self.free_cells.deinit(self.allocator);
         var class_iter = self.classes.valueIterator();
         while (class_iter.next()) |c| c.deinit(self.allocator);
@@ -4577,10 +4609,12 @@ pub const VM = struct {
         self.free_generators.clearRetainingCapacity();
         if (self.serve_mode and self.builtins_recorded) {
             self.strings.shrinkRetainingCapacity(self.builtin_str_hw);
+            self.closure_names.shrinkRetainingCapacity(self.builtin_closure_name_hw);
             self.arrays.shrinkRetainingCapacity(self.builtin_arr_hw);
             self.objects.shrinkRetainingCapacity(self.builtin_obj_hw);
         } else {
             self.strings.clearRetainingCapacity();
+            self.closure_names.clearRetainingCapacity();
             self.arrays.clearRetainingCapacity();
             self.objects.clearRetainingCapacity();
         }
@@ -4718,7 +4752,7 @@ pub const VM = struct {
             // the indexFunctionByChunk dedup walk std.mem.eql's against dangling
             // slices and segfaults
             var ctfn_it = self.chunk_to_func_names.iterator();
-            while (ctfn_it.next()) |e| e.value_ptr.*.deinit(self.allocator);
+            while (ctfn_it.next()) |e| e.value_ptr.*.deinit(self.untracked);
             self.chunk_to_func_names.clearRetainingCapacity();
             self.clearMethodNameIndex();
             self.user_constants.clearRetainingCapacity();
@@ -5043,7 +5077,7 @@ pub const VM = struct {
         if (slot.* == 0) return;
         if (self.gc_slot_unused.items.len < self.gc_slot_unused.capacity) {
             self.gc_slot_unused.appendAssumeCapacity(slot.*);
-        } else self.gc_slot_unused.append(self.allocator, slot.*) catch {};
+        } else self.gc_slot_unused.append(self.untracked, slot.*) catch {};
         slot.* = 0;
     }
 
@@ -5517,7 +5551,7 @@ pub const VM = struct {
             return self.raiseCompileFatal(msg, .{ .file = func.file_path, .line = func.start_line });
         }
         try self.noteFunctionName(func.name);
-        try self.functions.put(self.allocator, func.name, func);
+        try self.functions.put(self.untracked, func.name, func);
         try self.noteRefParams(func.name, func);
         try self.indexFunctionByChunk(func.name, &func.chunk);
     }
@@ -5712,20 +5746,20 @@ pub const VM = struct {
     }
 
     pub fn indexFunctionByChunk(self: *VM, name: []const u8, chunk: *const Chunk) RuntimeError!void {
-        const gop = try self.chunk_to_func_names.getOrPut(self.allocator, @intFromPtr(chunk));
+        const gop = try self.chunk_to_func_names.getOrPut(self.untracked, @intFromPtr(chunk));
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         for (gop.value_ptr.*.items) |existing| if (std.mem.eql(u8, existing, name)) return;
-        try gop.value_ptr.*.append(self.allocator, name);
+        try gop.value_ptr.*.append(self.untracked, name);
         if (std.mem.startsWith(u8, name, "__closure")) return;
         const sep = std.mem.indexOf(u8, name, "::") orelse return;
-        const by_class = try self.method_names_by_class.getOrPut(self.allocator, name[0..sep]);
+        const by_class = try self.method_names_by_class.getOrPut(self.untracked, name[0..sep]);
         if (!by_class.found_existing) by_class.value_ptr.* = .empty;
-        try by_class.value_ptr.append(self.allocator, name);
+        try by_class.value_ptr.append(self.untracked, name);
     }
 
     fn clearMethodNameIndex(self: *VM) void {
         var it = self.method_names_by_class.valueIterator();
-        while (it.next()) |names| names.deinit(self.allocator);
+        while (it.next()) |names| names.deinit(self.untracked);
         self.method_names_by_class.clearRetainingCapacity();
     }
 
@@ -6071,7 +6105,7 @@ pub const VM = struct {
     // reference next, so it is counted by the next collection
     fn noteConstructorReleased(self: *VM, obj: *PhpObject) void {
         if (!obj.destructed and !obj.cycle_queued) {
-            self.cycle_candidates.append(self.allocator, obj) catch return;
+            self.cycle_candidates.append(self.untracked, obj) catch return;
             obj.cycle_queued = true;
             obj.gc_slot = self.gcTakeSlot();
             self.noteRootAdded(.object);
@@ -12170,7 +12204,7 @@ pub const VM = struct {
                             return self.raiseFatal(msg);
                         }
                         try self.noteFunctionName(func.name);
-                        try self.functions.put(self.allocator, func.name, func);
+                        try self.functions.put(self.untracked, func.name, func);
                         try self.noteRefParams(func.name, func);
                         try self.indexFunctionByChunk(func.name, &func.chunk);
                         break;
@@ -12188,7 +12222,7 @@ pub const VM = struct {
                     for (result.functions.items) |*func| {
                         if (func.cond_id != cond_id) continue;
                         try self.noteFunctionName(func.name);
-                        try self.functions.put(self.allocator, func.name, func);
+                        try self.functions.put(self.untracked, func.name, func);
                         try self.noteRefParams(func.name, func);
                         try self.indexFunctionByChunk(func.name, &func.chunk);
                     }
@@ -12376,12 +12410,12 @@ pub const VM = struct {
                     // self.captures until request end - this retain is
                     // consumed by the end-of-request reset / shutdown sweep
                     retainValue(val);
-                    try self.captures.append(self.allocator, .{
+                    try self.captures.append(self.untracked, .{
                         .closure_name = closure_name,
                         .var_name = var_name,
                         .value = val,
                     });
-                    const gop = try self.capture_index.getOrPut(self.allocator, closure_name);
+                    const gop = try self.capture_index.getOrPut(self.untracked, closure_name);
                     if (gop.found_existing) {
                         gop.value_ptr.len += 1;
                     } else {
@@ -12409,13 +12443,13 @@ pub const VM = struct {
                     // the capture mirrors the cell and owns a reference to the
                     // mirrored value; propagateCellWrite keeps it in sync
                     retainValue(cell.*);
-                    try self.captures.append(self.allocator, .{
+                    try self.captures.append(self.untracked, .{
                         .closure_name = closure_name,
                         .var_name = var_name,
                         .value = cell.*,
                         .ref_cell = cell,
                     });
-                    const gop = try self.capture_index.getOrPut(self.allocator, closure_name);
+                    const gop = try self.capture_index.getOrPut(self.untracked, closure_name);
                     if (gop.found_existing) {
                         gop.value_ptr.len += 1;
                         gop.value_ptr.has_refs = true;
@@ -13516,11 +13550,11 @@ pub const VM = struct {
                         self.dropN(ac);
                         const fiber = if (!self.serve_mode) self.free_fibers.pop() orelse blk: {
                             const created = try self.allocator.create(Fiber);
-                            try self.fibers.append(self.allocator, created);
+                            try self.fibers.append(self.untracked, created);
                             break :blk created;
                         } else blk: {
                             const created = try self.allocator.create(Fiber);
-                            try self.fibers.append(self.allocator, created);
+                            try self.fibers.append(self.untracked, created);
                             break :blk created;
                         };
                         // the fiber owns its callable until it is released
@@ -23376,7 +23410,7 @@ pub const VM = struct {
         for (cases) |case| {
             const case_obj = try allocator.create(PhpObject);
             case_obj.* = .{ .class_name = name, .enum_case = true };
-            try vm.objects.append(allocator, case_obj);
+            try vm.objects.append(vm.untracked, case_obj);
             try case_obj.set(allocator, "name", .{ .string = Value.String.borrowed(case) });
             objRetain(case_obj);
             try def.constants.put(allocator, case, .{ .object = case_obj });
@@ -24201,7 +24235,7 @@ pub const VM = struct {
             const class_method = class_names.memberKey(&method_buf, class_name, m.name);
             if (!self.functions.contains(class_method)) {
                 const copy = try self.traitMethodCopy(m.func, class_method);
-                try self.functions.put(self.allocator, copy.name, copy);
+                try self.functions.put(self.untracked, copy.name, copy);
                 try self.noteRefParams(copy.name, copy);
                 try self.indexFunctionByChunk(copy.name, &copy.chunk);
             }
@@ -24554,7 +24588,7 @@ pub const VM = struct {
         const lexical_class = self.currentDefiningClass();
         const scope = self.closureCalledScope();
         if (scope) |class_name| {
-            try self.captures.append(self.allocator, .{
+            try self.captures.append(self.untracked, .{
                 .closure_name = name,
                 .var_name = "$__closure_scope",
                 .value = .{ .string = Value.String.borrowed(class_name) },
@@ -24562,7 +24596,7 @@ pub const VM = struct {
             self.capture_index.getPtr(name).?.len += 1;
         }
         if (lexical_class) |class_name| {
-            try self.captures.append(self.allocator, .{
+            try self.captures.append(self.untracked, .{
                 .closure_name = name,
                 .var_name = "$__closure_defclass",
                 .value = .{ .string = Value.String.borrowed(class_name) },
@@ -24674,8 +24708,9 @@ pub const VM = struct {
         }
         const id = self.closure_instance_count;
         self.closure_instance_count += 1;
-        const name = try std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ compile_name, id });
-        try self.strings.append(self.allocator, name);
+        const name = try std.fmt.allocPrint(self.untracked, "{s}_{d}", .{ compile_name, id });
+        errdefer self.untracked.free(name);
+        try self.closure_names.append(self.untracked, name);
         return name;
     }
 
@@ -24685,7 +24720,7 @@ pub const VM = struct {
     // appended by the following closure_bind ops extend the registered range
     pub fn newClosureInstance(self: *VM, compile_name: []const u8, func: *const ObjFunction) !Value {
         const name = try self.allocClosureInstanceName(compile_name);
-        const gop = try self.functions.getOrPut(self.allocator, name);
+        const gop = try self.functions.getOrPut(self.untracked, name);
         if (!gop.found_existing) self.live_closure_instances += 1;
         gop.value_ptr.* = func;
         try self.indexFunctionByChunk(name, &func.chunk);
@@ -24694,7 +24729,7 @@ pub const VM = struct {
             .native = .{ .kind = .closure, .ptr = @intFromPtr(name.ptr), .aux = name.len, .extra = @intFromPtr(func) },
         });
         obj.refcount = 1;
-        try self.capture_index.put(self.allocator, name, .{
+        try self.capture_index.put(self.untracked, name, .{
             .start = @intCast(self.captures.items.len),
             .len = 0,
             .has_refs = false,
@@ -24713,7 +24748,7 @@ pub const VM = struct {
         for (names, values) |var_name, val| {
             const kept = try self.internName(var_name);
             retainValue(val);
-            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = kept, .value = val });
+            try self.captures.append(self.untracked, .{ .closure_name = name, .var_name = kept, .value = val });
             self.capture_index.getPtr(name).?.len += 1;
         }
         return instance;
@@ -24731,7 +24766,7 @@ pub const VM = struct {
         for (caps) |cap| {
             const value = if (cap.cell) |cell| cell.* else cap.value;
             retainValue(value);
-            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = cap.name, .value = value, .ref_cell = cap.cell });
+            try self.captures.append(self.untracked, .{ .closure_name = name, .var_name = cap.name, .value = value, .ref_cell = cap.cell });
             const range = self.capture_index.getPtr(name).?;
             range.len += 1;
             if (cap.cell) |cell| {
@@ -24742,15 +24777,15 @@ pub const VM = struct {
         }
         if (this == .object) {
             retainValue(this);
-            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = "$this", .value = this });
+            try self.captures.append(self.untracked, .{ .closure_name = name, .var_name = "$this", .value = this });
             self.capture_index.getPtr(name).?.len += 1;
         }
         if (called) |class_name| {
-            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = "$__closure_scope", .value = .{ .string = Value.String.borrowed(class_name) } });
+            try self.captures.append(self.untracked, .{ .closure_name = name, .var_name = "$__closure_scope", .value = .{ .string = Value.String.borrowed(class_name) } });
             self.capture_index.getPtr(name).?.len += 1;
         }
         if (scope) |class_name| {
-            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = "$__closure_defclass", .value = .{ .string = Value.String.borrowed(class_name) } });
+            try self.captures.append(self.untracked, .{ .closure_name = name, .var_name = "$__closure_defclass", .value = .{ .string = Value.String.borrowed(class_name) } });
             self.capture_index.getPtr(name).?.len += 1;
         }
         return instance;
@@ -25186,7 +25221,7 @@ pub const VM = struct {
                 }
             }
             if (std.mem.lastIndexOfScalar(u8, name, '_')) |separator| {
-                self.free_closure_names.append(self.allocator, .{ .compile_name = name[0..separator], .name = name }) catch {};
+                self.free_closure_names.append(self.untracked, .{ .compile_name = name[0..separator], .name = name }) catch {};
             }
             self.compactCapturesIfNeeded();
         }
@@ -25231,15 +25266,15 @@ pub const VM = struct {
     fn compactCapturesIfNeeded(self: *VM) void {
         if (self.captures_dead < 64 or self.captures_dead * 2 < self.captures.items.len) return;
         var compacted: std.ArrayListUnmanaged(CaptureEntry) = .empty;
-        compacted.ensureTotalCapacity(self.allocator, self.captures.items.len - self.captures_dead) catch return;
+        compacted.ensureTotalCapacity(self.untracked, self.captures.items.len - self.captures_dead) catch return;
         var live = self.capture_index.iterator();
         while (live.next()) |entry| {
             const old = entry.value_ptr.*;
             const start: u32 = @intCast(compacted.items.len);
-            compacted.appendSlice(self.allocator, self.captures.items[old.start .. old.start + old.len]) catch return;
+            compacted.appendSlice(self.untracked, self.captures.items[old.start .. old.start + old.len]) catch return;
             entry.value_ptr.start = start;
         }
-        self.captures.deinit(self.allocator);
+        self.captures.deinit(self.untracked);
         self.captures = compacted;
         self.captures_dead = 0;
     }
@@ -25388,20 +25423,20 @@ pub const VM = struct {
                 }
                 // the copy holds its own reference
                 retainValue(new_cap.value);
-                try self.captures.append(self.allocator, new_cap);
+                try self.captures.append(self.untracked, new_cap);
                 if (new_cap.ref_cell) |cell| try self.regRefCapture(self.capture_index.getPtr(new_name).?, cell, new_cap.var_name);
             }
         }
         if (new_this == .object) {
             retainValue(new_this);
-            try self.captures.append(self.allocator, .{ .closure_name = new_name, .var_name = "$this", .value = new_this });
+            try self.captures.append(self.untracked, .{ .closure_name = new_name, .var_name = "$this", .value = new_this });
         }
-        if (called) |class_name| try self.captures.append(self.allocator, .{
+        if (called) |class_name| try self.captures.append(self.untracked, .{
             .closure_name = new_name,
             .var_name = "$__closure_scope",
             .value = .{ .string = Value.String.borrowed(class_name) },
         });
-        if (scope) |class_name| try self.captures.append(self.allocator, .{
+        if (scope) |class_name| try self.captures.append(self.untracked, .{
             .closure_name = new_name,
             .var_name = "$__closure_defclass",
             .value = .{ .string = Value.String.borrowed(class_name) },
@@ -36670,7 +36705,7 @@ pub const VM = struct {
     pub fn discardOrphan(self: *VM, v: Value) void {
         switch (v) {
             .array => |arr| if (arr.refcount == 0) self.queueArrayRelease(arr),
-            .object => |obj| if (obj.refcount == 0 and !obj.destructed) self.pending_destruct.append(self.allocator, obj) catch {},
+            .object => |obj| if (obj.refcount == 0 and !obj.destructed) self.pending_destruct.append(self.untracked, obj) catch {},
             else => {},
         }
     }
@@ -36701,7 +36736,7 @@ pub const VM = struct {
             // unreachable cycle (a -> b -> a where both still see each other).
             // each possible root occupies one candidate slot.
             if (!obj.destructed and !obj.cycle_queued) {
-                self.cycle_candidates.append(self.allocator, obj) catch return;
+                self.cycle_candidates.append(self.untracked, obj) catch return;
                 obj.cycle_queued = true;
                 obj.gc_slot = self.gcTakeSlot();
                 self.noteRootAdded(.object);
@@ -36709,8 +36744,8 @@ pub const VM = struct {
             return;
         }
         if (obj.destructed) return;
-        self.pending_destruct.append(self.allocator, obj) catch {};
-        if (self.release_log) |log| log.append(self.allocator, .{ .object = obj }) catch {};
+        self.pending_destruct.append(self.untracked, obj) catch {};
+        if (self.release_log) |log| log.append(self.untracked, .{ .object = obj }) catch {};
     }
 
     // run __destruct for every queued object still at refcount 0. called at
@@ -36744,7 +36779,7 @@ pub const VM = struct {
         const fiber = self.gc_dtor_fiber orelse blk: {
             const created = self.free_fibers.pop() orelse created: {
                 const fresh = self.allocator.create(Fiber) catch return false;
-                self.fibers.append(self.allocator, fresh) catch {
+                self.fibers.append(self.untracked, fresh) catch {
                     self.allocator.destroy(fresh);
                     return false;
                 };
@@ -36856,7 +36891,7 @@ pub const VM = struct {
         if (self.debug_gc_verify) self.gcVerifyDestructing(obj);
         obj.destructed = true;
         var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
-        defer dropped.deinit(self.allocator);
+        defer dropped.deinit(self.untracked);
         const outer_log = self.release_log;
         if (self.release_depth < max_release_depth) self.release_log = &dropped;
         defer self.release_log = outer_log;
@@ -36905,7 +36940,7 @@ pub const VM = struct {
                 obj.gc_internal_refs = 0;
                 self.gc_revived += 1;
                 if (!obj.cycle_queued) {
-                    self.cycle_candidates.append(self.allocator, obj) catch {};
+                    self.cycle_candidates.append(self.untracked, obj) catch {};
                     obj.cycle_queued = true;
                     obj.gc_slot = self.gcTakeSlot();
                 }
@@ -36932,7 +36967,7 @@ pub const VM = struct {
         self.drainPendingStringReleases();
         self.freeHandle(obj);
         if (!self.debug_no_pool and reusable) {
-            self.released_objects.append(self.allocator, obj) catch {};
+            self.released_objects.append(self.untracked, obj) catch {};
         }
     }
 
@@ -36960,7 +36995,7 @@ pub const VM = struct {
         if (gen.refcount != 0) return;
         gen.state = .completed;
         var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
-        defer dropped.deinit(self.allocator);
+        defer dropped.deinit(self.untracked);
         const outer_log = self.release_log;
         if (self.release_depth < max_release_depth) self.release_log = &dropped;
         self.releaseGeneratorVars(gen);
@@ -36972,13 +37007,13 @@ pub const VM = struct {
         self.destroyDropped(dropped.items, deferred_stack_arrays);
         self.drainPendingStringReleases();
         if (gen.handle != 0) {
-            self.free_handles.append(self.allocator, gen.handle) catch {};
+            self.free_handles.append(self.untracked, gen.handle) catch {};
             gen.handle = 0;
         }
         if (!self.serve_mode) {
             gen.deinit(self.allocator);
             gen.pooled = true;
-            self.free_generators.append(self.allocator, gen) catch {};
+            self.free_generators.append(self.untracked, gen) catch {};
         }
     }
 
@@ -37001,7 +37036,7 @@ pub const VM = struct {
         }
         if (stack_root) {
             self.stat_deferred_stack += 1;
-            deferred_stack_arrays.append(self.allocator, arr) catch {};
+            deferred_stack_arrays.append(self.untracked, arr) catch {};
             return;
         }
         if (self.debug_gc_verify and self.arrayHasLiveContainerOwner(arr)) {
@@ -37013,13 +37048,13 @@ pub const VM = struct {
         // reachable through unserialize R:N) is not re-queued
         arr.elements_released = true;
         var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
-        defer dropped.deinit(self.allocator);
+        defer dropped.deinit(self.untracked);
         const outer_log = self.release_log;
         if (self.release_depth < max_release_depth) self.release_log = &dropped;
         self.releaseArrayElements(arr);
         self.release_log = outer_log;
         self.destroyDropped(dropped.items, deferred_stack_arrays);
-        self.released_arrays.append(self.allocator, arr) catch {};
+        self.released_arrays.append(self.untracked, arr) catch {};
     }
 
     // php frees a function's variables as it returns (zend_leave_helper), so
@@ -37063,7 +37098,7 @@ pub const VM = struct {
         if (self.deferred_roots.items.len > 0) self.settleDeferredRoots();
         self.draining_destructors = true;
         var deferred_stack_arrays: std.ArrayListUnmanaged(*PhpArray) = .empty;
-        defer deferred_stack_arrays.deinit(self.allocator);
+        defer deferred_stack_arrays.deinit(self.untracked);
         defer {
             self.draining_destructors = false;
             self.pending_destruct.clearRetainingCapacity();
@@ -37092,9 +37127,10 @@ pub const VM = struct {
                 self.clearArgArraySources(arr);
                 arr.deinit(self.allocator);
                 arr.pooled = true;
+                self.poolShellUncounted(.array);
                 // a builtin shell is never handed out again: a serve reset
                 // keeps it, with whatever a request stored in it
-                if (!arr.builtin) self.free_arrays.append(self.allocator, arr) catch {};
+                if (!arr.builtin) self.free_arrays.append(self.untracked, arr) catch {};
             }
             self.released_arrays.clearRetainingCapacity();
             for (self.released_objects.items) |obj| {
@@ -37110,7 +37146,8 @@ pub const VM = struct {
                 }
                 obj.deinit(self.allocator);
                 obj.pooled = true;
-                if (!obj.builtin) self.free_objects.append(self.allocator, obj) catch {};
+                self.poolShellUncounted(.object);
+                if (!obj.builtin) self.free_objects.append(self.untracked, obj) catch {};
             }
             self.released_objects.clearRetainingCapacity();
         }
@@ -37135,7 +37172,7 @@ pub const VM = struct {
     // its order once the item it runs is done
     fn drainNested(self: *VM) void {
         var deferred_stack_arrays: std.ArrayListUnmanaged(*PhpArray) = .empty;
-        defer deferred_stack_arrays.deinit(self.allocator);
+        defer deferred_stack_arrays.deinit(self.untracked);
         const marks = self.drain_marks;
         const cursors = DrainMarks{
             .destruct = self.destruct_cursor,
@@ -37240,13 +37277,13 @@ pub const VM = struct {
         self.releaseValue(fiber.suspend_value);
         self.releaseValue(fiber.return_value);
         if (fiber.handle != 0) {
-            self.free_handles.append(self.allocator, fiber.handle) catch {};
+            self.free_handles.append(self.untracked, fiber.handle) catch {};
             fiber.handle = 0;
         }
         fiber.deinit(self.allocator);
         if (!self.serve_mode) {
             fiber.pooled = true;
-            self.free_fibers.append(self.allocator, fiber) catch {};
+            self.free_fibers.append(self.untracked, fiber) catch {};
         }
     }
 
@@ -37676,7 +37713,7 @@ pub const VM = struct {
                 g.refcount -= 1;
                 if (g.refcount == 0) {
                     self.gcFreeSlot(&g.gc_slot);
-                    self.pending_gen_release.append(self.allocator, g) catch {};
+                    self.pending_gen_release.append(self.untracked, g) catch {};
                     collected += 1;
                 } else if (!g.cycle_queued) {
                     g.cycle_queued = true;
@@ -37693,7 +37730,7 @@ pub const VM = struct {
                 f.refcount -= 1;
                 if (f.refcount == 0) {
                     self.gcFreeSlot(&f.gc_slot);
-                    self.pending_fiber_release.append(self.allocator, f) catch {};
+                    self.pending_fiber_release.append(self.untracked, f) catch {};
                     collected += 1;
                 } else if (!f.cycle_queued) {
                     f.cycle_queued = true;
@@ -37712,7 +37749,7 @@ pub const VM = struct {
                 // (the cycle's internal refs keep refcount > 0 otherwise)
                 obj.gc_internal_refs = obj.refcount;
                 obj.refcount = 0;
-                self.pending_destruct.append(self.allocator, obj) catch {};
+                self.pending_destruct.append(self.untracked, obj) catch {};
                 collected += 1;
             }
         }
@@ -37730,13 +37767,13 @@ pub const VM = struct {
         for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, scratch| {
             if (scratch != 0 or g.refcount == 0) continue;
             g.refcount = 0;
-            self.pending_gen_release.append(self.allocator, g) catch {};
+            self.pending_gen_release.append(self.untracked, g) catch {};
             collected += 1;
         }
         for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, scratch| {
             if (scratch != 0 or f.refcount == 0) continue;
             f.refcount = 0;
-            self.pending_fiber_release.append(self.allocator, f) catch {};
+            self.pending_fiber_release.append(self.untracked, f) catch {};
             collected += 1;
         }
         if (dtor_count > 0) {
@@ -37783,7 +37820,7 @@ pub const VM = struct {
             if (obj.refcount == 0 and !obj.destructor_called) continue;
             obj.gc_slot = dtor_objects.get(obj) orelse 0;
             obj.cycle_queued = true;
-            self.cycle_candidates.append(self.allocator, obj) catch {
+            self.cycle_candidates.append(self.untracked, obj) catch {
                 obj.cycle_queued = false;
                 obj.gc_slot = 0;
             };
@@ -37792,7 +37829,7 @@ pub const VM = struct {
             if (arr.elements_released or arr.cycle_queued or arr.refcount == 0) continue;
             arr.gc_slot = 0;
             arr.cycle_queued = true;
-            self.cycle_array_candidates.append(self.allocator, arr) catch {
+            self.cycle_array_candidates.append(self.untracked, arr) catch {
                 arr.cycle_queued = false;
             };
         }
@@ -38320,7 +38357,7 @@ pub const VM = struct {
             }
             obj.cycle_queued = true;
             obj.gc_slot = self.gcTakeSlot();
-            self.cycle_candidates.append(self.allocator, obj) catch {
+            self.cycle_candidates.append(self.untracked, obj) catch {
                 self.gcFreeSlot(&obj.gc_slot);
                 obj.cycle_queued = false;
             };
@@ -38333,7 +38370,7 @@ pub const VM = struct {
             }
             arr.cycle_queued = true;
             arr.gc_slot = self.gcTakeSlot();
-            self.cycle_array_candidates.append(self.allocator, arr) catch {
+            self.cycle_array_candidates.append(self.untracked, arr) catch {
                 self.gcFreeSlot(&arr.gc_slot);
                 arr.cycle_queued = false;
             };
@@ -38826,7 +38863,7 @@ pub const VM = struct {
         arr.refcount -= 1;
         if (arr.refcount != 0) {
             if (!arr.elements_released and !arr.cycle_queued) {
-                self.cycle_array_candidates.append(self.allocator, arr) catch return;
+                self.cycle_array_candidates.append(self.untracked, arr) catch return;
                 arr.cycle_queued = true;
                 arr.gc_slot = self.gcTakeSlot();
                 self.noteRootAdded(.array);
@@ -38845,7 +38882,7 @@ pub const VM = struct {
         if (arr.refcount != 0 or arr.elements_released or arr.pooled) return;
         arr.elements_released = true;
         self.releaseArrayElements(arr);
-        self.released_arrays.append(self.allocator, arr) catch {};
+        self.released_arrays.append(self.untracked, arr) catch {};
     }
 
     pub fn queueArrayRelease(self: *VM, arr: *PhpArray) void {
@@ -38853,16 +38890,16 @@ pub const VM = struct {
         // queued once already (and rescued since): the queue has it, but a
         // depth-first destruction still has to see it dropped now
         if (arr.release_queued) {
-            if (self.release_log) |log| log.append(self.allocator, .{ .array = arr }) catch {};
+            if (self.release_log) |log| log.append(self.untracked, .{ .array = arr }) catch {};
             return;
         }
         if (self.debug_gc_verify) self.gcRecordZeroSite(arr);
         arr.release_queued = true;
-        self.pending_array_release.append(self.allocator, arr) catch {
+        self.pending_array_release.append(self.untracked, arr) catch {
             arr.release_queued = false;
             return;
         };
-        if (self.release_log) |log| log.append(self.allocator, .{ .array = arr }) catch {};
+        if (self.release_log) |log| log.append(self.untracked, .{ .array = arr }) catch {};
     }
 
     // zend_exception_set_previous: hang `add` off the end of the exception's
@@ -39079,7 +39116,7 @@ pub const VM = struct {
             }
             return;
         }
-        self.pending_gen_release.append(self.allocator, gen) catch {};
+        self.pending_gen_release.append(self.untracked, gen) catch {};
     }
 
     pub fn fiberRetain(fiber: *@import("value.zig").Fiber) void {
@@ -39100,7 +39137,7 @@ pub const VM = struct {
             }
             return;
         }
-        self.pending_fiber_release.append(self.allocator, fiber) catch {};
+        self.pending_fiber_release.append(self.untracked, fiber) catch {};
     }
 
     // retain/release for an OPERAND-STACK slot: objects only. arrays are not
@@ -39210,7 +39247,7 @@ pub const VM = struct {
     pub fn notePossibleRoot(self: *VM, v: Value) void {
         switch (v) {
             .object => |obj| if (!obj.destructed and !obj.cycle_queued and obj.refcount > 0) {
-                self.cycle_candidates.append(self.allocator, obj) catch return;
+                self.cycle_candidates.append(self.untracked, obj) catch return;
                 obj.cycle_queued = true;
                 obj.gc_slot = self.gcTakeSlot();
                 self.noteRootAdded(.object);
@@ -39218,7 +39255,7 @@ pub const VM = struct {
             .array => |arr| if (!arr.elements_released and arr.entries.items.len > 0) {
                 if (arr.refcount > 0) {
                     if (arr.cycle_queued) return;
-                    self.cycle_array_candidates.append(self.allocator, arr) catch return;
+                    self.cycle_array_candidates.append(self.untracked, arr) catch return;
                     arr.cycle_queued = true;
                     arr.gc_slot = self.gcTakeSlot();
                     self.noteRootAdded(.array);
@@ -39228,7 +39265,7 @@ pub const VM = struct {
                 // the table lets go, so hold it until it is stored or
                 // dropped, and let go then
                 if (arr.deferred_root) return;
-                self.deferred_roots.append(self.allocator, arr) catch return;
+                self.deferred_roots.append(self.untracked, arr) catch return;
                 arr.refcount += 1;
                 arr.deferred_root = true;
             },

@@ -58,7 +58,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     for (boundary_cases) |name| {
         const case_obj = try a.create(PhpObject);
         case_obj.* = .{ .class_name = "Random\\IntervalBoundary", .enum_case = true };
-        try vm.objects.append(a, case_obj);
+        try vm.objects.append(vm.untracked, case_obj);
         try case_obj.set(a, "name", .{ .string = Value.String.borrowed(name) });
         VM.objRetain(case_obj);
         try boundary.constants.put(a, name, .{ .object = case_obj });

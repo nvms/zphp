@@ -1754,7 +1754,7 @@ fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8, id_header: []
         c.state = .closing;
         return;
     };
-    w.vm.objects.append(w.allocator, ws_obj) catch {
+    w.vm.objects.append(w.vm.untracked, ws_obj) catch {
         c.state = .closing;
         return;
     };

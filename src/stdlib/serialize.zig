@@ -1783,7 +1783,7 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         if (top.cell == null) switch (top.value) {
             .object => |o| if (o.refcount == 0) {
                 top.value = .null;
-                try ctx.vm.pending_destruct.append(ctx.allocator, o);
+                try ctx.vm.pending_destruct.append(ctx.vm.untracked, o);
             },
             .array => |a| if (a.refcount == 0) {
                 top.value = .null;
@@ -2060,7 +2060,7 @@ fn bindDecodedArrayReference(ctx: *NativeContext, source: *PhpArray, source_key:
     const cell = first.ref orelse blk: {
         const owner = try ctx.allocator.create(values.RefCell);
         owner.* = .{};
-        try ctx.vm.ref_cells.append(ctx.allocator, owner);
+        try ctx.vm.ref_cells.append(ctx.vm.untracked, owner);
         ctx.vm.setCell(&owner.value, first.value);
         break :blk &owner.value;
     };
