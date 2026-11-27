@@ -262,6 +262,38 @@ pub fn table(vm: *VM, obj: *PhpObject, purpose: Purpose) RuntimeError!?*PhpArray
 // lists a typed property that was never initialized (one whose type forbids
 // null; zphp stores a nullable one unset as null, so it reads as null)
 pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, allocator: std.mem.Allocator) RuntimeError!void {
+    const first = listing.items.items.len;
+    try appendOwnInTableOrder(vm, obj, purpose, listing, allocator);
+    if (vm.tableOrder(obj)) |keys| try followTableOrder(vm, keys, listing.items.items[first..]);
+}
+
+// a sorted table lists its keys in their order; what joined the table since
+// goes after them, as php appends it
+fn followTableOrder(vm: *VM, keys: []const []const u8, items: []Property) RuntimeError!void {
+    const Ranked = struct { rank: usize, at: usize, prop: Property };
+    const ranked = try vm.allocator.alloc(Ranked, items.len);
+    defer vm.allocator.free(ranked);
+    for (items, 0..) |p, i| {
+        var rank: usize = keys.len;
+        if (p.key == .name) {
+            const key = try mangledName(vm, p.key.name, p.visibility, p.declaring);
+            defer vm.allocator.free(key);
+            for (keys, 0..) |k, ki| if (std.mem.eql(u8, k, key)) {
+                rank = ki;
+                break;
+            };
+        }
+        ranked[i] = .{ .rank = rank, .at = i, .prop = p };
+    }
+    std.mem.sort(Ranked, ranked, {}, struct {
+        fn lt(_: void, a: Ranked, b: Ranked) bool {
+            return if (a.rank != b.rank) a.rank < b.rank else a.at < b.at;
+        }
+    }.lt);
+    for (ranked, 0..) |r, i| items[i] = r.prop;
+}
+
+fn appendOwnInTableOrder(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, allocator: std.mem.Allocator) RuntimeError!void {
     obj.table_built = true;
     // a detached table lists the declared values it copied
     if (obj.detached_table) if (obj.slot_layout) |layout| {

@@ -1309,6 +1309,9 @@ pub const VM = struct {
     // the declared values a detached property table holds, for each object
     // with PhpObject.detached_table (freezeTable)
     frozen_tables: std.AutoHashMapUnmanaged(*PhpObject, std.ArrayListUnmanaged(FrozenProp)) = .{},
+    // the order a sort gave an object's property table: its keys as (array)
+    // spells them (mangled for private and protected), owned
+    table_orders: std.AutoHashMapUnmanaged(*PhpObject, [][]u8) = .{},
     // how many roots of each kind the buffer held when it filled
     gc_full_at: ?struct { objs: usize, arrs: usize } = null,
     // ref-returning function call mechanism: a `&function` sets these on
@@ -4313,6 +4316,9 @@ pub const VM = struct {
             var frozen = self.frozen_tables.valueIterator();
             while (frozen.next()) |list| list.deinit(self.allocator);
             self.frozen_tables.deinit(self.allocator);
+            var orders = self.table_orders.valueIterator();
+            while (orders.next()) |keys| freeTableOrder(self.allocator, keys.*);
+            self.table_orders.deinit(self.allocator);
         }
         self.released_arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
@@ -4664,6 +4670,9 @@ pub const VM = struct {
             var frozen = self.frozen_tables.valueIterator();
             while (frozen.next()) |list| list.deinit(self.allocator);
             self.frozen_tables.clearRetainingCapacity();
+            var orders = self.table_orders.valueIterator();
+            while (orders.next()) |keys| freeTableOrder(self.allocator, keys.*);
+            self.table_orders.clearRetainingCapacity();
         }
         if (self.serve_mode) {
             self.functions.clearRetainingCapacity();
@@ -4757,7 +4766,7 @@ pub const VM = struct {
     // (zend_array_dup during zend_lazy_object_init): the copy holds the
     // declared properties set then, at the values they have now, and no
     // longer follows their slots. listings read it from then on
-    fn freezeTable(self: *VM, obj: *PhpObject) RuntimeError!void {
+    pub fn freezeTable(self: *VM, obj: *PhpObject) RuntimeError!void {
         if (obj.detached_table) return;
         const layout = obj.slot_layout orelse return;
         const slots = obj.slots orelse return;
@@ -4792,6 +4801,77 @@ pub const VM = struct {
         var entry = self.frozen_tables.fetchRemove(obj) orelse return;
         for (entry.value.items) |f| self.releaseValue(f.value);
         entry.value.deinit(self.allocator);
+    }
+
+    fn freeTableOrder(allocator: Allocator, keys: [][]u8) void {
+        for (keys) |k| allocator.free(k);
+        allocator.free(keys);
+    }
+
+    // the property table takes the order of these keys (copied)
+    pub fn setTableOrder(self: *VM, obj: *PhpObject, keys: []const []const u8) RuntimeError!void {
+        const owned = try self.allocator.alloc([]u8, keys.len);
+        var done: usize = 0;
+        errdefer {
+            for (owned[0..done]) |k| self.allocator.free(k);
+            self.allocator.free(owned);
+        }
+        for (keys, 0..) |k, i| {
+            owned[i] = try self.allocator.dupe(u8, k);
+            done = i + 1;
+        }
+        self.dropTableOrder(obj);
+        try self.table_orders.put(self.allocator, obj, owned);
+    }
+
+    pub fn tableOrder(self: *VM, obj: *const PhpObject) ?[]const []const u8 {
+        if (self.table_orders.count() == 0) return null;
+        const keys = self.table_orders.get(@constCast(obj)) orelse return null;
+        return @ptrCast(keys);
+    }
+
+    pub inline fn dropTableOrder(self: *VM, obj: *PhpObject) void {
+        if (self.table_orders.count() != 0) self.dropTableOrderEntry(obj);
+    }
+
+    fn dropTableOrderEntry(self: *VM, obj: *PhpObject) void {
+        const entry = self.table_orders.fetchRemove(obj) orelse return;
+        freeTableOrder(self.allocator, entry.value);
+    }
+
+    // the detached table's entry for a slot goes (an unset through
+    // ArrayObject's storage), the slot itself untouched
+    pub fn dropFrozenSlot(self: *VM, obj: *PhpObject, slot: usize) void {
+        const list = self.frozen_tables.getPtr(obj) orelse return;
+        for (list.items, 0..) |f, i| if (f.slot == slot) {
+            const old = list.orderedRemove(i);
+            self.releaseValue(old.value);
+            return;
+        };
+    }
+
+    // a write to the detached table's entry for a slot; one unset from it
+    // joins the table again at its end, as php appends the key
+    pub fn setFrozenSlot(self: *VM, obj: *PhpObject, slot: usize, key: []const u8, value: Value) RuntimeError!void {
+        const list = self.frozen_tables.getPtr(obj) orelse return;
+        for (list.items) |*f| if (f.slot == slot) {
+            retainValue(value);
+            const old = f.value;
+            f.value = value;
+            self.releaseValue(old);
+            return;
+        };
+        try list.append(self.allocator, .{ .slot = @intCast(slot), .value = value });
+        retainValue(value);
+        if (self.table_orders.getPtr(obj)) |keys| for (keys.*, 0..) |k, i| if (std.mem.eql(u8, k, key)) {
+            const kept = try self.allocator.alloc([]u8, keys.len - 1);
+            @memcpy(kept[0..i], keys.*[0..i]);
+            @memcpy(kept[i..], keys.*[i + 1 ..]);
+            self.allocator.free(k);
+            self.allocator.free(keys.*);
+            keys.* = kept;
+            break;
+        };
     }
 
     // a clone copies the table, stale values and all
@@ -20432,6 +20512,7 @@ pub const VM = struct {
             // that point at slots point at the copy's, copied values stay
             copy.table_built = src.table_built;
             try self.copyFrozenTable(src, copy);
+            if (self.tableOrder(src)) |keys| try self.setTableOrder(copy, keys);
             if (native_clone) |hook| if (!hook(self, src, copy)) {
                 // a hook may refuse with its class's own error
                 if (self.pending_exception == null) try self.setUncloneable(src.class_name);
@@ -38812,6 +38893,7 @@ pub const VM = struct {
             }
         };
         self.dropFrozenTable(obj);
+        self.dropTableOrder(obj);
         if (obj.backingValue() != .null) {
             self.releaseValue(obj.backingValue());
             obj.lazy.?.backing = null;

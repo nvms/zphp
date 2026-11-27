@@ -629,12 +629,49 @@ fn tableSize(o: *PhpObject) usize {
 }
 
 fn tableAt(vm: *VM, o: *PhpObject, pos: usize) ?TableProp {
+    const keys = vm.tableOrder(o) orelse return rawTableAt(vm, o, pos);
+    return rawTableAt(vm, o, orderedPosition(vm, o, keys, pos) orelse return null);
+}
+
+// a sorted table's pos-th entry: the raw positions in the order of the
+// keys, what joined the table since after them
+fn orderedPosition(vm: *VM, o: *PhpObject, keys: []const []const u8, pos: usize) ?usize {
+    const n = tableSize(o);
+    if (pos >= n) return null;
+    const Ranked = struct { rank: usize, raw: usize };
+    const ranked = vm.allocator.alloc(Ranked, n) catch return pos;
+    defer vm.allocator.free(ranked);
+    for (0..n) |raw| {
+        var rank: usize = keys.len;
+        if (rawTableAt(vm, o, raw)) |prop| for (keys, 0..) |k, ki| if (prop.hasKey(k)) {
+            rank = ki;
+            break;
+        };
+        ranked[raw] = .{ .rank = rank, .raw = raw };
+    }
+    std.mem.sort(Ranked, ranked, {}, struct {
+        fn lt(_: void, a: Ranked, b: Ranked) bool {
+            return if (a.rank != b.rank) a.rank < b.rank else a.raw < b.raw;
+        }
+    }.lt);
+    return ranked[pos].raw;
+}
+
+fn rawTableAt(vm: *VM, o: *PhpObject, pos: usize) ?TableProp {
     const slot_count = if (o.slots) |s| s.len else 0;
     if (pos < slot_count) {
         const layout = o.slot_layout.?;
         const name = layout.names[pos];
         if (object_properties.isInternalState(vm, o, name)) return null;
         const declared = vm.propertyDeclaration(layout.declaring_classes[pos], name);
+        // a detached table holds its own copies, and lacks what was unset
+        // from it since
+        if (o.detached_table) {
+            for (vm.frozenTable(o)) |f| if (f.slot == pos) {
+                return .{ .name = name, .value = f.value, .slot = true, .visibility = declared.visibility, .declaring = declared.defining_class, .hole = false };
+            };
+            return .{ .name = name, .value = .null, .slot = true, .visibility = declared.visibility, .declaring = declared.defining_class, .hole = true };
+        }
         const value = o.slots.?[pos];
         const uninitialized = value == .undef or (value == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str));
         return .{ .name = name, .value = if (value == .undef) .null else value, .slot = true, .visibility = declared.visibility, .declaring = declared.defining_class, .hole = uninitialized or o.isUnset(name) };
@@ -661,6 +698,10 @@ fn tableFind(vm: *VM, o: *PhpObject, key: []const u8, holes: bool) ?TableProp {
 
 fn tableWrite(ctx: *NativeContext, o: *PhpObject, key: []const u8, value: Value) RuntimeError!void {
     if (tableFind(ctx.vm, o, key, true)) |prop| if (prop.slot) {
+        // a detached table takes the value itself; the slot keeps its own
+        if (o.detached_table) if (o.getSlotIndexForScope(prop.name, prop.declaring)) |slot| {
+            return ctx.vm.setFrozenSlot(o, slot, key, value);
+        };
         return o.setForScope(ctx.allocator, prop.name, value, prop.declaring);
     };
     try o.setDynamic(ctx.allocator, key, value);
@@ -668,6 +709,11 @@ fn tableWrite(ctx: *NativeContext, o: *PhpObject, key: []const u8, value: Value)
 
 fn tableUnset(ctx: *NativeContext, o: *PhpObject, key: []const u8) RuntimeError!void {
     const prop = tableFind(ctx.vm, o, key, false) orelse return;
+    // a detached table loses the entry; the slot keeps its value
+    if (prop.slot and o.detached_table) {
+        if (o.getSlotIndexForScope(prop.name, prop.declaring)) |slot| ctx.vm.dropFrozenSlot(o, slot);
+        return;
+    }
     if (prop.slot) {
         try o.setForScope(ctx.allocator, prop.name, .null, prop.declaring);
         try o.markUnset(ctx.allocator, prop.name);
@@ -1259,10 +1305,17 @@ fn splSort(ctx: *NativeContext, how: SplSort) RuntimeError!NativeResult {
             defer ctx.vm.releaseValue(.{ .array = table });
             table.refcount += 1;
             try sortEntries(ctx, table, how);
-            for (0..tableSize(o)) |pos| {
-                const prop = tableAt(ctx.vm, o, pos) orelse continue;
-                if (prop.slot and !prop.hole) return NativeResult.scalar(.{ .bool = true });
-            }
+            // spl_array_method sorts a separated copy of the object's
+            // property table (zend_array_dup turns the slots' entries into
+            // values), which becomes the table: it no longer follows the
+            // slots, and its listings take the sorted order
+            var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer keys.deinit(ctx.allocator);
+            var bufs = try ctx.allocator.alloc([24]u8, table.entries.items.len);
+            defer ctx.allocator.free(bufs);
+            for (table.entries.items, 0..) |entry, i| try keys.append(ctx.allocator, tableKey(entry.key, &bufs[i]));
+            try ctx.vm.freezeTable(o);
+            try ctx.vm.setTableOrder(o, keys.items);
             const SortByTable = struct {
                 keys: []const []const u8,
                 table: *PhpArray,

@@ -114,6 +114,26 @@ pub fn create(vm: *VM, obj: *PhpObject, scope: ?[]const u8, by_ref: bool) Runtim
         }
     }
     _ = try addDynamic(vm, it, obj);
+    // a sorted table is walked in its order
+    if (vm.tableOrder(obj)) |keys| {
+        const Ranked = struct { rank: usize, at: usize, item: ObjectIter.Item };
+        const ranked = try vm.allocator.alloc(Ranked, it.items.items.len);
+        defer vm.allocator.free(ranked);
+        for (it.items.items, 0..) |item, i| {
+            var rank: usize = keys.len;
+            for (keys, 0..) |k, ki| if (std.mem.eql(u8, k, item.name.bytes())) {
+                rank = ki;
+                break;
+            };
+            ranked[i] = .{ .rank = rank, .at = i, .item = item };
+        }
+        std.mem.sort(Ranked, ranked, {}, struct {
+            fn lt(_: void, a: Ranked, b: Ranked) bool {
+                return if (a.rank != b.rank) a.rank < b.rank else a.at < b.at;
+            }
+        }.lt);
+        for (ranked, 0..) |r, i| it.items.items[i] = r.item;
+    }
     return it;
 }
 
