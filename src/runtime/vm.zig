@@ -29329,6 +29329,21 @@ pub const VM = struct {
         return outcome;
     }
 
+    // zend_lazy_object_init_proxy unsets the proxy's own properties once its
+    // instance is there: every access goes to the instance, and a reference
+    // to one of them is no longer bound to it (nor typed by it)
+    fn dropProxyOwnProperties(self: *VM, proxy: *PhpObject) void {
+        if (proxy.slots) |slots| for (slots, 0..) |*slot, i| {
+            if (proxy.ref_mirrored) if (proxy.slot_layout) |layout| self.detachPropRefs(proxy, layout.names[i], null);
+            const old = slot.*;
+            slot.* = .undef;
+            self.releaseValue(old);
+        };
+        if (proxy.ref_mirrored) for (proxy.properties.keys()) |name| self.detachPropRefs(proxy, name, null);
+        for (proxy.properties.values()) |v| self.releaseValue(v);
+        proxy.clearProperties(self.allocator);
+    }
+
     fn runLazyInitializer(self: *VM, obj: *PhpObject, state: *PhpObject.LazyState) RuntimeError!void {
         // Retained snapshots force COW for arrays changed by the initializer.
         const slots = obj.slots orelse return;
@@ -29449,6 +29464,7 @@ pub const VM = struct {
             const initializer = state.initializer;
             state.initializer = .null;
             self.releaseValue(initializer);
+            self.dropProxyOwnProperties(obj);
             return;
         }
         const result = try ctx.invokeCallable(state.initializer, &.{.{ .object = obj }});
