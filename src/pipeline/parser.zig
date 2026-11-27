@@ -14,6 +14,7 @@ const Tag = Token.Tag;
 const NodeTag = Ast.Node.Tag;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{ParseError};
+const stack_grow = @import("../runtime/stack_grow.zig");
 
 pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
     var tok_buf = std.ArrayListUnmanaged(Token).empty;
@@ -110,6 +111,7 @@ fn constArrayPropNames(allocator: Allocator, nodes: []const Ast.Node, extra: []c
 }
 
 fn constOperand(nodes: []const Ast.Node, extra: []const u32, tokens: []const Token, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.callAlways(constOperand, .{ nodes, extra, tokens, idx }) orelse false;
     const n = nodes[idx];
     return switch (n.tag) {
         .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,
@@ -280,7 +282,8 @@ const Parser = struct {
     }
 
     // a nesting no php source gets through (its parser's stack is full well
-    // before), refused before zphp's own stack runs out
+    // before). nesting deeper than the running machine stack holds goes on
+    // on more of it (stack_grow.zig)
     const max_nesting_depth = 10000;
     const deep_nesting = 1000;
 
@@ -293,7 +296,15 @@ const Parser = struct {
         if (self.nesting > self.max_nesting) self.max_nesting = self.nesting;
     }
 
+    // no more machine stack could be had, which php's parser (its states on
+    // the heap) never runs out of: refused as nesting past the cap is
+    fn outOfStack(self: *Parser) Error!u32 {
+        try self.addError(.unexpected_token);
+        return error.ParseError;
+    }
+
     fn parseStatement(self: *Parser) Error!u32 {
+        if (stack_grow.needed()) return stack_grow.callAlways(parseStatement, .{self}) orelse self.outOfStack();
         try self.enterNesting();
         defer self.nesting -= 1;
         const outer_depth = self.stmt_depth;
@@ -903,6 +914,7 @@ const Parser = struct {
     }
 
     fn parseIfStmtInner(self: *Parser, alt_mode: bool) Error!u32 {
+        if (stack_grow.needed()) return stack_grow.callAlways(parseIfStmtInner, .{ self, alt_mode }) orelse self.outOfStack();
         const if_tok = self.advance();
         _ = try self.expect(.l_paren);
         const cond = try self.parseExpression();
@@ -2962,6 +2974,7 @@ const Parser = struct {
     // consumes a full PHP type expression: simple, nullable, union, intersection, DNF
     // e.g. int, ?string, int|string, Foo&Bar, (Foo&Bar)|null, ?\Throwable
     fn skipTypeHint(self: *Parser) void {
+        if (stack_grow.needed()) return stack_grow.callAlways(skipTypeHint, .{self}) orelse {};
         if (self.peek() == .question) {
             _ = self.advance();
             self.skipTypeName();
@@ -3214,6 +3227,7 @@ const Parser = struct {
     }
 
     fn parseExprPrec(self: *Parser, min_prec: u8) Error!u32 {
+        if (stack_grow.needed()) return stack_grow.callAlways(parseExprPrec, .{ self, min_prec }) orelse self.outOfStack();
         try self.enterNesting();
         defer self.nesting -= 1;
         var left = try self.parsePrefixExpr();
@@ -3417,6 +3431,7 @@ const Parser = struct {
     }
 
     fn parsePrimaryExpr(self: *Parser) Error!u32 {
+        if (stack_grow.needed()) return stack_grow.callAlways(parsePrimaryExpr, .{self}) orelse self.outOfStack();
         return switch (self.peek()) {
             .integer => blk: {
                 // php's scanner refuses an octal literal it can't read whole
@@ -3750,6 +3765,7 @@ const Parser = struct {
     }
 
     fn parseListDestructure(self: *Parser) Error!u32 {
+        if (stack_grow.needed()) return stack_grow.callAlways(parseListDestructure, .{self}) orelse self.outOfStack();
         const list_tok = self.advance(); // list
         _ = try self.expect(.l_paren);
         var targets = std.ArrayListUnmanaged(u32).empty;

@@ -4385,6 +4385,9 @@ pub const VM = struct {
         self.free_fibers.deinit(self.untracked);
         for (self.free_fiber_natives.items) |nat| self.destroyFiberNative(nat);
         self.free_fiber_natives.deinit(self.allocator);
+        // the stack segment a deep walk on this thread left for reuse (a
+        // worker thread ends with its vm)
+        @import("stack_grow.zig").releaseSpare();
         self.native_holds.deinit(self.allocator);
         self.free_objects.deinit(self.untracked);
         self.free_handles.deinit(self.untracked);

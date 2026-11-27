@@ -8,6 +8,8 @@ const ObjFunction = bytecode.ObjFunction;
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
+const stack_grow = @import("../runtime/stack_grow.zig");
+const stack_limit = @import("../runtime/stack_limit.zig");
 const class_names = @import("../runtime/class_names.zig");
 
 const compiler_strings = @import("compiler_strings.zig");
@@ -162,6 +164,7 @@ pub fn freeDefaults(allocator: Allocator, defaults: []const Value) void {
 }
 
 pub fn freeDefaultValue(allocator: Allocator, v: Value) void {
+    if (stack_grow.needed()) return stack_grow.call(freeDefaultValue, .{ allocator, v }) orelse {};
     if (v == .array and !Value.isEmptyArrayDefault(v)) {
         const arr = v.array;
         for (arr.entries.items) |entry| freeDefaultValue(allocator, entry.value);
@@ -268,6 +271,8 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
         }
     };
 
+    // a refusal left by some earlier walk isn't this compilation's
+    _ = stack_grow.takeRefused();
     try c.checkEncodingDeclares();
 
     const root = ast.nodes[0];
@@ -323,6 +328,8 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     try c.patchGotos();
     if (origin.auto_append.len > 0) try emitAutoRequire(&c, origin.auto_append);
     try c.emitOp(.halt);
+    // a walk outside any node (the import and hoisting passes) that ran out
+    if (stack_grow.takeRefused()) return c.stackExhausted();
 
     const slot_names = try c.buildSlotNames();
     const strict = strictTypesDeclared(ast, c.root_stmts);
@@ -935,7 +942,35 @@ pub const Compiler = struct {
     }
 
     pub fn compileNode(self: *Compiler, idx: u32) Error!void {
+        // zend_check_stack_limit: nesting deeper than the running stack
+        // holds goes on on more stack, or is php's compile error
+        if (stack_grow.needed()) return stack_grow.call(compileNodeChecked, .{ self, idx }) orelse self.stackExhausted();
+        return self.compileNodeChecked(idx);
+    }
+
+    // php's E_COMPILE_ERROR once a compiler walk can't get more stack, at
+    // the line being compiled
+    pub fn stackExhausted(self: *Compiler) error{CompileError} {
+        _ = stack_grow.takeRefused();
+        return self.failFmt(self.tokenAtOffset(self.current_source_offset), "Maximum call stack size of {d} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression", .{stack_limit.allowedSize()});
+    }
+
+    // the last token starting at or before a source offset
+    fn tokenAtOffset(self: *const Compiler, offset: u32) u32 {
+        const tokens = self.ast.tokens;
+        var lo: usize = 0;
+        var hi: usize = tokens.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (tokens[mid].start <= offset) lo = mid + 1 else hi = mid;
+        }
+        return @intCast(lo -| 1);
+    }
+
+    fn compileNodeChecked(self: *Compiler, idx: u32) Error!void {
         try self.compileNodeInner(idx);
+        // a predicate below ran out of stack it couldn't extend
+        if (stack_grow.takeRefused()) return self.stackExhausted();
         // zend_compile_stmt: a tick after each statement while declare(ticks)
         // is in effect (the declaration itself included)
         // (zend_emit_tick: never two ticks in a row)
@@ -949,6 +984,7 @@ pub const Compiler = struct {
     // an if whose last branch ends with a ticked statement: php's last
     // opcode for it is that tick, so it gets no second one
     fn endsInTick(self: *Compiler, idx: u32) bool {
+        if (stack_grow.needed()) return stack_grow.call(endsInTick, .{ self, idx }) orelse false;
         const node = self.ast.nodes[idx];
         const last_branch: u32 = switch (node.tag) {
             .if_simple => node.data.rhs,
@@ -1966,6 +2002,7 @@ pub const Compiler = struct {
     }
 
     pub fn evalConstExpr(self: *Compiler, idx: u32) Value {
+        if (stack_grow.needed()) return stack_grow.call(evalConstExpr, .{ self, idx }) orelse .null;
         const n = self.ast.nodes[idx];
         return switch (n.tag) {
             .integer_literal => parsePhpIntLiteral(self.ast.tokenSlice(n.main_token)),
@@ -2450,6 +2487,7 @@ pub const Compiler = struct {
         // statement's nodes after the one before it and the statement's own
         // node last, so (lo, idx) holds what a statement declares inside it
         fn walk(self: *ImportCheck, stmts: []const u32, lo: u32) Error!void {
+            if (stack_grow.needed()) return stack_grow.call(walk, .{ self, stmts, lo }) orelse self.compiler.stackExhausted();
             const c = self.compiler;
             var prev = lo;
             for (stmts) |idx| {
@@ -2874,6 +2912,7 @@ pub const Compiler = struct {
     // intermediate arrow to register a slot so the capture chains through
     // (handles `fn() => fn() => $x`)
     fn resolveArrowCapture(self: *Compiler, name: []const u8) bool {
+        if (stack_grow.needed()) return stack_grow.call(resolveArrowCapture, .{ self, name }) orelse false;
         const parent = self.arrow_parent orelse return false;
         if (parent.local_slots.contains(name)) return true;
         if (parent.arrow_parent != null) {

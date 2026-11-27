@@ -7,6 +7,7 @@ const Token = @import("token.zig").Token;
 const Value = @import("../runtime/value.zig").Value;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
+const stack_grow = @import("../runtime/stack_grow.zig");
 
 pub fn compileIfSimple(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
@@ -227,6 +228,7 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
 
 // zend_compile_foreach: $this can't be a loop variable, in a list either
 fn refuseThisTarget(self: *Compiler, idx: u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(refuseThisTarget, .{ self, idx }) orelse self.stackExhausted();
     if (idx == 0) return;
     const node = self.ast.nodes[idx];
     switch (node.tag) {

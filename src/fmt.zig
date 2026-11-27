@@ -1,6 +1,7 @@
 const std = @import("std");
 const platform = @import("platform.zig");
 const parser = @import("pipeline/parser.zig");
+const stack_grow = @import("runtime/stack_grow.zig");
 const Ast = @import("pipeline/ast.zig").Ast;
 const Token = @import("pipeline/token.zig").Token;
 const Tag = Token.Tag;
@@ -300,6 +301,7 @@ const Formatter = struct {
     }
 
     fn findFirstToken(self: *Formatter, node_idx: u32) ?u32 {
+        if (stack_grow.needed()) return stack_grow.callAlways(findFirstToken, .{ self, node_idx }) orelse null;
         if (node_idx == 0) return null;
         const node = self.ast.nodes[node_idx];
         return switch (node.tag) {
@@ -403,6 +405,7 @@ const Formatter = struct {
     }
 
     fn formatNode(self: *Formatter, node_idx: u32) void {
+        if (stack_grow.needed()) return stack_grow.callAlways(formatNode, .{ self, node_idx }) orelse {};
         if (node_idx == 0) return;
         const node = self.ast.nodes[node_idx];
         switch (node.tag) {
@@ -720,6 +723,7 @@ const Formatter = struct {
     }
 
     fn formatElseChain(self: *Formatter, else_body: u32) void {
+        if (stack_grow.needed()) return stack_grow.callAlways(formatElseChain, .{ self, else_body }) orelse {};
         if (else_body == 0) return;
         const else_node = self.ast.nodes[else_body];
         if (else_node.tag == .if_simple or else_node.tag == .if_else) {

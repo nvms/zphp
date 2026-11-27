@@ -1283,6 +1283,7 @@ test {
     _ = @import("stdlib/tokenizer.zig");
     _ = @import("runtime/native_result.zig");
     _ = @import("runtime/region.zig");
+    _ = @import("runtime/stack_grow.zig");
     _ = @import("bundle.zig");
     _ = @import("pack.zig");
     _ = @import("runtime/memory.zig");

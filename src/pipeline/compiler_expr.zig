@@ -6,6 +6,7 @@ const Value = @import("../runtime/value.zig").Value;
 const OpCode = @import("bytecode.zig").OpCode;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
+const stack_grow = @import("../runtime/stack_grow.zig");
 
 pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     const target = self.ast.nodes[node.data.lhs];
@@ -862,6 +863,7 @@ fn isSuperglobalName(name: []const u8) bool {
 }
 
 fn isCompileConst(self: *Compiler, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(isCompileConst, .{ self, idx }) orelse false;
     const node = self.ast.nodes[idx];
     return switch (node.tag) {
         .integer_literal, .float_literal, .string_literal, .true_literal, .false_literal, .null_literal => true,
@@ -952,6 +954,7 @@ fn emitPlaceOperands(self: *Compiler, target_idx: u32, rw: bool) Error!?Place {
 // whether evaluating a write target's container runs a call, so it must be
 // evaluated only once
 fn chainHasCall(self: *Compiler, node_idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(chainHasCall, .{ self, node_idx }) orelse false;
     const node = self.ast.nodes[node_idx];
     return switch (node.tag) {
         .variable, .identifier => false,
@@ -1146,6 +1149,7 @@ pub fn isGlobalsFetch(self: *Compiler, idx: u32) bool {
 
 // the variables a list assignment writes, as ensureWritable checks them
 fn ensureListWritable(self: *Compiler, idx: u32, op_token: u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(ensureListWritable, .{ self, idx, op_token }) orelse self.stackExhausted();
     if (idx == 0) return;
     const n = self.ast.nodes[idx];
     switch (n.tag) {
@@ -1257,6 +1261,7 @@ fn isConstantFetch(self: *Compiler, idx: u32) bool {
 }
 
 pub fn listHasRef(self: *Compiler, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(listHasRef, .{ self, idx }) orelse false;
     if (idx == 0) return false;
     const n = self.ast.nodes[idx];
     return switch (n.tag) {
@@ -1370,6 +1375,7 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
 // the truth of a literal operand, which php's zend_compile_short_circuiting
 // decides at compile time: `0 && x` is false without compiling x at all
 fn literalTruth(self: *Compiler, idx: u32) ?bool {
+    if (stack_grow.needed()) return stack_grow.call(literalTruth, .{ self, idx }) orelse null;
     const n = self.ast.nodes[idx];
     switch (n.tag) {
         .grouped_expr => return literalTruth(self, n.data.lhs),
@@ -1519,6 +1525,7 @@ pub fn compileSeparatedFetch(self: *Compiler, node_idx: u32) Error!bool {
 // the object an unset reaches a property through: a property on the way is
 // fetched for unset (FETCH_OBJ_UNSET), anything else read
 fn compileUnsetPropBase(self: *Compiler, node_idx: u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(compileUnsetPropBase, .{ self, node_idx }) orelse self.stackExhausted();
     const node = self.ast.nodes[node_idx];
     // an element on an unset's path is fetched for unsetting
     // (FETCH_DIM_UNSET): a missing one is null without a warning, and a
@@ -1543,6 +1550,7 @@ fn compileUnsetPropBase(self: *Compiler, node_idx: u32) Error!void {
 }
 
 fn compileUnsetDimensionBase(self: *Compiler, node_idx: u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(compileUnsetDimensionBase, .{ self, node_idx }) orelse self.stackExhausted();
     const node = self.ast.nodes[node_idx];
     if (node.tag == .array_access) {
         try compileUnsetDimensionBase(self, node.data.lhs);
@@ -1686,6 +1694,7 @@ fn compileArg(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
 }
 
 fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(compileArgLvalue, .{ self, arg_idx, guard }) orelse self.stackExhausted();
     const arg = self.ast.nodes[arg_idx];
     // an argument the callee takes by value is php's plain read (SEND_VAR)
     if (guard.by_value and (arg.tag == .array_access or arg.tag == .property_access) and try compileDelayedReadChain(self, arg)) return;
@@ -1802,6 +1811,7 @@ const SendKind = enum { reference, call, value };
 // (or `new`, include, eval: an IS_VAR) by SEND_VAR_NO_REF, a reference
 // assignment as the reference it makes, anything else as a value
 fn argSendKind(self: *Compiler, idx: u32) SendKind {
+    if (stack_grow.needed()) return stack_grow.call(argSendKind, .{ self, idx }) orelse .value;
     const node = self.ast.nodes[idx];
     return switch (node.tag) {
         .grouped_expr => switch (self.ast.nodes[node.data.lhs].tag) {
@@ -2187,6 +2197,7 @@ const ct_numeric_constants = std.StaticStringMap(f64).initComptime(.{
 // a scalar php's compiler folds (zend_eval_const_expr): literals, those
 // constants, signs and + - * of numbers. null when it isn't one
 fn compileTimeScalar(self: *Compiler, idx: u32) ?Value {
+    if (stack_grow.needed()) return stack_grow.call(compileTimeScalar, .{ self, idx }) orelse null;
     const n = self.ast.nodes[idx];
     switch (n.tag) {
         .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => return self.evalConstExpr(idx),
@@ -2460,6 +2471,7 @@ fn compileArrayMapLoop(self: *Compiler, call_node: Ast.Node, args: []const u32) 
 // an expression php's compiler folds to a constant scalar: literals and
 // operators over them
 fn foldsToScalar(self: *Compiler, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(foldsToScalar, .{ self, idx }) orelse false;
     const node = self.ast.nodes[idx];
     return switch (node.tag) {
         .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,
@@ -3074,6 +3086,7 @@ pub fn compilePropWriteBase(self: *Compiler, node_idx: u32) Error!void {
 // for a read-modify-write (`+=`, `++`) the variable is fetched as php's
 // BP_VAR_RW, which warns when it is undefined
 fn compilePropFetchBase(self: *Compiler, node_idx: u32, rw: bool) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(compilePropFetchBase, .{ self, node_idx, rw }) orelse self.stackExhausted();
     const node = self.ast.nodes[node_idx];
     // FETCH_W of a ${...} variable creates it
     if (!rw and node.tag == .variable_variable) {
@@ -3141,6 +3154,7 @@ fn constDimChainRoot(self: *Compiler, node_idx: u32) bool {
 // constant's value goes into a hidden variable, the temporary php writes
 // into, and the chain is vivified from there
 fn compileConstDimChain(self: *Compiler, node_idx: u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(compileConstDimChain, .{ self, node_idx }) orelse self.stackExhausted();
     const node = self.ast.nodes[node_idx];
     switch (node.tag) {
         .array_access => {
@@ -3181,6 +3195,7 @@ fn dimWriteChainRoot(self: *Compiler, node_idx: u32) bool {
 // php fetches them for RW, so an undefined root variable and a missing
 // intermediate element warn before they are created
 fn compileVivifyChainRw(self: *Compiler, node_idx: u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(compileVivifyChainRw, .{ self, node_idx }) orelse self.stackExhausted();
     const node = self.ast.nodes[node_idx];
     if (node.tag == .array_access and node.data.rhs != 0) {
         try compileVivifyChainRw(self, node.data.lhs);
@@ -3207,6 +3222,7 @@ fn compileVivifyChainRw(self: *Compiler, node_idx: u32) Error!void {
 }
 
 pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(compileVivifyChain, .{ self, node_idx }) orelse self.stackExhausted();
     const node = self.ast.nodes[node_idx];
     if (node.tag == .array_access) {
         try compileVivifyChain(self, node.data.lhs);
@@ -3425,6 +3441,7 @@ fn compileReferenceSourceAs(self: *Compiler, source: u32, name: []const u8) Erro
 // php's type name for a value the compiler knows (zend_eval_const_expr
 // folds it to a zval), or null when it is known only at run time
 fn compileTimeTypeName(self: *Compiler, idx: u32) ?[]const u8 {
+    if (stack_grow.needed()) return stack_grow.call(compileTimeTypeName, .{ self, idx }) orelse null;
     if (idx == 0) return null;
     const n = self.ast.nodes[idx];
     return switch (n.tag) {
@@ -4156,6 +4173,7 @@ fn staticClassOperand(self: *Compiler, class_node: Ast.Node) ![]const u8 {
 
 // an operator expression over literals, which php folds while compiling
 pub fn foldsToConstant(self: *Compiler, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(foldsToConstant, .{ self, idx }) orelse false;
     const n = self.ast.nodes[idx];
     return switch (n.tag) {
         .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal, .string_literal => n.tag != .string_literal or self.ast.tokens[n.main_token].tag != .heredoc,
@@ -4182,6 +4200,7 @@ pub fn foldsToConstant(self: *Compiler, idx: u32) bool {
 
 // an expression php folds to a constant other than a string
 fn foldsToNonString(self: *Compiler, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(foldsToNonString, .{ self, idx }) orelse false;
     const n = self.ast.nodes[idx];
     return switch (n.tag) {
         .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,

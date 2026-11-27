@@ -11,6 +11,7 @@ const strings = @import("compiler_strings.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const gcvt = @import("../stdlib/formatted_print.zig").gcvt;
 const Value = @import("../runtime/value.zig").Value;
+const stack_grow = @import("../runtime/stack_grow.zig");
 
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error;
@@ -188,6 +189,7 @@ const Exporter = struct {
 
     // zend_ast_export_name: a string printed bare, anything else as itself
     fn name(e: *Exporter, i: u32, indent: u32) Error!void {
+        if (stack_grow.needed()) return stack_grow.callAlways(name, .{ e, i, indent }) orelse {};
         const n = e.node(i);
         if (n.tag == .string_literal) {
             if (try e.literalString(n)) |s| {
@@ -405,6 +407,7 @@ const Exporter = struct {
     }
 
     fn expr(e: *Exporter, i: u32, priority: u32, indent: u32) Error!void {
+        if (stack_grow.needed()) return stack_grow.callAlways(expr, .{ e, i, priority, indent }) orelse {};
         if (i == 0) return;
         const n = e.node(i);
         if (e.cc) |cc| if (e.constNode(cc, i, n, indent) catch |err| if (err == error.OutOfMemory) return error.OutOfMemory else false) return;
@@ -880,6 +883,7 @@ const Exporter = struct {
 
     // literals and operators over them: what zend_eval_const_expr folds
     fn literalOnly(ast: *const Ast, i: u32) bool {
+        if (stack_grow.needed()) return stack_grow.callAlways(literalOnly, .{ ast, i }) orelse false;
         if (i == 0) return true;
         const n = ast.nodes[i];
         return switch (n.tag) {
@@ -908,6 +912,7 @@ const Exporter = struct {
     }
 
     fn foldedValue(v: Value) bool {
+        if (stack_grow.needed()) return stack_grow.callAlways(foldedValue, .{v}) orelse false;
         return switch (v) {
             .null, .bool, .int, .float => true,
             .string => |s| s.bytes().len == 0 or s.bytes()[0] != 0,
@@ -921,6 +926,7 @@ const Exporter = struct {
 
     // zend_ast_export_zval
     fn zval(e: *Exporter, v: Value) Error!void {
+        if (stack_grow.needed()) return stack_grow.callAlways(zval, .{ e, v }) orelse {};
         if (v.isEmptyArrayDefault()) return e.str("[]");
         switch (v) {
             .null => try e.str("null"),
@@ -1340,6 +1346,7 @@ const Exporter = struct {
     // ---- statements
 
     fn stmts(e: *Exporter, i: u32, indent: u32) Error!void {
+        if (stack_grow.needed()) return stack_grow.callAlways(stmts, .{ e, i, indent }) orelse {};
         if (i == 0) return;
         const n = e.node(i);
         if (n.tag == .block) {
@@ -1355,6 +1362,7 @@ const Exporter = struct {
 
     // zend_ast_export_stmt for one statement
     fn stmt(e: *Exporter, i: u32, indent: u32) Error!void {
+        if (stack_grow.needed()) return stack_grow.callAlways(stmt, .{ e, i, indent }) orelse {};
         const n = e.node(i);
         switch (n.tag) {
             .expression_stmt => {

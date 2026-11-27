@@ -16,6 +16,10 @@ const Bounds = struct { low: usize, high: usize };
 
 threadlocal var limit: usize = 0;
 threadlocal var usable: usize = 0;
+// whether walkers of nested input may go on past the limit on more stack
+// (stack_grow.zig): not when zend.max_allowed_stack_size sets the size,
+// which php enforces, nor when nothing is checked
+threadlocal var growable: bool = false;
 
 // the first address below which the thread is out of stack
 pub inline fn overflowed() bool {
@@ -38,6 +42,11 @@ pub fn current() usize {
 pub fn allowedSize() usize {
     if (limit == 0) init();
     return usable;
+}
+
+pub fn canGrow() bool {
+    if (limit == 0) init();
+    return growable;
 }
 
 // the limits in force on the running stack, kept by whoever switches to
@@ -65,9 +74,18 @@ pub fn enter(low: usize, high: usize) void {
     setFrom(.{ .low = low, .high = high });
 }
 
+// the limit on a segment continuing the running stack (stack_grow.zig): the
+// size php reports stays the thread's
+pub fn enterExtension(low: usize, high: usize) void {
+    const kept = usable;
+    setFrom(.{ .low = low, .high = high });
+    usable = kept;
+}
+
 pub const message_format = "Maximum call stack size of {d} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?";
 
 fn init() void {
+    growable = false;
     const bounds = threadBounds() orelse {
         // a platform whose stack can't be found isn't checked
         limit = 1;
@@ -94,6 +112,7 @@ fn init() void {
         }
     }
     setFrom(bounds);
+    growable = true;
 }
 
 // OnUpdateReservedStackSize's minimum: ZEND_ALLOCA_MAX_SIZE plus 16K

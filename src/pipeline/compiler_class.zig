@@ -16,6 +16,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
+const stack_grow = @import("../runtime/stack_grow.zig");
 // Declaration dependencies must use the same alias/absolute/namespace-relative
 // resolution as expressions, including the early-binding eligibility pass.
 const resolveNodeClassName = @import("compiler_expr.zig").resolveNodeClassName;
@@ -248,6 +249,7 @@ fn freeParsedAttrs(allocator: Allocator, attrs: []const ParsedAttr) void {
 }
 
 fn freeParsedAttrValue(allocator: Allocator, value: Value) void {
+    if (stack_grow.needed()) return stack_grow.call(freeParsedAttrValue, .{ allocator, value }) orelse {};
     if (value != .array or Value.isEmptyArrayDefault(value)) return;
     for (value.array.entries.items) |entry| freeParsedAttrValue(allocator, if (entry.ref) |ref| ref.* else entry.value);
     value.array.deinit(allocator);
@@ -476,6 +478,7 @@ fn attributeArgument(self: *Compiler, idx: u32, target: u32) Error!Value {
 
 // `[,]` anywhere in the expression, which php refuses before anything else
 fn hasEmptyArrayElement(ast: *const Ast, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(hasEmptyArrayElement, .{ ast, idx }) orelse false;
     if (idx == 0) return false;
     const node = ast.nodes[idx];
     return switch (node.tag) {
@@ -504,6 +507,7 @@ pub fn checkConstExpr(self: *Compiler, idx: u32, allow_dynamic: bool, at: u32) E
 }
 
 fn constExprWalk(self: *Compiler, idx: u32, allow_dynamic: bool) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(constExprWalk, .{ self, idx, allow_dynamic }) orelse self.stackExhausted();
     if (idx == 0) return;
     const ast = self.ast;
     const node = ast.nodes[idx];
@@ -732,6 +736,7 @@ fn checkConstParentFetches(self: *Compiler, members: []const u32) Error!void {
 
 // the token of a `<name>::` class fetch inside a constant expression
 fn findRelative(ast: *const Ast, idx: u32, name: []const u8) ?u32 {
+    if (stack_grow.needed()) return stack_grow.call(findRelative, .{ ast, idx, name }) orelse null;
     if (idx == 0) return null;
     const node = ast.nodes[idx];
     switch (node.tag) {
@@ -758,6 +763,7 @@ fn findRelative(ast: *const Ast, idx: u32, name: []const u8) ?u32 {
 
 // the token of a static::class inside a constant expression
 fn findStaticClass(ast: *const Ast, idx: u32) ?u32 {
+    if (stack_grow.needed()) return stack_grow.call(findStaticClass, .{ ast, idx }) orelse null;
     const node = ast.nodes[idx];
     switch (node.tag) {
         .static_prop_access => {
@@ -795,6 +801,7 @@ fn namedClassName(self: *Compiler, idx: u32) ?[]const u8 {
 }
 
 fn attrArgFolds(self: *Compiler, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(attrArgFolds, .{ self, idx }) orelse false;
     const node = self.ast.nodes[idx];
     return switch (node.tag) {
         .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,
@@ -852,6 +859,7 @@ fn emitAttributeData(self: *Compiler, attrs: []const ParsedAttr) Error!void {
 }
 
 fn emitAttrValue(self: *Compiler, val: Value) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(emitAttrValue, .{ self, val }) orelse self.stackExhausted();
     switch (val) {
         .null => try self.emitByte(0x00),
         .int => |v| {
@@ -1416,6 +1424,7 @@ fn checkConstDecls(self: *Compiler, class_name: []const u8, members: []const u32
 }
 
 fn foldsAtCompileTime(ast: *const Ast, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(foldsAtCompileTime, .{ ast, idx }) orelse false;
     const node = ast.nodes[idx];
     return switch (node.tag) {
         .integer_literal, .float_literal, .string_literal, .true_literal, .false_literal, .null_literal => true,
@@ -1450,6 +1459,7 @@ fn literalOpErrors(ast: *const Ast, idx: u32) bool {
 }
 
 fn literalOperand(ast: *const Ast, idx: u32, errors: *bool) LiteralOperand {
+    if (stack_grow.needed()) return stack_grow.call(literalOperand, .{ ast, idx, errors }) orelse .unknown;
     if (idx == 0) return .unknown;
     const node = ast.nodes[idx];
     switch (node.tag) {
@@ -2294,6 +2304,7 @@ fn relativeClassNameDefault(self: *Compiler, idx: u32, function: []const u8) ?[]
 // them, arrays of them); anything else (`new` included) is
 // compiled to an initializer the call runs
 fn sentinelDefault(ast: *const Ast, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(sentinelDefault, .{ ast, idx }) orelse false;
     if (idx == 0) return true;
     const node = ast.nodes[idx];
     return switch (node.tag) {
@@ -2329,6 +2340,7 @@ fn sentinelDefault(ast: *const Ast, idx: u32) bool {
 }
 
 fn numericSentinel(ast: *const Ast, idx: u32) bool {
+    if (stack_grow.needed()) return stack_grow.call(numericSentinel, .{ ast, idx }) orelse false;
     const tag = ast.nodes[idx].tag;
     if (tag == .array_literal) return false;
     if (tag == .string_literal) return !isEncapsString(ast, ast.nodes[idx]) and Value.isNumericString(literalBody(ast.tokenSlice(ast.nodes[idx].main_token)));
@@ -2885,6 +2897,7 @@ fn defaultIsImmediate(ast: *const Ast, idx: u32) bool {
 }
 
 fn literalDefault(ast: *const Ast, idx: u32, class_refs: bool) bool {
+    if (stack_grow.needed()) return stack_grow.call(literalDefault, .{ ast, idx, class_refs }) orelse false;
     if (idx == 0) return true;
     const node = ast.nodes[idx];
     return switch (node.tag) {
@@ -3228,6 +3241,7 @@ fn notePhpBound(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(hoistEarlyClasses, .{ self, stmts }) orelse self.stackExhausted();
     for (stmts) |idx| {
         const node = self.ast.nodes[idx];
         switch (node.tag) {
@@ -3328,6 +3342,7 @@ pub fn assignRtdKeys(self: *Compiler, stmts: []const u32, keys: *std.AutoHashMap
 // some), no traits, and a parent, if any, already bound; an interface
 // extending none; a trait using none
 fn collectCompileTimeBound(self: *Compiler, stmts: []const u32, names: *std.StringHashMapUnmanaged(void), tokens: *std.AutoHashMapUnmanaged(u32, void)) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(collectCompileTimeBound, .{ self, stmts, names, tokens }) orelse self.stackExhausted();
     for (stmts) |idx| {
         const node = self.ast.nodes[idx];
         const binds = switch (node.tag) {
