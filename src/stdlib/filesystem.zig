@@ -3650,6 +3650,8 @@ fn closeHandle(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
     if (getFileHandle(obj)) |file| {
         // never close stdin/stdout/stderr - they're shared with the host process
         if (isNetStream(obj)) {
+            // the TLS session ends before its socket
+            if (streams.get(obj)) |s| if (s.tls) |t| @import("xp_ssl.zig").shutdown(t);
             platform.closeSocket(obj.get("__fd").int);
         } else if (!platform.isStdio(file)) {
             platform.closeFile(file, obj.get("__fd").int);
@@ -4149,6 +4151,8 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
         // none of the generic ones
         for (s.meta.array.entries.items) |e| try result.set(ctx.allocator, e.key, e.value);
     } else {
+        // the openssl transport reports its crypto first
+        if (s.tls) |t| try @import("xp_ssl.zig").metaData(ctx, t, result);
         try result.set(ctx.allocator, key("timed_out"), .{ .bool = obj.get("__timed_out") == .bool and obj.get("__timed_out").bool });
         try result.set(ctx.allocator, key("blocked"), .{ .bool = !(blocking == .bool and !blocking.bool) });
         try result.set(ctx.allocator, key("eof"), .{ .bool = try streams.eof(ctx, obj) });
@@ -4437,7 +4441,7 @@ fn urlWrapperRefused(ctx: *NativeContext, path: []const u8, options: i64) Runtim
 
 // STREAM_USE_URL's test: the path's wrapper is one php marks is_url (http,
 // ftp, data:, or a user wrapper registered with STREAM_IS_URL)
-fn usesUrlWrapper(vm: *VM, path: []const u8) bool {
+pub fn usesUrlWrapper(vm: *VM, path: []const u8) bool {
     if (userWrapperEntry(vm, path)) |entry| if (entry.class != null) return entry.is_url;
     var n: usize = 0;
     while (n < path.len and (std.ascii.isAlphanumeric(path[n]) or path[n] == '+' or path[n] == '-' or path[n] == '.')) n += 1;
@@ -4631,7 +4635,7 @@ fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError
 
 fn native_stream_get_transports(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
-    const names = [_][]const u8{ "tcp", "udp", "unix", "udg", "ssl", "tls", "tlsv1.2", "tlsv1.3" };
+    const names = [_][]const u8{ "tcp", "udp", "unix", "udg", "ssl", "tls", "tlsv1.0", "tlsv1.1", "tlsv1.2", "tlsv1.3" };
     for (names) |n| {
         // php's windows build registers no unix or udg transport
         if (platform.is_windows and (std.mem.eql(u8, n, "unix") or std.mem.eql(u8, n, "udg"))) continue;

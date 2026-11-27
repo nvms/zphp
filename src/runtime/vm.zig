@@ -2971,6 +2971,7 @@ pub const VM = struct {
 
         try @import("../stdlib/hash.zig").register(vm, allocator);
         try @import("../stdlib/zlib_context.zig").register(vm, allocator);
+        try @import("../stdlib/xp_ssl.zig").register(vm, allocator);
 
         // the class unserialize() gives objects of classes it can't load
         // (ext/standard/incomplete_class.c); its accesses are refused in the
@@ -3720,6 +3721,19 @@ pub const VM = struct {
             .{ "STREAM_NOTIFY_RESOLVE", 1 },       .{ "STREAM_NOTIFY_SEVERITY_INFO", 0 }, .{ "STREAM_NOTIFY_SEVERITY_WARN", 1 },
             .{ "STREAM_NOTIFY_SEVERITY_ERR", 2 },
         }) |k| if (!c.contains(k[0])) try c.put(a, k[0], .{ .int = k[1] });
+        // php_stream_transport.h's crypto methods and statuses
+        inline for (.{
+            .{ "STREAM_CRYPTO_METHOD_ANY_CLIENT", 127 },     .{ "STREAM_CRYPTO_METHOD_SSLv2_CLIENT", 3 },     .{ "STREAM_CRYPTO_METHOD_SSLv3_CLIENT", 5 },
+            .{ "STREAM_CRYPTO_METHOD_SSLv23_CLIENT", 57 },   .{ "STREAM_CRYPTO_METHOD_TLS_CLIENT", 121 },     .{ "STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT", 9 },
+            .{ "STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT", 17 },  .{ "STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT", 33 },  .{ "STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT", 65 },
+            .{ "STREAM_CRYPTO_METHOD_ANY_SERVER", 126 },     .{ "STREAM_CRYPTO_METHOD_SSLv2_SERVER", 2 },     .{ "STREAM_CRYPTO_METHOD_SSLv3_SERVER", 4 },
+            .{ "STREAM_CRYPTO_METHOD_SSLv23_SERVER", 120 },  .{ "STREAM_CRYPTO_METHOD_TLS_SERVER", 120 },     .{ "STREAM_CRYPTO_METHOD_TLSv1_0_SERVER", 8 },
+            .{ "STREAM_CRYPTO_METHOD_TLSv1_1_SERVER", 16 },  .{ "STREAM_CRYPTO_METHOD_TLSv1_2_SERVER", 32 },  .{ "STREAM_CRYPTO_METHOD_TLSv1_3_SERVER", 64 },
+            .{ "STREAM_CRYPTO_PROTO_SSLv3", 4 },             .{ "STREAM_CRYPTO_PROTO_TLSv1_0", 8 },           .{ "STREAM_CRYPTO_PROTO_TLSv1_1", 16 },
+            .{ "STREAM_CRYPTO_PROTO_TLSv1_2", 32 },          .{ "STREAM_CRYPTO_PROTO_TLSv1_3", 64 },          .{ "STREAM_CRYPTO_STATUS_NONE", 0 },
+            .{ "STREAM_CRYPTO_STATUS_WANT_READ", 1 },        .{ "STREAM_CRYPTO_STATUS_WANT_WRITE", 2 },
+        }) |k| try c.put(a, k[0], .{ .int = k[1] });
+        try c.put(a, "OPENSSL_DEFAULT_STREAM_CIPHERS", .{ .string = Value.String.borrowed(@import("../stdlib/xp_ssl.zig").default_ciphers) });
         try c.put(a, "STREAM_CLIENT_PERSISTENT", .{ .int = 1 });
         try c.put(a, "STREAM_CLIENT_ASYNC_CONNECT", .{ .int = 2 });
         try c.put(a, "STREAM_SERVER_BIND", .{ .int = 4 });
@@ -3983,6 +3997,7 @@ pub const VM = struct {
         @import("../stdlib/gmp.zig").cleanupResources(self.objects);
         @import("../stdlib/hash.zig").cleanupResources(self.objects);
         @import("../stdlib/zlib_context.zig").cleanupResources(self.objects);
+        @import("../stdlib/xp_ssl.zig").cleanupResources(self.objects);
         @import("../stdlib/workers.zig").cleanupResources(self.objects);
         @import("../stdlib/channel.zig").cleanupResources(self.objects);
         @import("../stdlib/buffer.zig").cleanupResources(self.objects);

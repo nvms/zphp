@@ -47,6 +47,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("openssl.zig").entries,
         @import("curl.zig").entries,
         @import("network.zig").entries,
+        @import("xp_ssl.zig").entries,
         @import("simplexml.zig").entries,
         @import("intl.zig").entries,
         @import("bcmath.zig").entries,

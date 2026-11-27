@@ -18,6 +18,7 @@ const fs = @import("filesystem.zig");
 const filters = @import("stream_filters.zig");
 const user_streams = @import("user_streams.zig");
 const http = @import("http_wrapper.zig");
+const xp_ssl = @import("xp_ssl.zig");
 
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -91,6 +92,8 @@ pub const Stream = struct {
     // the Io\Poll\Watchers registered with this stream (io_poll.zig), told
     // when it closes
     poll_watchers: std.ArrayListUnmanaged(usize) = .empty,
+    // a tcp socket's TLS state (xp_ssl.zig), once it has any
+    tls: ?*xp_ssl.Tls = null,
 
     pub fn buffered(self: *const Stream) usize {
         return self.writepos - self.readpos;
@@ -184,6 +187,8 @@ pub fn release(obj: *PhpObject) void {
     @import("io_poll.zig").streamReleased(s);
     filters.releaseChain(&s.readfilters);
     filters.releaseChain(&s.writefilters);
+    if (s.tls) |t| xp_ssl.free(t);
+    s.tls = null;
     s.deinit();
     const a = s.allocator;
     a.destroy(s);
@@ -267,6 +272,7 @@ pub fn rawRead(ctx: *NativeContext, obj: *PhpObject, s: *Stream, dest: []u8) Run
             return @intCast(n);
         },
         .fd => |io| {
+            if (io.socket) if (xp_ssl.activeOf(obj, s)) |t| return xp_ssl.read(ctx, obj, s, t, dest);
             if (s.may_block) ctx.vm.flushOutputToStdout();
             // php_sock_stream_wait_for_data: a blocking socket with a
             // timeout from stream_set_timeout waits that long for data, and
@@ -338,7 +344,10 @@ pub fn rawWrite(ctx: *NativeContext, obj: *PhpObject, s: *Stream, data: []const 
             return @intCast(data.len);
         },
         .accumulate => return @intCast(try fs.accumulate(ctx, obj, data)),
-        .fd => |io| return fs.fdWrite(ctx, obj, io, data),
+        .fd => |io| {
+            if (io.socket) if (xp_ssl.activeOf(obj, s)) |t| return xp_ssl.write(ctx, obj, s, t, data);
+            return fs.fdWrite(ctx, obj, io, data);
+        },
         .none => return -1,
     }
 }
@@ -666,6 +675,8 @@ pub fn eof(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
     if (!s.eof) {
         if (backend(obj) == .user) {
             if (try user_streams.checkLiveness(ctx, obj, s, fs.fileHandleWrapper(obj).?)) s.eof = true;
+        } else if (xp_ssl.activeOf(obj, s)) |t| {
+            if (!xp_ssl.alive(obj, t)) s.eof = true;
         }
     }
     return s.eof;

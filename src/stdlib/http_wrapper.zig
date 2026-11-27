@@ -271,7 +271,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "Unable to find the socket transport \"ssl\" - did you forget to enable it when you configured PHP?", .{});
         return null;
     }
-    const stream = (try network.connectTransport(ctx, transport, timeout_s, options)) orelse return null;
+    const stream = (try network.connectTransport(ctx, transport, timeout_s, options, context)) orelse return null;
     var keep_stream = false;
     defer if (!keep_stream) {
         _ = fs.closeStream(ctx, stream) catch {};

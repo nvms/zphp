@@ -46,6 +46,7 @@ pub const classes = std.StaticStringMap(Rule).initComptime(.{
     .{ "LDAP\\Result", Rule.always },
     .{ "MessageFormatter", Rule.always },
     .{ "NumberFormatter", Rule.always },
+    .{ "OpenSSLCertificate", Rule.always },
     .{ "PDO", Rule.always },
     .{ "PDOStatement", Rule.always },
     .{ "PDO\\Dblib", Rule.always },

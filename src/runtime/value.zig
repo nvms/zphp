@@ -1245,6 +1245,8 @@ pub const NativeHandle = struct {
         // an Io\Poll\Context's and an Io\Poll\Watcher's state (io_poll.zig)
         poll_context,
         poll_watcher,
+        // an OpenSSLCertificate's X509 (xp_ssl.zig)
+        x509,
         _,
     };
 

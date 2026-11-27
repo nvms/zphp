@@ -14,6 +14,7 @@ const streams = @import("streams.zig");
 const user_streams = @import("user_streams.zig");
 const value_mod = @import("../runtime/value.zig");
 const Args = @import("string_ports.zig").Args;
+const xp_ssl = @import("xp_ssl.zig");
 
 pub const entries = .{
     .{ "gethostbyname", native_gethostbyname },
@@ -265,6 +266,12 @@ pub fn selectDescriptor(ctx: *NativeContext, obj: *PhpObject, report: bool) Runt
         try @import("stream_errors.zig").warn(ctx, .CastNotSupported, @import("stream_errors.zig").streamLabel(ctx.vm, obj), "Cannot represent a stream of type {s} as a select()able descriptor", .{label});
         return null;
     }
+    // PHP_STREAM_AS_FD_FOR_SELECT on a TLS stream: what openssl already
+    // decrypted moves to the read buffer, which select counts as ready
+    if (streams.get(obj)) |s| if (s.writepos == s.readpos) if (xp_ssl.activeOf(obj, s)) |t| {
+        const pending = xp_ssl.pending(t);
+        if (pending > 0) _ = try streams.fillReadBuffer(ctx, obj, s, @min(pending, s.chunk_size));
+    };
     return objectFd(obj);
 }
 
@@ -471,7 +478,7 @@ fn throwValue(ctx: *NativeContext, msg: []const u8) RuntimeError {
 }
 
 // php_stream_context_set_option: options[wrapper][option] = value
-fn setContextOption(ctx: *NativeContext, context: *PhpObject, wrapper_name: []const u8, option: []const u8, value: Value) RuntimeError!void {
+pub fn setContextOption(ctx: *NativeContext, context: *PhpObject, wrapper_name: []const u8, option: []const u8, value: Value) RuntimeError!void {
     const merged = try freshArray(ctx, context.get("options"));
     const wkey = try Value.String.adopt(ctx.allocator, try ctx.allocator.dupe(u8, wrapper_name));
     defer wkey.release();
@@ -839,7 +846,8 @@ fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
     if (has_unix_transports and std.ascii.eqlIgnoreCase(scheme, "unix")) return .{ .unix = rest };
     if (has_unix_transports and std.ascii.eqlIgnoreCase(scheme, "udg")) return .{ .udg = rest };
     const udp = std.ascii.eqlIgnoreCase(scheme, "udp");
-    if (!udp and !std.ascii.eqlIgnoreCase(scheme, "tcp")) return error.UnsupportedTransport;
+    // the openssl transports are tcp sockets too
+    if (!udp and !std.ascii.eqlIgnoreCase(scheme, "tcp") and xp_ssl.transportMethod(scheme, null) == null) return error.UnsupportedTransport;
     const hp = try splitHostPort(rest);
     const addr = net.Address.parseIp(hp.host, hp.port) catch resolved: {
         const list = try net.getAddressList(allocator, hp.host, hp.port);
@@ -1010,7 +1018,7 @@ pub fn defaultSocketTimeoutSeconds(ctx: *NativeContext) f64 {
 // php_stream_xport_create for a client: the connected socket stream for a
 // transport url ("tcp://host:port"), or null with why in the wrapper's
 // error log
-pub fn connectTransport(ctx: *NativeContext, target: []const u8, timeout_s: f64, options: i64) RuntimeError!?*PhpObject {
+pub fn connectTransport(ctx: *NativeContext, target: []const u8, timeout_s: f64, options: i64, context: ?*PhpObject) RuntimeError!?*PhpObject {
     const timeout_ms: ?i32 = if (timeout_s >= 0) @intFromFloat(@min(timeout_s * 1000.0, @as(f64, std.math.maxInt(i32)))) else null;
     const endpoint = parseEndpoint(ctx.allocator, target) catch |err| {
         try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "{s}", .{socketError(err).message});
@@ -1026,7 +1034,33 @@ pub fn connectTransport(ctx: *NativeContext, target: []const u8, timeout_s: f64,
         try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "{s}", .{socketError(err).message});
         return null;
     };
-    return try endpointStream(ctx, sock, endpoint, true, null);
+    const obj = try endpointStream(ctx, sock, endpoint, true, null);
+    // php_stream_xport_create gives the socket its context before it connects
+    if (context) |c| if (ctx.vm.default_stream_context != c) try obj.set(ctx.allocator, "__context", .{ .resource = c });
+    if (!try startCrypto(ctx, obj, endpoint, target, if (timeout_ms) |ms| @as(i64, ms) * 1000 else -1, context)) {
+        _ = try filesystem.closeStream(ctx, obj);
+        return null;
+    }
+    return obj;
+}
+
+// what the openssl factory and connect do for a tcp client: record the
+// socket's crypto method, connect timeout and host name, and run the
+// handshake a crypto transport (ssl://, tls://) starts with. false once
+// php's warnings for a failed handshake are out
+fn startCrypto(ctx: *NativeContext, obj: *PhpObject, endpoint: Endpoint, target: []const u8, timeout_us: i64, context: ?*PhpObject) RuntimeError!bool {
+    if (endpoint != .tcp) return true;
+    const scheme, const resource = splitScheme(target);
+    const context_obj = context;
+    // fsockopen's socket has no context at all, not even the default one
+    if (context == null) try obj.set(ctx.allocator, "__context", .{ .bool = false });
+    try xp_ssl.initSocket(ctx, obj, xp_ssl.transportMethod(scheme, context_obj), resource, timeout_us);
+    // the ssl context's session_stream resumes another stream's session
+    var session: ?*PhpObject = null;
+    if (@import("http_wrapper.zig").contextOption(context_obj, "ssl", "session_stream")) |v| {
+        if (v == .resource and std.mem.eql(u8, v.resource.class_name, "FileHandle")) session = v.resource;
+    }
+    return xp_ssl.enableOnConnect(ctx, obj, session);
 }
 
 fn defaultSocketTimeout(ctx: *NativeContext) f64 {
@@ -1076,10 +1110,11 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
         else => {},
     }
     if (owned) |o| e = .{ .code = 0, .message = o };
-    if (err == error.ListenWithoutText) e = .{ .code = 0, .message = "" };
+    if (err == error.ListenWithoutText or err == error.CryptoFailed) e = .{ .code = 0, .message = "" };
     if (err == error.UnixBindFailed) e = .{ .code = 0, .message = socketError(unix_bind_error).message };
-    // php had already made the stream when the connect failed, so its id is gone
-    ctx.vm.skipResourceId();
+    // php had already made the stream when the connect failed, so its id is
+    // gone (a failed handshake closed the stream zphp made too)
+    if (err != error.CryptoFailed) ctx.vm.skipResourceId();
     // stream_socket_client quotes the target with php_addslashes
     var quoted: std.ArrayListUnmanaged(u8) = .empty;
     defer quoted.deinit(ctx.allocator);
@@ -1096,7 +1131,7 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
         try quoted.print(ctx.allocator, "{s}:{d}", .{ host[0 .. std.mem.indexOfScalar(u8, host, 0) orelse host.len], port });
     } else try quoted.appendSlice(ctx.allocator, target);
     const name = if (comptime std.mem.eql(u8, func, "fsockopen")) ctx.call_name orelse func else func;
-    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Unable to connect to {s} ({s})", .{ name, quoted.items, if (err == error.ListenWithoutText) "Unknown error" else e.message });
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Unable to connect to {s} ({s})", .{ name, quoted.items, if (err == error.ListenWithoutText or err == error.CryptoFailed) "Unknown error" else e.message });
     defer ctx.allocator.free(msg);
     // the error outputs are written after the warning, even one its
     // handler turned into an exception
@@ -1210,7 +1245,7 @@ fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             return NativeResult.borrowed(.{ .resource = obj });
         }
     }
-    const result = try connectStream(ctx, args, 2, target, if (args.len > 4) args[4] else null, false, "fsockopen");
+    const result = try connectStream(ctx, args, 2, target, if (args.len > 4) args[4] else null, false, null, "fsockopen");
     if (result.value == .resource and persistent) try keepPersistent(ctx, id_buf.items, result.value.resource);
     return result;
 }
@@ -1233,7 +1268,7 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
     if ((flags & 4) == 0) unconnected: {
         const target = args[0].string.bytes();
         const scheme, _ = splitScheme(target);
-        const sock_type: []const u8 = if (std.ascii.eqlIgnoreCase(scheme, "tcp"))
+        const sock_type: []const u8 = if (std.ascii.eqlIgnoreCase(scheme, "tcp") or xp_ssl.transportMethod(scheme, null) != null)
             "tcp_socket/ssl"
         else if (std.ascii.eqlIgnoreCase(scheme, "udp"))
             "udp_socket"
@@ -1269,14 +1304,14 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
             return NativeResult.borrowed(.{ .resource = obj });
         }
     }
-    const result = try connectStream(ctx, args, 1, args[0].string.bytes(), if (args.len > 3) args[3] else null, (flags & 2) != 0, "stream_socket_client");
+    const result = try connectStream(ctx, args, 1, args[0].string.bytes(), if (args.len > 3) args[3] else null, (flags & 2) != 0, if (args.len > 5) args[5] else null, "stream_socket_client");
     // the socket keeps the context it was made with (php_stream_xport_create)
     if (result.value == .resource) try filesystem.attachContext(ctx, result.value.resource, if (args.len > 5) args[5] else null);
     if (result.value == .resource and (flags & 1) != 0) try keepPersistent(ctx, id_buf.items, result.value.resource);
     return result;
 }
 
-fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, target: []const u8, timeout: ?Value, async_connect: bool, comptime func: []const u8) RuntimeError!NativeResult {
+fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, target: []const u8, timeout: ?Value, async_connect: bool, context_arg: ?Value, comptime func: []const u8) RuntimeError!NativeResult {
     net.failed_lookup_reason = null;
     // php clears the error outputs before it connects, so a warning's
     // handler (and its backtrace) sees 0 and ''
@@ -1284,8 +1319,26 @@ fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, ta
     const endpoint = try fitUnixPath(ctx, parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, code_index, func, target, err), func);
     _ = endpointAddress(endpoint) catch |err| return failConnect(ctx, args, code_index, func, target, err);
     const sock = connectTarget(ctx.allocator, endpoint, target, timeoutMs(ctx, timeout), async_connect) catch |err| return failConnect(ctx, args, code_index, func, target, err);
+    const obj = try endpointStream(ctx, sock, endpoint, !async_connect, target);
+    // the socket has its context before the handshake reads it
+    try filesystem.attachContext(ctx, obj, context_arg);
+    const context: ?*PhpObject = if (comptime std.mem.eql(u8, func, "fsockopen")) null else try streamContext(ctx, context_arg);
+    if (!try startCrypto(ctx, obj, endpoint, target, connectTimeoutUs(ctx, timeout), context)) {
+        _ = try filesystem.closeStream(ctx, obj);
+        // the handshake's warnings come before the connect's own
+        try se.reportCollected(ctx);
+        return failConnect(ctx, args, code_index, func, target, error.CryptoFailed);
+    }
     try reportSocketError(ctx, args, code_index, null);
-    return NativeResult.borrowed(.{ .resource = try endpointStream(ctx, sock, endpoint, !async_connect, target) });
+    return NativeResult.borrowed(.{ .resource = obj });
+}
+
+// the connect timeout the openssl transport keeps for a client's
+// handshake, in microseconds (negative waits as long as it takes)
+fn connectTimeoutUs(ctx: *NativeContext, v: ?Value) i64 {
+    const seconds: f64 = if (v) |t| (if (t == .null) defaultSocketTimeout(ctx) else Value.toFloat(t)) else defaultSocketTimeout(ctx);
+    if (!(seconds >= 0)) return -1;
+    return @intFromFloat(@min(seconds, 1e12) * 1e6);
 }
 
 // stream_socket_server(string $address, &$error_code, &$error_message, int $flags = BIND|LISTEN, $context)
@@ -1303,6 +1356,11 @@ fn native_stream_socket_server(ctx: *NativeContext, args: []const Value) Runtime
     const obj = try endpointStream(ctx, sock, endpoint, true, target);
     try obj.set(ctx.allocator, "__server", .{ .bool = true });
     try filesystem.attachContext(ctx, obj, if (args.len > 4) args[4] else null);
+    // a crypto transport's server hands its method to what it accepts
+    if (endpoint == .tcp) {
+        const scheme, const resource = splitScheme(target);
+        try xp_ssl.initSocket(ctx, obj, xp_ssl.transportMethod(scheme, context), resource, 0);
+    }
     return NativeResult.borrowed(.{ .resource = obj });
 }
 
@@ -1416,6 +1474,18 @@ fn native_stream_socket_accept(ctx: *NativeContext, args: []const Value) Runtime
     const listener_blocks = listener.get("__blocking") != .bool or listener.get("__blocking").bool;
     const is_unix = peer.any.family == std.posix.AF.UNIX;
     const obj = try endpointStream(ctx, sock, if (is_unix) .{ .unix = "" } else .{ .tcp = peer }, platform.isBlocking(sock, listener_blocks), null);
+    // the connection shares the listener's context
+    const listener_context = listener.get("__context");
+    if (listener_context == .resource) try obj.set(ctx.allocator, "__context", listener_context);
+    // a crypto transport's server shakes hands before handing it over
+    if (!is_unix) if (xp_ssl.acceptedFrom(listener)) |method| {
+        if (try xp_ssl.setup(ctx, obj, method, null) < 0 or try xp_ssl.enable(ctx, obj, true) < 0) {
+            try se.raise(ctx, .{ .code = .ProtocolError, .wrapper = "stream", .func = "stream_socket_accept" }, "Failed to enable crypto", .{});
+            _ = try filesystem.closeStream(ctx, obj);
+            try se.raise(ctx, .{ .code = .AcceptFailed, .wrapper = "stream", .func = "stream_socket_accept" }, "Accept failed: {s}", .{"Cannot enable crypto"});
+            return NativeResult.scalar(.{ .bool = false });
+        }
+    };
     if (args.len > 2) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const name = try Value.String.create(ctx.allocator, addressName(&buf, peer, len));
