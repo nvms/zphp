@@ -1281,6 +1281,10 @@ pub const NativeHandle = struct {
 pub const FakeClosure = struct {
     callable: Value,
     called_class: ?[]const u8 = null,
+    // a first-class callable of a method __call or __callStatic answers:
+    // php's trampoline takes `mixed ...$arguments` (zend_closure_from_frame),
+    // where Closure::fromCallable's takes no parameters
+    variadic_trampoline: bool = false,
 };
 
 pub const PhpObject = struct {

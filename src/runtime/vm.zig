@@ -11795,7 +11795,9 @@ pub const VM = struct {
                         self.push(.{ .object = made });
                         continue;
                     }
-                    self.push(.{ .object = try self.newFakeClosure(callable, forwarded) });
+                    const made = try self.newFakeClosure(callable, forwarded);
+                    if (self.callsMagicTrampoline(callable)) made.fakeClosure().?.variadic_trampoline = true;
+                    self.push(.{ .object = made });
                 },
 
                 .partial_closure => {
@@ -19978,6 +19980,7 @@ pub const VM = struct {
         } else if (val == .object and val.object.fakeClosure() != null) {
             const state = val.object.fakeClosure().?;
             const copy = try self.newFakeClosure(state.callable, state.called_class);
+            copy.fakeClosure().?.variadic_trampoline = state.variadic_trampoline;
             copy.retain();
             return .{ .object = copy };
         } else if (val == .object) {
@@ -24065,6 +24068,32 @@ pub const VM = struct {
         });
         retainValue(target);
         return obj;
+    }
+
+    // a callable naming a method its class doesn't have, which __call or
+    // __callStatic answers through a trampoline
+    pub fn callsMagicTrampoline(self: *VM, callable: Value) bool {
+        var class: []const u8 = "";
+        var method: []const u8 = "";
+        switch (callable) {
+            .array => |pair| {
+                if (pair.entries.items.len != 2 or pair.entries.items[1].value != .string) return false;
+                method = pair.entries.items[1].value.string.bytes();
+                class = switch (pair.entries.items[0].value) {
+                    .object => |o| o.class_name,
+                    .string => |cs| cs.bytes(),
+                    else => return false,
+                };
+            },
+            .string => |cs| {
+                const sep = std.mem.indexOf(u8, cs.bytes(), "::") orelse return false;
+                class = cs.bytes()[0..sep];
+                method = cs.bytes()[sep + 2 ..];
+            },
+            else => return false,
+        }
+        if (self.hasMethod(class, method)) return false;
+        return self.hasMethod(class, "__call") or self.hasMethod(class, "__callStatic");
     }
 
     // a Closure of a method: on an object, or a class for a static one

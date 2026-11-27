@@ -3360,6 +3360,10 @@ fn setClosureInvokeMethod(ctx: *NativeContext, obj: *PhpObject, closure: Value) 
     } else if (native_params.get(key)) |sig| {
         try obj.set(ctx.allocator, "__arity", .{ .int = @intCast(sig.params.len) });
         try obj.set(ctx.allocator, "__required_params", .{ .int = @intCast(nativeRequiredCount(sig)) });
+    } else if (closure == .object and closure.object.fakeClosure() != null and closure.object.fakeClosure().?.variadic_trampoline) {
+        // a first-class callable's trampoline takes ...$arguments
+        try obj.set(ctx.allocator, "__arity", .{ .int = 1 });
+        try obj.set(ctx.allocator, "__required_params", .{ .int = 0 });
     } else {
         try obj.set(ctx.allocator, "__arity", .{ .int = 0 });
         try obj.set(ctx.allocator, "__required_params", .{ .int = 0 });
@@ -4054,6 +4058,10 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
                 if (ctx.vm.classes.getKey(called)) |declared| try this.set(ctx.allocator, "__called_class", .{ .string = Value.String.borrowed(declared) });
             }
         } else return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
+        if (ctx.vm.callsMagicTrampoline(callable)) {
+            const variadic = if (args[0].object.fakeClosure()) |f| f.variadic_trampoline else false;
+            try this.set(ctx.allocator, "__trampoline", .{ .int = if (variadic) 1 else 2 });
+        }
     } else if (args[0] == .string) {
         const func_name = ctx.vm.canonicalFunctionName(args[0].string.bytes()) orelse
             return throwReflection(ctx, "Function does not exist");
@@ -4083,6 +4091,18 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 
 // the name a ReflectionFunction looks its function up by: a closure's
 // instance, else the function's name
+// the internal function a trampoline closure reflects as: a first-class
+// callable's takes `mixed ...$arguments` (zend_call_trampoline_arginfo),
+// Closure::fromCallable's has no argument info
+const trampoline_signature = native_params.Signature{ .params = &[_]native_params.Param{.{ .name = "arguments", .variadic = true, .type = "mixed" }} };
+const no_args_signature = native_params.Signature{ .params = &.{} };
+
+pub fn trampolineSignature(this: *PhpObject) ?native_params.Signature {
+    const kind = this.get("__trampoline");
+    if (kind != .int) return null;
+    return if (kind.int == 1) trampoline_signature else no_args_signature;
+}
+
 pub fn functionKey(this: *PhpObject) Value {
     if (this.get("__closure").closureName()) |instance| return .{ .string = Value.String.borrowed(instance) };
     const function = this.get("__function");
@@ -4125,6 +4145,12 @@ fn rfGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
 
+    if (trampolineSignature(this)) |sig| {
+        const params = try buildNativeParamArray(ctx, sig, func_name);
+        // each parameter prints from the trampoline's arginfo
+        for (params.array.entries.items) |entry| try entry.value.object.set(ctx.allocator, "__trampoline", this.get("__trampoline"));
+        return NativeResult.borrowed(params);
+    }
     const func = ctx.vm.functions.get(func_name) orelse {
         if (native_params.get(func_name)) |sig| return NativeResult.borrowed(try buildNativeParamArray(ctx, sig, func_name));
         return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -4195,6 +4221,7 @@ fn rfHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 fn rfGetNumberOfParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .int = 0 });
+    if (trampolineSignature(this)) |sig| return NativeResult.scalar(.{ .int = @intCast(sig.params.len) });
     const func = ctx.vm.functions.get(func_name) orelse {
         const sig = native_params.get(func_name) orelse return NativeResult.scalar(.{ .int = 0 });
         return NativeResult.scalar(.{ .int = @intCast(sig.params.len) });
@@ -4205,6 +4232,7 @@ fn rfGetNumberOfParameters(ctx: *NativeContext, _: []const Value) RuntimeError!N
 fn rfGetNumberOfRequiredParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .int = 0 });
+    if (trampolineSignature(this) != null) return NativeResult.scalar(.{ .int = 0 });
     const func = ctx.vm.functions.get(func_name) orelse {
         const sig = native_params.get(func_name) orelse return NativeResult.scalar(.{ .int = 0 });
         return NativeResult.scalar(.{ .int = @intCast(nativeRequiredCount(sig)) });
@@ -4305,6 +4333,7 @@ fn rfIsInternal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     // also user-defined
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    if (trampolineSignature(this) != null) return NativeResult.scalar(.{ .bool = true });
     if (std.mem.startsWith(u8, name, "__closure_")) return NativeResult.scalar(.{ .bool = false });
     if (ctx.vm.functions.contains(name)) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = ctx.vm.native_fns.contains(name) });
@@ -4334,7 +4363,7 @@ fn rfIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(func_name) orelse {
-        const sig = native_params.get(func_name) orelse return NativeResult.scalar(.{ .bool = false });
+        const sig = trampolineSignature(this) orelse native_params.get(func_name) orelse return NativeResult.scalar(.{ .bool = false });
         for (sig.params) |p| if (p.variadic) return NativeResult.scalar(.{ .bool = true });
         return NativeResult.scalar(.{ .bool = false });
     };

@@ -448,6 +448,15 @@ fn functionView(ctx: *NativeContext, this: *PhpObject) FnView {
     }
     const instance = this.get("__closure").closureName();
     view.is_closure = instance != null or boolProp(this, "__from_closure");
+    // a trampoline is an internal public method of the class, static when
+    // __callStatic answers it, with arginfo only as a first-class callable
+    if (this.get("__trampoline") == .int) if (stringProp(this, "__function")) |function| if (std.mem.indexOf(u8, function, "::")) |sep| {
+        view.scope = vm.classes.getKey(function[0..sep]) orelse function[0..sep];
+        view.info.is_static = this.get("__closure_this") != .object;
+        view.sig = if (this.get("__trampoline").int == 1) reflection.trampolineSignature(this) else null;
+        view.module = null;
+        return view;
+    };
     // a closure of a method prints as the method it runs
     if (stringProp(this, "__function")) |function| if (std.mem.indexOf(u8, function, "::")) |sep| {
         if (vm.findMethodInfo(function[0..sep], function[sep + 2 ..])) |found| {
@@ -1332,7 +1341,9 @@ fn parameterToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
     const position: usize = if (this.get("__position") == .int) @intCast(this.get("__position").int) else 0;
     const function = stringProp(this, "__function") orelse "";
     var view: FnView = undefined;
-    if (stringProp(this, "__declaring_class")) |declaring| {
+    if (reflection.trampolineSignature(this)) |sig| {
+        view = .{ .name = function, .sig = sig };
+    } else if (stringProp(this, "__declaring_class")) |declaring| {
         const method = stringProp(this, "__method_name") orelse function;
         view = try methodView(ctx, declaring, declaring, method);
     } else {
