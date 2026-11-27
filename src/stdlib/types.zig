@@ -2689,7 +2689,7 @@ fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!
         2 => "assert.callback",
         3 => "assert.bail",
         4 => "assert.warning",
-        6 => "assert.exception",
+        5 => "assert.exception",
         else => {
             try ctx.vm.setPendingException("ValueError", "assert_options(): Argument #1 ($option) must be an ASSERT_* constant");
             return error.RuntimeError;
