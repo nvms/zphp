@@ -103,6 +103,9 @@ pub const MemoryAccount = struct {
     pub const PhpRequest = struct {
         old: usize,
         new: usize,
+        // php reallocates the table (a packed array's) rather than
+        // allocating a new one beside it (zend_hash_do_resize)
+        in_place: bool = true,
         skew: i64 = 0,
         huge_skew: i64 = 0,
         applied: bool = false,
@@ -304,7 +307,9 @@ pub const MemoryAccount = struct {
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *MemoryAccount = @ptrCast(@alignCast(ctx));
         const size = phpSize(len);
-        if (!self.admit(if (self.php_request) |r| phpSize(r.new) else size)) return null;
+        // php's table is one block: zphp's others for it were admitted with it
+        const check: ?usize = if (self.php_request) |r| (if (r.applied) null else phpSize(r.new)) else size;
+        if (check) |c| if (!self.admit(c)) return null;
         const ptr = self.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
         self.applyPhpRequest();
         self.chargeSized(size);
@@ -316,15 +321,19 @@ pub const MemoryAccount = struct {
     // anything else as the new allocation php's realloc makes
     // a table php grows (from `old` bytes to `new`, php's sizes) where
     // zphp's storage already has room: checked as php's realloc would be
-    pub fn admitTableGrowth(self: *MemoryAccount, old: usize, new: usize) bool {
+    pub fn admitTableGrowth(self: *MemoryAccount, old: usize, new: usize, in_place: bool) bool {
         const outer = self.php_request;
-        self.php_request = .{ .old = old, .new = new };
+        self.php_request = .{ .old = old, .new = new, .in_place = in_place };
         defer self.php_request = outer;
         return if (old == 0) self.admit(phpSize(new)) else self.admitGrowth(old, new);
     }
 
     fn admitGrowth(self: *MemoryAccount, old_len: usize, new_len: usize) bool {
         const php = self.php_request;
+        if (php) |r| {
+            if (r.applied) return true;
+            if (!r.in_place) return self.admit(phpSize(r.new));
+        }
         const old_size = phpSize(if (php) |r| r.old else old_len);
         const new_size = phpSize(if (php) |r| r.new else new_len);
         if (new_size <= old_size) return true;

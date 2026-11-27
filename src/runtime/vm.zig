@@ -31307,7 +31307,7 @@ pub const VM = struct {
     pub fn shallowCloneCow(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
         const copy = self.allocArray() catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
-        copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
+        copy.reserveCopyOf(self.allocator, src) catch return error.RuntimeError;
         for (src.entries.items, 0..) |entry, i| {
             if (entry.key == .string) entry.key.string.retain();
             const ref = carriedRef(entry.ref, src);
@@ -31392,7 +31392,7 @@ pub const VM = struct {
         };
         const copy = self.allocArray() catch return error.RuntimeError;
         if (inherit_next) copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys };
-        copy.entries.ensureTotalCapacity(self.allocator, kept) catch return error.RuntimeError;
+        copy.reserve(self.allocator, kept, strings > 0) catch return error.RuntimeError;
         copy.reserveStringIndex(self.allocator, strings) catch return error.RuntimeError;
         var cursor_set = false;
         for (items, keep[0..items.len], 0..) |entry, k, i| {
@@ -31464,7 +31464,7 @@ pub const VM = struct {
     fn cloneArrayFlat(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
         const copy = self.allocArray() catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
-        copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
+        copy.reserveCopyOf(self.allocator, src) catch return error.RuntimeError;
         for (src.entries.items, 0..) |entry, i| {
             if (entry.key == .string) entry.key.string.retain();
             const ref = carriedRef(entry.ref, src);
@@ -31490,7 +31490,7 @@ pub const VM = struct {
         const copy = self.allocArray() catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
         visited.put(self.allocator, src, copy) catch return error.RuntimeError;
-        copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;
+        copy.reserveCopyOf(self.allocator, src) catch return error.RuntimeError;
         for (src.entries.items, 0..) |entry, i| {
             const cloned_value: Value = if (entry.value == .array) blk: {
                 // a nested array is itself deep-cloned; the parent clone holds

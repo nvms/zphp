@@ -6,6 +6,7 @@
 // which no listing ever shows
 
 const std = @import("std");
+const memory = @import("memory.zig");
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
 const ClassDef = vm_mod.ClassDef;
@@ -53,7 +54,9 @@ pub const Listing = struct {
     holder: ?*PhpArray = null,
 
     pub fn deinit(self: *Listing, allocator: std.mem.Allocator) void {
-        self.items.deinit(allocator);
+        // the listing is the vm's scratch, outside memory_get_usage (php walks
+        // the property table itself)
+        self.items.deinit(memory.root(allocator));
     }
 
     pub fn takeHolder(self: *Listing) ?*PhpArray {
@@ -119,7 +122,7 @@ pub fn applyHooks(vm: *VM, obj: *PhpObject, listing: *Listing, allocator: std.me
     try declaredOrder(vm, obj.class_name, allocator, &order);
 
     var out: std.ArrayListUnmanaged(Property) = .empty;
-    errdefer out.deinit(allocator);
+    errdefer out.deinit(memory.root(allocator));
     const holder = listing.holder orelse try vm.allocArray();
     listing.holder = holder;
     for (order.items) |e| {
@@ -136,18 +139,18 @@ pub fn applyHooks(vm: *VM, obj: *PhpObject, listing: *Listing, allocator: std.me
             // a virtual property with only a set hook has nothing to read
             if (vm.propertyIsVirtual(hook_cls, e.name) and !vm.hasRealGetHook(hook_cls, e.name)) continue;
             if (!vm.hasRealGetHook(hook_cls, e.name)) {
-                if (existing) |p| try out.append(allocator, p);
+                if (existing) |p| try out.append(memory.root(allocator), p);
                 continue;
             }
             const value = (try vm.callPropHookIn(obj, hook_cls, e.name, .get, .null)) orelse (if (existing) |p| p.value else continue);
             try holder.append(vm.allocator, value);
-            try out.append(allocator, .{ .key = .{ .name = e.name }, .value = value, .visibility = e.visibility, .declaring = e.declaring, .declared = true });
+            try out.append(memory.root(allocator), .{ .key = .{ .name = e.name }, .value = value, .visibility = e.visibility, .declaring = e.declaring, .declared = true });
             continue;
         }
-        if (existing) |p| try out.append(allocator, p);
+        if (existing) |p| try out.append(memory.root(allocator), p);
     }
-    for (listing.items.items) |p| if (!p.declared) try out.append(allocator, p);
-    listing.items.deinit(allocator);
+    for (listing.items.items) |p| if (!p.declared) try out.append(memory.root(allocator), p);
+    listing.items.deinit(memory.root(allocator));
     listing.items = out;
 }
 
@@ -190,7 +193,7 @@ pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Alloc
     // for it everywhere else
     if (obj.lazy) |state| if (state.proxy) if (state.backing) |instance| {
         if (purpose == .debug) {
-            try listing.items.append(allocator, .{ .key = .{ .name = "instance" }, .value = .{ .object = instance } });
+            try listing.items.append(memory.root(allocator), .{ .key = .{ .name = "instance" }, .value = .{ .object = instance } });
             // php builds a table holding the instance for the listing
             // (zend_lazy_object_debug_info), so its count shows one more
             const held = try vm.allocArray();
@@ -212,7 +215,7 @@ pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Alloc
                 .string => |s| unmangle(s.bytes(), value),
             };
             if (entry.ref) |ref| prop.shared = value_mod.cellOf(ref).binders > 1;
-            try listing.items.append(allocator, prop);
+            try listing.items.append(memory.root(allocator), prop);
         }
         return listing;
     }
@@ -300,7 +303,7 @@ fn appendOwnInTableOrder(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *L
         for (vm.frozenTable(obj)) |f| {
             const name = layout.names[f.slot];
             const declared = vm.propertyDeclaration(layout.declaring_classes[f.slot], name);
-            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = f.value, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true });
+            try listing.items.append(memory.root(allocator), .{ .key = .{ .name = name }, .value = f.value, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true });
         }
     };
     if (!obj.detached_table) if (obj.slot_layout) |layout| if (obj.slots) |slots| {
@@ -313,7 +316,7 @@ fn appendOwnInTableOrder(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *L
                 if (purpose != .debug or isInternalState(vm, obj, name)) continue;
                 const declared = vm.propertyDeclaration(layout.declaring_classes[i], name);
                 if (declared.type_str.len == 0) continue;
-                try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = .null, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = try vm.propertyTypeText(declared.type_str, declared.defining_class) });
+                try listing.items.append(memory.root(allocator), .{ .key = .{ .name = name }, .value = .null, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = try vm.propertyTypeText(declared.type_str, declared.defining_class) });
                 continue;
             }
             if (obj.isUnset(name) or isInternalState(vm, obj, name)) continue;
@@ -322,7 +325,7 @@ fn appendOwnInTableOrder(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *L
             if (uninitialized and purpose != .debug) continue;
             // an untyped slot that holds nothing is no property php lists
             if (slots[i] == .undef and declared.type_str.len == 0) continue;
-            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = if (slots[i] == .undef) .null else slots[i], .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = if (uninitialized) try vm.propertyTypeText(declared.type_str, declared.defining_class) else null });
+            try listing.items.append(memory.root(allocator), .{ .key = .{ .name = name }, .value = if (slots[i] == .undef) .null else slots[i], .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = if (uninitialized) try vm.propertyTypeText(declared.type_str, declared.defining_class) else null });
         }
     };
     var it = obj.properties.iterator();
@@ -333,7 +336,7 @@ fn appendOwnInTableOrder(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *L
         // a dynamic property of its own
         if (obj.slot_layout) |layout| if (inSlots(layout, name)) {
             if (!shadowsPrivate(layout, name)) continue;
-            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .declaring = obj.class_name });
+            try listing.items.append(memory.root(allocator), .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .declaring = obj.class_name });
             continue;
         };
         // a dynamic property under a mangled name (unserialize keeps the
@@ -343,7 +346,7 @@ fn appendOwnInTableOrder(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *L
             var prop = unmangle(name, entry.value_ptr.*);
             if (prop.visibility != .public) {
                 prop.declared = false;
-                try listing.items.append(allocator, prop);
+                try listing.items.append(memory.root(allocator), prop);
                 continue;
             }
         }
@@ -352,10 +355,10 @@ fn appendOwnInTableOrder(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *L
         // (a reflector's name before its constructor ran)
         if (entry.value_ptr.* == .undef and declared.type_str.len > 0) {
             if (purpose != .debug) continue;
-            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = .null, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = try vm.propertyTypeText(declared.type_str, declared.defining_class) });
+            try listing.items.append(memory.root(allocator), .{ .key = .{ .name = name }, .value = .null, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = try vm.propertyTypeText(declared.type_str, declared.defining_class) });
             continue;
         }
-        try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .visibility = declared.visibility, .declaring = declared.defining_class });
+        try listing.items.append(memory.root(allocator), .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .visibility = declared.visibility, .declaring = declared.defining_class });
     }
 }
 
