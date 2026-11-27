@@ -346,6 +346,26 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
                 return;
             }
+            // ${...}[k] = v: the variable is fetched after the key and the
+            // value ran (zend_delayed_compile_var), so a key or value that
+            // changes its name writes where the name then points. a plain
+            // variable key is read after the fetch
+            if (!rhs_is_ref and target_lhs.tag == .variable_variable and target.data.rhs != 0 and
+                (!pureOperand(self, target.data.rhs) or !pureOperand(self, node.data.rhs)))
+            {
+                const key_late = self.ast.nodes[target.data.rhs].tag == .variable;
+                if (!key_late) try self.compileNode(target.data.rhs);
+                try self.compileNode(node.data.rhs);
+                try compileVivifyChain(self, target.data.lhs);
+                if (key_late) try self.compileNode(target.data.rhs);
+                // to [base, key, value]
+                for (0..@as(usize, if (key_late) 2 else 1)) |_| {
+                    try self.emitOp(.bury);
+                    try self.emitByte(2);
+                }
+                try self.emitOp(.array_set);
+                return;
+            }
             try compileVivifyChain(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
