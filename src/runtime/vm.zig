@@ -4759,14 +4759,14 @@ pub const VM = struct {
         if (self.memory) |account| if (account.refused != null and !account.reporting and !self.exit_requested) return self.reportMemoryExhausted(error.OutOfMemory);
     }
 
-    pub fn gcTakeSlot(self: *VM) u32 {
+    pub noinline fn gcTakeSlot(self: *VM) u32 {
         if (self.gc_slot_unused.pop()) |slot| return slot;
         const slot = self.gc_slot_next;
         self.gc_slot_next += 1;
         return slot;
     }
 
-    pub fn gcFreeSlot(self: *VM, slot: *u32) void {
+    pub noinline fn gcFreeSlot(self: *VM, slot: *u32) void {
         if (slot.* == 0) return;
         if (self.gc_slot_unused.items.len < self.gc_slot_unused.capacity) {
             self.gc_slot_unused.appendAssumeCapacity(slot.*);
