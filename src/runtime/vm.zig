@@ -5793,7 +5793,9 @@ pub const VM = struct {
             }
             self.global_slot_names = saved_slot_names;
             self.script_strict_types = saved_strict;
-            self.clearArgStackFrom(sp_before_eval);
+            // the temporaries the exception left in the evaluated code go
+            // with it, as php's unwinding frees them
+            if (sp_before_eval < self.sp) self.discardArgTransport(sp_before_eval) else self.clearArgStackFrom(sp_before_eval);
             self.sp = sp_before_eval;
             return error.RuntimeError;
         };
@@ -27518,12 +27520,33 @@ pub const VM = struct {
         };
         self.clearArgStackFrom(floor);
         // the operands an exception unwinds go with their references, as
-        // php frees a frame's live temporaries
-        if (floor < self.sp) for (self.stack[floor..self.sp]) |v| switch (v) {
+        // php frees a frame's live temporaries: the unfinished calls'
+        // arguments innermost call first (cleanup_unfinished_calls), then
+        // the objects `new` set aside for them (cleanup_live_vars)
+        if (floor >= self.sp) return;
+        const slots = self.stack[floor..self.sp];
+        var end = slots.len;
+        var i = slots.len;
+        while (i > 0) {
+            i -= 1;
+            if (!isNewReservation(slots[i])) continue;
+            for (slots[i + 1 .. end]) |v| self.releaseUnwoundOperand(v);
+            end = i;
+        }
+        for (slots[0..end]) |v| self.releaseUnwoundOperand(v);
+        for (slots) |v| if (isNewReservation(v)) self.releaseUnwoundOperand(v);
+    }
+
+    fn isNewReservation(v: Value) bool {
+        return v == .object and v.object.class_name.ptr == new_reservation.ptr;
+    }
+
+    fn releaseUnwoundOperand(self: *VM, v: Value) void {
+        switch (v) {
             .string, .object, .resource, .generator, .fiber => self.stackRelease(v),
             .array => if (v.array.refcount == 0) self.queueArrayRelease(v.array),
             else => {},
-        };
+        }
     }
 
     // Most operand-stack operations carry no lvalue provenance. Keep that
