@@ -22297,13 +22297,13 @@ pub const VM = struct {
             var iface = listed.*;
             // zend_do_link_class loads every interface a class lists
             if (!self.interfaces.contains(iface) and !self.traits.contains(iface) and !self.classes.contains(iface) and self.linkingClass(iface) == null and !std.ascii.eqlIgnoreCase(iface, class_name)) {
-                try self.tryAutoload(iface);
-                if (self.pending_exception != null) return error.RuntimeError;
+                self.tryAutoload(iface) catch |err| return self.unrecoverableLoadFailure(linking_index, err);
+                if (self.pending_exception != null) return self.unrecoverableLoadFailure(linking_index, error.RuntimeError);
                 if (!self.interfaces.contains(iface) and !self.traits.contains(iface) and !self.classes.contains(iface)) {
                     const msg = try std.fmt.allocPrint(self.allocator, "Interface \"{s}\" not found", .{iface});
                     defer self.allocator.free(msg);
                     try self.setPendingException("Error", msg);
-                    return error.RuntimeError;
+                    return self.unrecoverableLoadFailure(linking_index, error.RuntimeError);
                 }
                 iface = self.declaredClassName(iface);
             }
