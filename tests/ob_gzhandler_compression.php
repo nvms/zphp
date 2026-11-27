@@ -20,7 +20,7 @@ $run = function (string $name, string $code, string $accept, string $flags = '')
     } else {
         echo "plain:\n", $out, "\n";
     }
-    echo str_replace($file, 'FILE', $err);
+    echo str_replace([$file, str_replace('/', DIRECTORY_SEPARATOR, $file)], 'FILE', $err);
 };
 
 $handler = <<<'PHP'
