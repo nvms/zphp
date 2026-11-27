@@ -92,3 +92,4 @@ compress_zlib_over_http.php: the test starts php -S with its output sent to /dev
 curl_stream_options.php: the test builds file:// urls from a posix temp path
 tls_transports.php: the test forks its servers with pcntl_fork, which windows lacks
 https_wrapper.php: the test forks its servers with pcntl_fork, which windows lacks
+ftp_wrapper.php: the test forks its ftp server with pcntl_fork, which windows lacks

@@ -200,13 +200,24 @@ const HeaderInfo = struct {
 
 // the stream for an http:// url, or null with why in the wrapper error log
 pub fn open(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64, context: ?*PhpObject) RuntimeError!?*PhpObject {
+    return openAs(ctx, "http", path, mode, options, context);
+}
+
+// php_stream_url_wrap_http called by the ftp wrapper for a url its proxy
+// option sends through an http proxy (the wrapper's own label names the
+// proxy and timeout options)
+pub fn openThroughProxy(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64, context: ?*PhpObject) RuntimeError!?*PhpObject {
+    return openAs(ctx, "ftp", path, mode, options, context);
+}
+
+fn openAs(ctx: *NativeContext, label: []const u8, path: []const u8, mode: []const u8, options: i64, context: ?*PhpObject) RuntimeError!?*PhpObject {
     const headers = try ctx.createArray();
     headers.retain();
     defer ctx.vm.arrayRelease(headers);
     if (ctx.vm.last_http_response_headers) |previous| ctx.vm.arrayRelease(previous);
     ctx.vm.last_http_response_headers = null;
     headers_started = false;
-    const stream = try openEx(ctx, path, mode, options, context, REDIRECT_MAX, FLAG_HEADER_INIT, headers);
+    const stream = try openEx(ctx, label, path, mode, options, context, REDIRECT_MAX, FLAG_HEADER_INIT, headers);
     if (stream) |st| {
         const s = try streams.of(ctx, st);
         headers.retain();
@@ -221,7 +232,7 @@ pub fn open(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i6
     return stream;
 }
 
-fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64, context: ?*PhpObject, redirect_max_arg: i64, flags: u8, headers: *PhpArray) RuntimeError!?*PhpObject {
+fn openEx(ctx: *NativeContext, label: []const u8, path: []const u8, mode: []const u8, options: i64, context: ?*PhpObject, redirect_max_arg: i64, flags: u8, headers: *PhpArray) RuntimeError!?*PhpObject {
     var redirect_max = redirect_max_arg;
     if (redirect_max < 1) {
         try user_streams.logErrorAt(ctx, options, .{ .code = .RedirectLimit, .wrapper = "http" }, "Redirection limit reached, aborting", .{});
@@ -229,26 +240,39 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
     }
     const a = ctx.allocator;
     var resource = parseUrl(path) orelse return null;
-    if (std.mem.indexOfAny(u8, mode, "awx+") != null) {
-        try user_streams.logErrorAt(ctx, options, .{ .code = .ModeNotSupported, .wrapper = "http" }, "HTTP wrapper does not support writeable connections", .{});
-        return null;
-    }
     const header_init = flags & FLAG_HEADER_INIT != 0;
     const redirected = flags & FLAG_REDIRECTED != 0;
     const keep_method = flags & FLAG_KEEP_METHOD != 0;
     var request_fulluri = false;
-    if (contextOption(context, "http", "request_fulluri")) |v| request_fulluri = v.isTruthy();
-    // only the "https" scheme, in any case (php 8.5.13 compares the whole name)
-    const use_ssl = std.ascii.eqlIgnoreCase(resource.scheme, "https");
-    if (resource.port == 0) resource.port = if (use_ssl) 443 else 80;
+    var use_ssl = false;
     var use_proxy = false;
     var transport: []const u8 = undefined;
     var transport_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer transport_buf.deinit(a);
-    if (contextOption(context, "http", "proxy")) |p| if (p == .string and p.string.bytes().len > 0) {
+    if (!std.ascii.eqlIgnoreCase(resource.scheme, "http") and !std.ascii.eqlIgnoreCase(resource.scheme, "https")) {
+        // another wrapper's url (ftp's) through an http proxy
+        const p = contextOption(context, label, "proxy");
+        if (p == null or p.? != .string or p.?.string.bytes().len == 0) {
+            const reopened = try fs.openStreamValue(ctx, path, mode, if (context) |c| Value{ .resource = c } else null);
+            return if (reopened) |r| r.resource else null;
+        }
+        request_fulluri = true;
         use_proxy = true;
-        transport = p.string.bytes();
-    };
+        transport = p.?.string.bytes();
+    } else {
+        if (std.mem.indexOfAny(u8, mode, "awx+") != null) {
+            try user_streams.logErrorAt(ctx, options, .{ .code = .ModeNotSupported, .wrapper = "http" }, "HTTP wrapper does not support writeable connections", .{});
+            return null;
+        }
+        if (contextOption(context, "http", "request_fulluri")) |v| request_fulluri = v.isTruthy();
+        // only the "https" scheme, in any case (php 8.5.13 compares the whole name)
+        use_ssl = std.ascii.eqlIgnoreCase(resource.scheme, "https");
+        if (resource.port == 0) resource.port = if (use_ssl) 443 else 80;
+        if (contextOption(context, label, "proxy")) |p| if (p == .string and p.string.bytes().len > 0) {
+            use_proxy = true;
+            transport = p.string.bytes();
+        };
+    }
     if (!use_proxy) {
         try transport_buf.print(a, "{s}://{s}:{d}", .{ if (use_ssl) "ssl" else "tcp", resource.host, resource.port });
         transport = transport_buf.items;
@@ -258,7 +282,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         return null;
     }
     var timeout_s: f64 = network.defaultSocketTimeoutSeconds(ctx);
-    if (contextOption(context, "http", "timeout")) |t| {
+    if (contextOption(context, label, "timeout")) |t| {
         const d = Value.toFloat(t);
         const timeoutmax: f64 = @as(f64, @floatFromInt(std.math.maxInt(u64))) / 1000000.0;
         if (d > timeoutmax) {
@@ -391,7 +415,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
     };
     if (have & HAVE_HOST == 0) {
         try req.print(a, "Host: {s}", .{resource.host});
-        if ((use_ssl and resource.port != 443) or (!use_ssl and resource.port != 80)) try req.print(a, ":{d}", .{resource.port});
+        if ((use_ssl and resource.port != 443 and resource.port != 0) or (!use_ssl and resource.port != 80 and resource.port != 0)) try req.print(a, ":{d}", .{resource.port});
         try req.appendSlice(a, "\r\n");
     }
     if (have & HAVE_CONNECTION == 0) try req.appendSlice(a, "Connection: close\r\n");
@@ -586,7 +610,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         if (response_code == 307 or response_code == 308) new_flags |= FLAG_KEEP_METHOD;
         const owned_path = try a.dupe(u8, new_path.items);
         defer a.free(owned_path);
-        return openEx(ctx, owned_path, mode, options, context, redirect_max - 1, new_flags, headers);
+        return openEx(ctx, label, owned_path, mode, options, context, redirect_max - 1, new_flags, headers);
     }
     return finish(ctx, stream, s, mode, header_init, headers, &info, context, eol_detect, eol_mac, &keep_stream);
 }

@@ -1062,6 +1062,49 @@ pub fn connectTransport(ctx: *NativeContext, target: []const u8, timeout_s: f64,
     return obj;
 }
 
+// php_stream_xport_create(REPORT_ERRORS, CLIENT | CONNECT) as the ftp
+// wrapper calls it: the connected socket with the context, or null. why
+// it failed goes to errtext when the caller asks for it (caller-owned),
+// else to php's "connect() failed" warning
+pub fn connectXport(ctx: *NativeContext, target: []const u8, context: ?*PhpObject, errtext: ?*?[]u8) RuntimeError!?*PhpObject {
+    net.failed_lookup_reason = null;
+    const timeout_ms = timeoutMs(ctx, null);
+    const sock = sock: {
+        const endpoint = parseEndpoint(ctx.allocator, target) catch |err| break :sock err;
+        _ = endpointAddress(endpoint) catch |err| break :sock err;
+        const s = connectTarget(ctx.allocator, endpoint, target, timeout_ms, false) catch |err| break :sock err;
+        const obj = try endpointStream(ctx, s, endpoint, true, target);
+        if (context) |c| if (ctx.vm.default_stream_context != c) try obj.set(ctx.allocator, "__context", .{ .resource = c });
+        if (!try startCrypto(ctx, obj, endpoint, target, if (timeout_ms) |ms| @as(i64, ms) * 1000 else -1, context)) {
+            _ = try filesystem.closeStream(ctx, obj);
+            if (errtext) |out| out.* = null else try se.raise(ctx, .{ .code = .ConnectFailed }, "connect() failed: {s}", .{"Unspecified error"});
+            return null;
+        }
+        return obj;
+    };
+    // php made the stream before the connect failed
+    ctx.vm.skipResourceId();
+    const rest = if (std.mem.indexOf(u8, target, "://")) |i| target[i + 3 ..] else target;
+    const text = switch (sock) {
+        error.ParseAddress => try std.fmt.allocPrint(ctx.allocator, "Failed to parse address \"{s}\"", .{rest}),
+        error.ParseIpv6Address => try std.fmt.allocPrint(ctx.allocator, "Failed to parse IPv6 address \"{s}\"", .{rest}),
+        error.ParsePort => try std.fmt.allocPrint(ctx.allocator, "Failed to parse port of address \"{s}\"", .{rest}),
+        error.NulInHostname => try ctx.allocator.dupe(u8, "The hostname must not contain null bytes"),
+        else => if (net.failed_lookup_reason) |reason| lookup: {
+            const lookup = try std.fmt.allocPrint(ctx.allocator, "php_network_getaddresses: getaddrinfo for {s} failed: {s}", .{ net.failedLookupName(), std.mem.span(reason) });
+            try filesystem.warnDocref(ctx, "{s}", .{lookup});
+            break :lookup lookup;
+        } else try ctx.allocator.dupe(u8, socketError(sock).message),
+    };
+    if (errtext) |out| {
+        out.* = text;
+        return null;
+    }
+    defer ctx.allocator.free(text);
+    try se.raise(ctx, .{ .code = .ConnectFailed }, "connect() failed: {s}", .{text});
+    return null;
+}
+
 // what the openssl factory and connect do for a tcp client: record the
 // socket's crypto method, connect timeout and host name, and run the
 // handshake a crypto transport (ssl://, tls://) starts with. false once

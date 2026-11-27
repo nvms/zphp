@@ -1195,8 +1195,8 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         const decoded = (try readZlibUrl(ctx, path, if (func != null) read_context else null)) orelse return null;
         return try Value.String.adopt(ctx.allocator, decoded);
     }
-    if (std.ascii.startsWithIgnoreCase(path, "http://") or std.ascii.startsWithIgnoreCase(path, "https://")) {
-        // the http wrapper's stream, read to its end
+    if (std.ascii.startsWithIgnoreCase(path, "http://") or std.ascii.startsWithIgnoreCase(path, "https://") or ftp_wrapper.isFtpUrl(path)) {
+        // the url wrapper's stream, read to its end
         const opened = (try openStreamValue(ctx, path, "rb", if (func != null) read_context else null)) orelse return null;
         const fh = opened.resource;
         fh.retain();
@@ -1256,8 +1256,9 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     // null when the data has no string form: the file is still opened (and
     // truncated) but nothing is written and the call fails
     const data: ?[]const u8 = try putContentsData(ctx, data_arg, &rendered);
-    const result = try putContents(ctx, filename, data, flags);
-    if (result.value == .int) transientStreams(ctx, 1);
+    const result = try putContents(ctx, filename, data, flags, if (args.len > 3) args[3] else null);
+    // the ftp wrapper's streams took their ids already
+    if (result.value == .int and !ftpUrl(ctx.vm, filename)) transientStreams(ctx, 1);
     return result;
 }
 
@@ -1316,10 +1317,10 @@ fn putContentsFinish(ctx: *NativeContext, fh: *PhpObject, written: isize, len: u
     return NativeResult.scalar(.{ .int = written });
 }
 
-fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]const u8, flags: i64) RuntimeError!NativeResult {
-    if (std.ascii.startsWithIgnoreCase(spelled_path, "php://filter/") or (std.ascii.startsWithIgnoreCase(spelled_path, "data:") and !isWrapperUnregistered(ctx.vm, "data"))) {
+fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]const u8, flags: i64, context: ?Value) RuntimeError!NativeResult {
+    if (std.ascii.startsWithIgnoreCase(spelled_path, "php://filter/") or (std.ascii.startsWithIgnoreCase(spelled_path, "data:") and !isWrapperUnregistered(ctx.vm, "data")) or ftpUrl(ctx.vm, spelled_path)) {
         const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
-        const opened = (try openStreamValue(ctx, spelled_path, if (flags & FILE_APPEND != 0) "ab" else "wb", null)) orelse return NativeResult.scalar(.{ .bool = false });
+        const opened = (try openStreamValue(ctx, spelled_path, if (flags & FILE_APPEND != 0) "ab" else "wb", if (ftpUrl(ctx.vm, spelled_path)) context else null)) orelse return NativeResult.scalar(.{ .bool = false });
         const fh = opened.resource;
         fh.retain();
         defer ctx.vm.releaseValue(opened);
@@ -1415,6 +1416,7 @@ fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         return NativeResult.scalar(.{ .bool = try userStatCached(ctx, class_name, path, 2) != null });
     }
+    if (ftpUrl(ctx.vm, path)) return NativeResult.scalar(.{ .bool = try ftpStatCached(ctx, path) != null });
     var fold_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (try unknownWrapperPath(ctx, path, &fold_buf)) |plain| {
         std.Io.Dir.cwd().access(platform.io, plain, .{}) catch return NativeResult.scalar(Value{ .bool = false });
@@ -1452,6 +1454,10 @@ fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         const st = (try userStatCached(ctx, class_name, path, 2)) orelse return NativeResult.scalar(.{ .bool = false });
         return NativeResult.scalar(.{ .bool = (st.mode & 0o170000) == 0o100000 });
     }
+    if (ftpUrl(ctx.vm, path)) {
+        const st = (try ftpStatCached(ctx, path)) orelse return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = (st.mode & 0o170000) == 0o100000 });
+    }
     if (extractScheme(path)) |s| {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
@@ -1481,6 +1487,10 @@ fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const path = bundle.osPath(&os_buf, spelled);
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const st = (try userStatCached(ctx, class_name, path, 2)) orelse return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = (st.mode & 0o170000) == 0o040000 });
+    }
+    if (ftpUrl(ctx.vm, path)) {
+        const st = (try ftpStatCached(ctx, path)) orelse return NativeResult.scalar(.{ .bool = false });
         return NativeResult.scalar(.{ .bool = (st.mode & 0o170000) == 0o040000 });
     }
     if (extractScheme(path)) |s| {
@@ -1666,6 +1676,10 @@ fn native_mkdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         const options: i64 = 8 | @as(i64, if (recursive) 1 else 0);
         return NativeResult.scalar(.{ .bool = try user_streams.mkdir(ctx, class_name, spelled, mode_arg, options, context) });
     }
+    if (ftpUrl(ctx.vm, spelled)) {
+        const context = try network.streamContext(ctx, if (args.len > 3) args[3] else null);
+        return NativeResult.scalar(.{ .bool = try ftp_wrapper.mkdir(ctx, spelled, recursive, user_streams.REPORT_ERRORS, context) });
+    }
     try useContext(ctx, args, 3);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     var path = bundle.osPath(&os_buf, spelled);
@@ -1723,6 +1737,10 @@ fn native_rmdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         const context = try network.streamContext(ctx, if (args.len > 1) args[1] else null);
         return NativeResult.scalar(.{ .bool = try user_streams.rmdir(ctx, class_name, spelled, user_streams.REPORT_ERRORS, context) });
     }
+    if (ftpUrl(ctx.vm, spelled)) {
+        const context = try network.streamContext(ctx, if (args.len > 1) args[1] else null);
+        return NativeResult.scalar(.{ .bool = try ftp_wrapper.rmdir(ctx, spelled, user_streams.REPORT_ERRORS, context) });
+    }
     try useContext(ctx, args, 1);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     var path = bundle.osPath(&os_buf, spelled);
@@ -1757,6 +1775,12 @@ fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const context = try network.streamContext(ctx, if (args.len > 1) args[1] else null);
         return NativeResult.scalar(.{ .bool = try user_streams.unlink(ctx, class_name, path, context) });
+    }
+    if (ftpUrl(ctx.vm, path)) {
+        const context = try network.streamContext(ctx, if (args.len > 1) args[1] else null);
+        const ok = try ftp_wrapper.unlink(ctx, path, user_streams.REPORT_ERRORS, context);
+        if (ok) clearStatAndRealpathCache();
+        return NativeResult.scalar(.{ .bool = ok });
     }
     if (extractScheme(path)) |s| {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
@@ -1982,6 +2006,17 @@ fn native_rename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         const context = try network.streamContext(ctx, if (args.len > 2) args[2] else null);
         return NativeResult.scalar(.{ .bool = try user_streams.rename(ctx, from_class.?, spelled_from, spelled_to, context) });
     }
+    // ftp:// and ftps:// are one wrapper
+    if (ftpUrl(ctx.vm, spelled_from) or ftpUrl(ctx.vm, spelled_to)) {
+        if (!ftpUrl(ctx.vm, spelled_from) or !ftpUrl(ctx.vm, spelled_to)) {
+            try warn(ctx, "rename(): Cannot rename a file across wrapper types", .{});
+            return NativeResult.scalar(.{ .bool = false });
+        }
+        const context = try network.streamContext(ctx, if (args.len > 2) args[2] else null);
+        const ok = try ftp_wrapper.rename(ctx, spelled_from, spelled_to, user_streams.REPORT_ERRORS, context);
+        if (ok) clearStatAndRealpathCache();
+        return NativeResult.scalar(.{ .bool = ok });
+    }
     try useContext(ctx, args, 2);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     var to_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2030,9 +2065,9 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         try warn(ctx, "scandir(): (errno 1): Operation not permitted", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
-    if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
+    if (!try directoryNames(ctx, args[0].string.bytes(), &names, if (args.len > 2) args[2] else null)) {
         const err = dirOpenError(args[0].string.bytes());
-        if (userWrapperFor(ctx.vm, args[0].string.bytes()) == null) {
+        if (userWrapperFor(ctx.vm, args[0].string.bytes()) == null and !ftpUrl(ctx.vm, args[0].string.bytes())) {
             try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.plainfile, .func = "scandir" }, "Failed to open directory: {s}", .{err.text});
         }
         try warn(ctx, "scandir(): (errno {d}): {s}", .{ err.errno, err.text });
@@ -2081,7 +2116,16 @@ fn dirOpenError(path: []const u8) DirOpenError {
     return .{ .errno = 2, .text = "No such file or directory" };
 }
 
-fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUnmanaged(Value.String)) RuntimeError!bool {
+fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUnmanaged(Value.String), context_arg: ?Value) RuntimeError!bool {
+    // the ftp wrapper's listing; its errors are out when it fails
+    if (ftpUrl(ctx.vm, path)) {
+        if (try ftp_wrapper.listDir(ctx, path, 0, try network.streamContext(ctx, context_arg), names)) {
+            user_streams.tidyErrors();
+            return true;
+        }
+        try user_streams.displayErrors(ctx, path, "Failed to open directory", "operation failed", "ftp");
+        return false;
+    }
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const context = try network.streamContext(ctx, null);
         const dh = (try user_streams.opendir(ctx, class_name, path, 0, context)) orelse {
@@ -2212,7 +2256,8 @@ fn openDirectory(ctx: *NativeContext, args: []const Value, comptime func: []cons
     var names = std.ArrayListUnmanaged(Value.String).empty;
     defer names.deinit(ctx.allocator);
     defer for (names.items) |name| name.release();
-    if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
+    if (!try directoryNames(ctx, args[0].string.bytes(), &names, if (args.len > 1) args[1] else null)) {
+        if (ftpUrl(ctx.vm, args[0].string.bytes())) return NativeResult.scalar(.{ .bool = false });
         const err = dirOpenError(args[0].string.bytes());
         try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.plainfile, .func = func }, "Failed to open directory: {s}", .{err.text});
         return NativeResult.scalar(.{ .bool = false });
@@ -2736,6 +2781,18 @@ pub fn clearStatAndRealpathCache() void {
 
 // php_stat for a path a user wrapper serves: the cached stat of the same
 // path, else url_stat (php adds PHP_STREAM_URL_STAT_IGNORE_OPEN_BASEDIR)
+// php_stat for an ftp url: the cached stat of the same path, else the
+// wrapper's url_stat
+fn ftpStatCached(ctx: *NativeContext, path: []const u8) RuntimeError!?WrapperStat {
+    if (stat_cache_path) |cached| if (std.mem.eql(u8, cached, path)) return stat_cache_value;
+    const st = (try ftp_wrapper.urlStat(ctx, path, try network.streamContext(ctx, null))) orelse return null;
+    clearStatCache();
+    stat_cache_path = try ctx.allocator.dupe(u8, path);
+    stat_cache_allocator = ctx.allocator;
+    stat_cache_value = st;
+    return st;
+}
+
 fn userStatCached(ctx: *NativeContext, class_name: []const u8, path: []const u8, flags: i64) RuntimeError!?WrapperStat {
     if (stat_cache_path) |cached| if (std.mem.eql(u8, cached, path)) return stat_cache_value;
     const arr = (try dispatchUserStat(ctx, class_name, path, flags | 4)) orelse return null;
@@ -2749,6 +2806,7 @@ fn userStatCached(ctx: *NativeContext, class_name: []const u8, path: []const u8,
 
 fn statWrapped(ctx: *NativeContext, path: []const u8) RuntimeError!StatLookup {
     if (bundle.find(path)) |hit| return .{ .found = packedStat(hit) };
+    if (ftpUrl(ctx.vm, path)) return if (try ftpStatCached(ctx, path)) |st| .{ .found = st } else .missing;
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         return if (try userStatCached(ctx, class_name, path, 0)) |st| .{ .found = st } else .missing;
     }
@@ -3144,6 +3202,7 @@ fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 
     if (std.ascii.startsWithIgnoreCase(path, "http://") and !isWrapperUnregistered(ctx.vm, "http")) return openHttpStream(ctx, path, mode, if (args.len > 3) args[3] else null);
     if (std.ascii.startsWithIgnoreCase(path, "https://") and !isWrapperUnregistered(ctx.vm, "https")) return openHttpStream(ctx, path, mode, if (args.len > 3) args[3] else null);
+    if (ftpUrl(ctx.vm, path)) return openFtpStream(ctx, path, mode, if (args.len > 3) args[3] else null);
     if (std.ascii.startsWithIgnoreCase(path, "php://fd/")) return openFdStream(ctx, path, mode);
     if (std.ascii.startsWithIgnoreCase(path, "php://filter/")) return openFilterStream(ctx, path, mode, if (args.len > 3) args[3] else null);
     if (std.ascii.startsWithIgnoreCase(path, "php://") and !knownPhpStream(path[6..])) {
@@ -3272,6 +3331,31 @@ fn openHttpStream(ctx: *NativeContext, path: []const u8, mode: []const u8, conte
     };
     user_streams.tidyErrors();
     try stream.setCopiedString(ctx.allocator, "__path", path);
+    return NativeResult.borrowed(.{ .resource = stream });
+}
+
+// ftp:// and ftps://: the wrapper's data stream (allow_url_fopen permitting)
+fn openFtpStream(ctx: *NativeContext, path: []const u8, mode: []const u8, context_arg: ?Value) RuntimeError!NativeResult {
+    const scheme = path[0 .. std.mem.indexOf(u8, path, "://") orelse 0];
+    if (!ctx.vm.iniFlagOn("allow_url_fopen", "1")) {
+        try warnDocref(ctx, "{s}:// wrapper is disabled in the server configuration by allow_url_fopen=0", .{scheme});
+        try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.no_wrapper }, "Failed to open stream: no suitable wrapper could be found", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (current_include != null and !ctx.vm.iniFlagOn("allow_url_include", "0")) {
+        try warnDocref(ctx, "{s}:// wrapper is disabled in the server configuration by allow_url_include=0", .{scheme});
+        try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.no_wrapper }, "Failed to open stream: no suitable wrapper could be found", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const context = try network.streamContext(ctx, context_arg);
+    const stream = (try ftp_wrapper.open(ctx, path, mode, 0, context)) orelse {
+        try user_streams.displayErrors(ctx, path, "Failed to open stream", "operation failed", "ftp");
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    user_streams.tidyErrors();
+    // the http wrapper answered for a proxied url and named the stream itself
+    if (stream.get("__path") != .string or !ftp_wrapper.isFtpUrl(stream.get("__path").string.bytes())) try stream.setCopiedString(ctx.allocator, "__path", path);
     return NativeResult.borrowed(.{ .resource = stream });
 }
 
@@ -3542,9 +3626,20 @@ fn closeHandle(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
     if (getFileHandle(obj)) |file| {
         // never close stdin/stdout/stderr - they're shared with the host process
         if (isNetStream(obj)) {
+            // the peer sees the close: php's cli has written every echo by
+            // then, so the output before it goes out first
+            ctx.vm.flushOutputToStdout();
             // the TLS session ends before its socket
             if (streams.get(obj)) |s| if (s.tls) |t| @import("xp_ssl.zig").shutdown(t);
             platform.closeSocket(obj.get("__fd").int);
+            // the ftp wrapper's stream_closer, once the data connection is gone
+            // (php ignores what it returns)
+            if (obj.get("__ftp_control") == .resource) {
+                try obj.set(ctx.allocator, "__fd", .{ .int = -1 });
+                try obj.set(ctx.allocator, "__open", .{ .bool = false });
+                _ = try ftp_wrapper.streamClose(ctx, obj);
+                return true;
+            }
         } else if (!platform.isStdio(file)) {
             platform.closeFile(file, obj.get("__fd").int);
             // a process pipe's close is pclose: its status is the close's
@@ -4026,7 +4121,8 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
     if (is_socket) {
         const sock_type = obj.get("__sock_type");
         stream_type = if (sock_type == .string) sock_type.string.bytes() else "generic_socket";
-        if (path_val != .string or !std.mem.startsWith(u8, uri, "http")) wrapper_type = null;
+        if (path_val != .string or !(std.mem.startsWith(u8, uri, "http") or (ftp_wrapper.isFtpUrl(uri) and obj.get("__ftp_control") == .resource))) wrapper_type = null;
+        if (wrapper_type != null and ftp_wrapper.isFtpUrl(uri)) wrapper_type = "ftp";
     }
     // a temp stream's inner memory stream is made without a wrapper or a url
     const enclosed = obj.get("__enclosed") == .bool;
@@ -4092,7 +4188,15 @@ fn directoryMetaData(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeRe
     return NativeResult.borrowed(.{ .array = result });
 }
 
-const builtin_wrappers = [_][]const u8{ "https", "compress.zlib", "php", "file", "data", "http", "phar" };
+const builtin_wrappers = [_][]const u8{ "https", "ftps", "compress.zlib", "php", "file", "data", "http", "ftp", "phar" };
+
+const ftp_wrapper = @import("ftp_wrapper.zig");
+
+// an ftp:// or ftps:// url whose wrapper is registered
+fn ftpUrl(vm: *VM, path: []const u8) bool {
+    if (!ftp_wrapper.isFtpUrl(path)) return false;
+    return !isWrapperUnregistered(vm, if (path[3] == 's' or path[3] == 'S') "ftps" else "ftp");
+}
 
 const ZLIB_PREFIX = "compress.zlib://";
 
