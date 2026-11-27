@@ -7,7 +7,7 @@ version_part() { grep -E "^pub const $1 = " "$ROOT/src/php_version.zig" | grep -
 TAG="php-$(version_part major).$(version_part minor).$(version_part release)"
 DEST="$SCRIPT_DIR/php-src"
 # the test directories, and the helpers their tests include from elsewhere
-paths=(/run-tests.php /ext/openssl/tests/ServerClientTestCase.inc /ext/dl_test/tests/skip.inc /sapi/cli/tests/php_cli_server.inc /sapi/cli/tests/skipif.inc $(sed 's|^|/|; s|$|/|' "$SCRIPT_DIR/dirs"))
+paths=(/run-tests.php /ext/openssl/tests/ServerClientTestCase.inc /ext/openssl/tests/sni_server.pem /ext/dl_test/tests/skip.inc /sapi/cli/tests/php_cli_server.inc /sapi/cli/tests/skipif.inc $(sed 's|^|/|; s|$|/|' "$SCRIPT_DIR/dirs"))
 if [ -d "$DEST" ] && [ "$(git -C "$DEST" describe --tags 2>/dev/null)" = "$TAG" ]; then
     git -C "$DEST" sparse-checkout set --no-cone "${paths[@]}"
     echo "php-src $TAG already present"

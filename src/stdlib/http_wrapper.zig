@@ -267,15 +267,19 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         }
         timeout_s = d;
     }
-    if (use_ssl) {
-        try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "Unable to find the socket transport \"ssl\" - did you forget to enable it when you configured PHP?", .{});
-        return null;
-    }
     const stream = (try network.connectTransport(ctx, transport, timeout_s, options, context)) orelse return null;
     var keep_stream = false;
     defer if (!keep_stream) {
         _ = fs.closeStream(ctx, stream) catch {};
     };
+    // PHP_STREAM_OPTION_READ_TIMEOUT: reads wait as long as the connect may
+    if (timeout_s >= 0) try stream.set(a, "__timeout_us", .{ .int = @intFromFloat(@min(timeout_s, 1e12) * 1e6) });
+    if (use_proxy and use_ssl) {
+        if (!try proxyTunnel(ctx, stream, context, &resource, options)) {
+            keep_stream = true;
+            return null;
+        }
+    }
     const s = try streams.of(ctx, stream);
     // the headers are always \r\n
     const eol_detect = s.detect_eol;
@@ -348,7 +352,6 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
                 stripHeader(&user_headers, &lc, "cookie");
                 if (!use_proxy) stripHeader(&user_headers, &lc, "proxy-authorization");
             }
-            has_user_headers = user_headers.items.len > 0;
             if (checkHasHeader(lc.items, "user-agent:")) have |= HAVE_USER_AGENT;
             if (checkHasHeader(lc.items, "host:")) have |= HAVE_HOST;
             if (checkHasHeader(lc.items, "from:")) have |= HAVE_FROM;
@@ -356,6 +359,10 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
             if (checkHasHeader(lc.items, "content-length:")) have |= HAVE_CONTENT_LENGTH;
             if (checkHasHeader(lc.items, "content-type:")) have |= HAVE_TYPE;
             if (checkHasHeader(lc.items, "connection:")) have |= HAVE_CONNECTION;
+            // the proxy had the Proxy-Authorization in the CONNECT; the
+            // server behind the tunnel never sees it
+            if (use_proxy and use_ssl) removeProxyAuthorization(&user_headers, lc.items);
+            has_user_headers = user_headers.items.len > 0;
         }
     }
     if (have & HAVE_AUTH == 0) if (resource.user) |user| {
@@ -582,6 +589,103 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         return openEx(ctx, owned_path, mode, options, context, redirect_max - 1, new_flags, headers);
     }
     return finish(ctx, stream, s, mode, header_init, headers, &info, context, eol_detect, eol_mac, &keep_stream);
+}
+
+// the CONNECT request that opens a tunnel through an http proxy, and the
+// handshake with the server at its far end. false (with the stream closed
+// and php's error logged) when either fails
+fn proxyTunnel(ctx: *NativeContext, stream: *PhpObject, context: ?*PhpObject, resource: *const Url, options: i64) RuntimeError!bool {
+    const a = ctx.allocator;
+    var reset_peer_name = false;
+    // name verification checks the server's name, not the proxy's
+    if (context) |c| if (contextOption(c, "ssl", "peer_name") == null) {
+        const host = try Value.String.create(a, resource.host);
+        defer host.release();
+        try network.setContextOption(ctx, c, "ssl", "peer_name", .{ .string = host });
+        reset_peer_name = true;
+    };
+    var header: std.ArrayListUnmanaged(u8) = .empty;
+    defer header.deinit(a);
+    try header.print(a, "CONNECT {s}:{d} HTTP/1.0\r\n", .{ resource.host, resource.port });
+    // the first Proxy-Authorization among the context's headers goes along
+    if (contextOption(context, "http", "header")) |hv| {
+        if (hv == .array) {
+            for (hv.array.entries.items) |e| {
+                const v = if (e.ref) |r| r.* else e.value;
+                if (v == .string and try proxyAuthorizationHeader(a, v.string.bytes(), &header)) break;
+            }
+        } else if (hv == .string and hv.string.bytes().len > 0) {
+            _ = try proxyAuthorizationHeader(a, hv.string.bytes(), &header);
+        }
+    }
+    try header.appendSlice(a, "\r\n");
+    var ok = (try streams.write(ctx, stream, header.items)) == @as(isize, @intCast(header.items.len));
+    if (!ok) {
+        if (reset_peer_name) try network.unsetContextOption(ctx, context.?, "ssl", "peer_name");
+        try user_streams.logErrorAt(ctx, options, .{ .code = .ProtocolError, .wrapper = "http" }, "Cannot connect to HTTPS server through proxy", .{});
+        _ = try fs.closeStream(ctx, stream);
+        return false;
+    }
+    // the proxy's response headers, up to the blank line
+    while (try streams.getLine(ctx, stream, 1023)) |line| {
+        defer a.free(line);
+        if (line.len == 0 or line[0] == '\n' or line[0] == '\r' or line[0] == 0) break;
+    }
+    const xp_ssl = @import("xp_ssl.zig");
+    if (try xp_ssl.cryptoSetup(ctx, stream, xp_ssl.SSLv23_CLIENT, null) < 0 or try xp_ssl.cryptoEnable(ctx, stream, true) < 0) {
+        try user_streams.logErrorAt(ctx, options, .{ .code = .SslNotSupported, .wrapper = "http" }, "Cannot connect to HTTPS server through proxy", .{});
+        _ = try fs.closeStream(ctx, stream);
+        ok = false;
+    }
+    if (reset_peer_name) try network.unsetContextOption(ctx, context.?, "ssl", "peer_name");
+    return ok;
+}
+
+// php_stream_handle_proxy_authorization_header: the Proxy-Authorization
+// line of a header block, appended to the CONNECT request
+fn proxyAuthorizationHeader(a: std.mem.Allocator, block: []const u8, out: *std.ArrayListUnmanaged(u8)) RuntimeError!bool {
+    // the block is a c string to php
+    const s_all = block[0 .. std.mem.indexOfScalar(u8, block, 0) orelse block.len];
+    var s: usize = 0;
+    while (true) {
+        while (s < s_all.len and (s_all[s] == ' ' or s_all[s] == '\t')) s += 1;
+        var p = s;
+        while (p < s_all.len and s_all[p] != ':' and s_all[p] != '\r' and s_all[p] != '\n') p += 1;
+        if (p < s_all.len and s_all[p] == ':') {
+            p += 1;
+            const name = "Proxy-Authorization:";
+            const is_auth = p - s == name.len and std.ascii.eqlIgnoreCase(s_all[s..p], name);
+            while (p < s_all.len and s_all[p] != '\r' and s_all[p] != '\n') p += 1;
+            if (is_auth) {
+                try out.appendSlice(a, s_all[s..p]);
+                try out.appendSlice(a, "\r\n");
+                return true;
+            }
+        }
+        s = p;
+        while (s < s_all.len and (s_all[s] == '\r' or s_all[s] == '\n')) s += 1;
+        if (s >= s_all.len) return false;
+    }
+}
+
+// the first proxy-authorization line starting a line of the lowercased
+// header bag goes from the user's headers, as php removes it
+fn removeProxyAuthorization(bag: *std.ArrayListUnmanaged(u8), lc: []const u8) void {
+    const name = "proxy-authorization:";
+    var s = std.mem.indexOf(u8, lc, name) orelse return;
+    if (!(s == 0 or lc[s - 1] == '\n')) return;
+    var p = s + name.len;
+    while (s > 0 and (lc[s - 1] == ' ' or lc[s - 1] == '\t')) s -= 1;
+    while (p < lc.len and lc[p] != '\r' and lc[p] != '\n') p += 1;
+    while (p < lc.len and (lc[p] == '\r' or lc[p] == '\n')) p += 1;
+    if (p >= lc.len) {
+        if (s == 0) {
+            bag.clearRetainingCapacity();
+        } else {
+            while (s > 0 and (lc[s - 1] == '\r' or lc[s - 1] == '\n')) s -= 1;
+            bag.shrinkRetainingCapacity(s);
+        }
+    } else bag.replaceRangeAssumeCapacity(s, p - s, &.{});
 }
 
 fn finish(ctx: *NativeContext, stream: *PhpObject, s: *streams.Stream, mode: []const u8, header_init: bool, headers: *PhpArray, info: *HeaderInfo, context: ?*PhpObject, eol_detect: bool, eol_mac: bool, keep: *bool) RuntimeError!?*PhpObject {

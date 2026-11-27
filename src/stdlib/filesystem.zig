@@ -820,113 +820,6 @@ pub fn errorText(err: anyerror) []const u8 {
 
 // file read/write
 
-const c_curl = @import("c_curl");
-
-var curl_global_init_done: bool = false;
-
-const CurlWriteData = struct {
-    allocator: Allocator,
-    buffer: std.ArrayListUnmanaged(u8),
-};
-
-const CurlHeaderData = struct {
-    ctx: *NativeContext,
-    headers: *PhpArray,
-    in_1xx: bool = false,
-    oom: bool = false,
-};
-
-fn parseHttpStatus(line: []const u8) ?u16 {
-    var it = std.mem.tokenizeScalar(u8, line, ' ');
-    _ = it.next() orelse return null;
-    const code_str = it.next() orelse return null;
-    return std.fmt.parseInt(u16, code_str, 10) catch null;
-}
-
-fn curlWriteCallback(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
-    const total = size * nmemb;
-    const wd: *CurlWriteData = @ptrCast(@alignCast(userdata));
-    wd.buffer.appendSlice(wd.allocator, data[0..total]) catch return 0;
-    return total;
-}
-
-fn curlHeaderCallback(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
-    const total = std.math.mul(usize, size, nmemb) catch return 0;
-    const hd: *CurlHeaderData = @ptrCast(@alignCast(userdata));
-    const raw = std.mem.trimEnd(u8, data[0..total], "\r\n");
-    const status = std.mem.startsWith(u8, raw, "HTTP/");
-    if (status) {
-        const code = parseHttpStatus(raw) orelse return total;
-        hd.in_1xx = code >= 100 and code < 200 and code != 101;
-    }
-    if (hd.in_1xx) return total;
-    const line = if (status) raw else std.mem.trimEnd(u8, raw, " \t");
-    if (line.len == 0) return total;
-    const owned = Value.String.create(hd.ctx.allocator, line) catch {
-        hd.oom = true;
-        return 0;
-    };
-    defer owned.release();
-    hd.headers.append(hd.ctx.allocator, .{ .string = owned }) catch {
-        hd.oom = true;
-        return 0;
-    };
-    return total;
-}
-
-fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!NativeResult {
-    if (ctx.vm.last_http_response_headers) |previous| ctx.vm.arrayRelease(previous);
-    ctx.vm.last_http_response_headers = null;
-
-    // Note: process-local curl_global_init is safe under zphp serve's fork-based worker model.
-    if (!curl_global_init_done) {
-        _ = c_curl.curl_global_init(c_curl.CURL_GLOBAL_DEFAULT);
-        curl_global_init_done = true;
-    }
-
-    const handle = c_curl.curl_easy_init() orelse return NativeResult.scalar(.{ .bool = false });
-    defer c_curl.curl_easy_cleanup(handle);
-
-    var url_buf: [8192]u8 = undefined;
-    if (url.len >= url_buf.len) return NativeResult.scalar(.{ .bool = false });
-    @memcpy(url_buf[0..url.len], url);
-    url_buf[url.len] = 0;
-
-    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_URL, &url_buf);
-    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_FOLLOWLOCATION, @as(c_long, 1));
-    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_MAXREDIRS, @as(c_long, 20));
-
-    var wd = CurlWriteData{
-        .allocator = ctx.allocator,
-        .buffer = .empty,
-    };
-    defer wd.buffer.deinit(wd.allocator);
-
-    const headers_arr = ctx.createArray() catch return NativeResult.scalar(.{ .bool = false });
-    @import("../runtime/vm.zig").VM.arrayRetain(headers_arr);
-    defer ctx.vm.arrayRelease(headers_arr);
-    var hd = CurlHeaderData{
-        .ctx = ctx,
-        .headers = headers_arr,
-    };
-
-    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_WRITEFUNCTION, @as(?*const fn ([*]u8, usize, usize, *anyopaque) callconv(.c) usize, &curlWriteCallback));
-    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&wd)));
-    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_HEADERFUNCTION, @as(?*const fn ([*]u8, usize, usize, *anyopaque) callconv(.c) usize, &curlHeaderCallback));
-    _ = c_curl.curl_easy_setopt(handle, c_curl.CURLOPT_HEADERDATA, @as(*anyopaque, @ptrCast(&hd)));
-
-    const result = c_curl.curl_easy_perform(handle);
-    if (!hd.oom and headers_arr.entries.items.len > 0) {
-        @import("../runtime/vm.zig").VM.arrayRetain(headers_arr);
-        ctx.vm.last_http_response_headers = headers_arr;
-    }
-    if (result != c_curl.CURLE_OK) return NativeResult.scalar(.{ .bool = false });
-
-    const body = try wd.buffer.toOwnedSlice(wd.allocator);
-    errdefer wd.allocator.free(body);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, body));
-}
-
 // php's get_headers: the url's wrapper data, the response headers, opened
 // with STREAM_ONLY_GET_HEADERS so an error status still answers
 fn native_get_headers(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1302,7 +1195,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         const decoded = (try readZlibUrl(ctx, path, if (func != null) read_context else null)) orelse return null;
         return try Value.String.adopt(ctx.allocator, decoded);
     }
-    if (std.ascii.startsWithIgnoreCase(path, "http://")) {
+    if (std.ascii.startsWithIgnoreCase(path, "http://") or std.ascii.startsWithIgnoreCase(path, "https://")) {
         // the http wrapper's stream, read to its end
         const opened = (try openStreamValue(ctx, path, "rb", if (func != null) read_context else null)) orelse return null;
         const fh = opened.resource;
@@ -1311,10 +1204,6 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         const data = try streams.copyToMem(ctx, fh, null);
         _ = try closeStream(ctx, fh);
         return try Value.String.adopt(ctx.allocator, data orelse try ctx.allocator.alloc(u8, 0));
-    }
-    if (path.len > 7 and (std.ascii.startsWithIgnoreCase(path, "http://") or std.ascii.startsWithIgnoreCase(path, "https://"))) {
-        const fetched = try fetchUrl(ctx, path);
-        return if (fetched.value == .string) fetched.value.string else null;
     }
     if (open_basedir.setting(ctx.vm) != null and isPlainPath(path)) {
         if (func) |name| {
@@ -3254,6 +3143,7 @@ fn openWithWrapper(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     }
 
     if (std.ascii.startsWithIgnoreCase(path, "http://") and !isWrapperUnregistered(ctx.vm, "http")) return openHttpStream(ctx, path, mode, if (args.len > 3) args[3] else null);
+    if (std.ascii.startsWithIgnoreCase(path, "https://") and !isWrapperUnregistered(ctx.vm, "https")) return openHttpStream(ctx, path, mode, if (args.len > 3) args[3] else null);
     if (std.ascii.startsWithIgnoreCase(path, "php://fd/")) return openFdStream(ctx, path, mode);
     if (std.ascii.startsWithIgnoreCase(path, "php://filter/")) return openFilterStream(ctx, path, mode, if (args.len > 3) args[3] else null);
     if (std.ascii.startsWithIgnoreCase(path, "php://") and !knownPhpStream(path[6..])) {
@@ -3362,13 +3252,15 @@ fn chainLength(chain: *const stream_filters.Chain) i64 {
 
 // http://: the wrapper's stream (allow_url_fopen permitting)
 fn openHttpStream(ctx: *NativeContext, path: []const u8, mode: []const u8, context_arg: ?Value) RuntimeError!NativeResult {
+    // php names the scheme as the url spells it
+    const scheme = path[0 .. std.mem.indexOf(u8, path, "://") orelse 0];
     if (!ctx.vm.iniFlagOn("allow_url_fopen", "1")) {
-        try warnDocref(ctx, "http:// wrapper is disabled in the server configuration by allow_url_fopen=0", .{});
+        try warnDocref(ctx, "{s}:// wrapper is disabled in the server configuration by allow_url_fopen=0", .{scheme});
         try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.no_wrapper }, "Failed to open stream: no suitable wrapper could be found", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
     if (current_include != null and !ctx.vm.iniFlagOn("allow_url_include", "0")) {
-        try warnDocref(ctx, "http:// wrapper is disabled in the server configuration by allow_url_include=0", .{});
+        try warnDocref(ctx, "{s}:// wrapper is disabled in the server configuration by allow_url_include=0", .{scheme});
         try se.raise(ctx, .{ .code = .OpenFailed, .wrapper = se.no_wrapper }, "Failed to open stream: no suitable wrapper could be found", .{});
         return NativeResult.scalar(.{ .bool = false });
     }

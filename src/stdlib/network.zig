@@ -491,6 +491,24 @@ pub fn setContextOption(ctx: *NativeContext, context: *PhpObject, wrapper_name: 
     try context.set(ctx.allocator, "options", .{ .array = merged });
 }
 
+// php_stream_context_unset_option: drops options[wrapper][option]
+pub fn unsetContextOption(ctx: *NativeContext, context: *PhpObject, wrapper_name: []const u8, option: []const u8) RuntimeError!void {
+    const options = context.get("options");
+    if (options != .array) return;
+    const wrapper_key = PhpArray.Key{ .string = Value.String.borrowed(wrapper_name) };
+    const current = options.array.get(wrapper_key);
+    if (current != .array) return;
+    const option_key = PhpArray.Key{ .string = Value.String.borrowed(option) };
+    if (!current.array.contains(option_key)) return;
+    const merged = try freshArray(ctx, options);
+    const wrapper = try freshArray(ctx, current);
+    ctx.vm.arrayRemoveOwned(wrapper, option_key);
+    const wkey = try Value.String.adopt(ctx.allocator, try ctx.allocator.dupe(u8, wrapper_name));
+    defer wkey.release();
+    try ctx.vm.arraySetOwned(merged, .{ .string = wkey }, .{ .array = wrapper });
+    try context.set(ctx.allocator, "options", .{ .array = merged });
+}
+
 fn native_stream_context_set_params(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const context = (try contextArg(ctx, args, "stream_context_set_params", .create)).?;
     if (args.len < 2 or args[1] != .array) return throwContext(ctx, "stream_context_set_params(): Argument #2 ($params) must be of type array, {s} given", .{if (args.len > 1) args[1].valueName() else "null"});
