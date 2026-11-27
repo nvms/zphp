@@ -200,6 +200,9 @@ pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Alloc
         }
         return list(vm, instance, purpose, allocator);
     };
+    // the debug and export listings build php's property table
+    // (rebuild_object_properties); the others read the slots directly
+    if (purpose == .debug or purpose == .var_export) obj.props_table = true;
     if (try table(vm, obj, purpose)) |arr| {
         defer releaseBuilt(vm, arr);
         for (arr.entries.items) |entry| {

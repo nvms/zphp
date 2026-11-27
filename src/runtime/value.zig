@@ -1344,6 +1344,14 @@ pub const PhpObject = struct {
     // account beyond the bytes it takes (php's property HashTable is
     // smaller); undone when the table is freed, as PhpArray.mem_adj
     mem_adj: i64 = 0,
+    // php has built the object's property table (zobj->properties: a
+    // listing, foreach or dynamic property did), so its element count only
+    // drops for an unset slot once the unset has released the old value
+    props_table: bool = false,
+    // declared slots being unset whose old value is still being released
+    // while the table exists: var_dump's count still includes them
+    // (zend_std_unset_property sets HASH_FLAG_HAS_EMPTY_IND after the dtor)
+    unsetting_slots: u16 = 0,
 
     pub const LazyState = struct {
         initializer: Value,

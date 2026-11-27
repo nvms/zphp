@@ -10867,21 +10867,7 @@ pub const VM = struct {
                         } else if (try self.propertyAccessDenied(obj, prop_name)) {
                             continue;
                         } else {
-                            // mark the property as unset so subsequent reads
-                            // fall through to __get (matching PHP's lazy-init
-                            // pattern). slot value remains its default; only
-                            // the unset_slots set decides "present"
-                            // the property leaves any reference it shared
-                            if (obj.ref_mirrored) self.detachPropRefs(obj, prop_name, null);
-                            try obj.markUnset(self.allocator, prop_name);
-                            // release the object the property held (Stage 1)
-                            if (obj.slots) |s| {
-                                if (obj.getSlotIndex(prop_name)) |idx| {
-                                    self.releaseValue(s[idx]);
-                                    s[idx] = .null;
-                                }
-                            }
-                            if (obj.removeProperty(self.allocator, prop_name)) |removed| self.releaseValue(removed);
+                            try self.unsetPlainProperty(obj, prop_name);
                         }
                     }
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
@@ -10934,17 +10920,7 @@ pub const VM = struct {
                         } else if (try self.propertyAccessDenied(obj, prop_name)) {
                             continue;
                         } else {
-                            // the property leaves any reference it shared
-                            if (obj.ref_mirrored) self.detachPropRefs(obj, prop_name, null);
-                            try obj.markUnset(self.allocator, prop_name);
-                            // release the object the property held (Stage 1)
-                            if (obj.slots) |s| {
-                                if (obj.getSlotIndex(prop_name)) |idx| {
-                                    self.releaseValue(s[idx]);
-                                    s[idx] = .null;
-                                }
-                            }
-                            if (obj.removeProperty(self.allocator, prop_name)) |removed| self.releaseValue(removed);
+                            try self.unsetPlainProperty(obj, prop_name);
                         }
                     }
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
@@ -36129,6 +36105,32 @@ pub const VM = struct {
         if (self.pending_destruct.items.len == 0) return false;
         self.drainPendingDestruct();
         return true;
+    }
+
+    // unset() of a property no magic or hook handles. the unset marker makes
+    // later reads fall through to __get (php's lazy-init pattern); only
+    // unset_slots decides "present"
+    fn unsetPlainProperty(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!void {
+        // the property leaves any reference it shared
+        if (obj.ref_mirrored) self.detachPropRefs(obj, prop_name, null);
+        try obj.markUnset(self.allocator, prop_name);
+        if (obj.slots) |s| {
+            if (obj.getSlotIndex(prop_name)) |idx| {
+                const old = s[idx];
+                s[idx] = .null;
+                // php's property table keeps counting the slot until the old
+                // value's destructors are done
+                if ((obj.props_table or obj.properties.count() > 0) and (old == .object or old == .array)) {
+                    // object memory is arena-owned, so the counter is safe to
+                    // drop even if a destructor released the object
+                    obj.unsetting_slots += 1;
+                    self.releaseValue(old);
+                    if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    obj.unsetting_slots -= 1;
+                } else self.releaseValue(old);
+            }
+        }
+        if (obj.removeProperty(self.allocator, prop_name)) |removed| self.releaseValue(removed);
     }
 
     pub fn drainPendingDestruct(self: *VM) void {

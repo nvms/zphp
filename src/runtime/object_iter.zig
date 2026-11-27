@@ -72,6 +72,7 @@ pub fn create(vm: *VM, obj: *PhpObject, scope: ?[]const u8, by_ref: bool) Runtim
     const it = try vm.allocator.create(ObjectIter);
     it.* = .{ .scope = scope, .by_ref = by_ref };
     errdefer it.destroy(vm);
+    obj.props_table = true;
     if (object_properties.classHasHooks(vm, obj.class_name)) {
         var order: std.ArrayListUnmanaged(object_properties.Declared) = .empty;
         defer order.deinit(vm.allocator);

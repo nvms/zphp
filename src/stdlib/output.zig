@@ -144,6 +144,7 @@ fn debugZvalDump(ctx: *NativeContext, val: Value, level: usize, top: bool) Runti
             defer object_properties.releaseHolder(ctx.vm, holder);
             var shown: usize = 0;
             for (listing.items.items) |prop| shown += @intFromBool(prop.uninitialized == null);
+            shown += obj.unsetting_slots;
             try out.appendSlice(a, object_properties.lazyPrefix(obj));
             try out.print(a, "object({s})#{d} ({d}) refcount({d}){{\n", .{ obj.class_name, obj.id, shown, @max(rc, 1) });
             for (listing.items.items) |prop| {
@@ -348,6 +349,7 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try out.appendSlice(a, marker);
             var initialized: usize = 0;
             for (listing.items.items) |prop| initialized += @intFromBool(prop.uninitialized == null);
+            initialized += obj.unsetting_slots;
             if (enum_case) |case| {
                 try out.print(a, "enum({s}::{s}) ({d}) {{\n", .{ obj.class_name, case, initialized });
             } else {
