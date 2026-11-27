@@ -7583,6 +7583,25 @@ pub const VM = struct {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Undefined global variable ${s}", .{key_text});
                                 defer self.allocator.free(msg);
                                 self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                            } else if (self.compoundDimEnd()) |end| {
+                                // zend_undefined_index_write: the array is held
+                                // while the warning runs; a handler that wrote
+                                // to it (separating it) or freed it drops the
+                                // whole operation, which yields null
+                                const held = arr_val.array;
+                                const before = held.refcount;
+                                arrayRetain(held);
+                                const warned = self.emitUndefinedKeyWarning(ak);
+                                const changed = held.refcount != before + 1;
+                                arrayUnpin(held);
+                                warned catch if (try self.resumeRaised()) continue;
+                                if (changed) {
+                                    // [value, container, key] of the operation
+                                    for (0..3) |_| self.stackRelease(self.popTransfer());
+                                    self.push(.null);
+                                    self.currentFrame().ip = end;
+                                    continue;
+                                }
                             } else self.emitUndefinedKeyWarning(ak) catch if (try self.resumeRaised()) continue;
                         }
                         self.push(arr_val.array.get(ak));
@@ -35617,6 +35636,30 @@ pub const VM = struct {
         const b2: u32 = self.readByte();
         const b3: u32 = self.readByte();
         return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+    }
+
+    // the array_get running is the read of `$a[k] op= v` (emitPlaceCombine:
+    // check_rw_container 0, array_get, bury 3 three times, the operator,
+    // array_set): the ip past its array_set, where a dropped operation ends
+    fn compoundDimEnd(self: *VM) ?usize {
+        const code = self.currentChunk().code.items;
+        const ip = self.currentFrame().ip;
+        const get_at = ip - bytecode.op_bytes;
+        const check_w = OpCode.check_rw_container.width();
+        if (get_at < check_w or !bytecode.opIs(code, get_at - check_w, .check_rw_container) or code[get_at - 1] != 0) return null;
+        var at = ip;
+        for (0..3) |_| {
+            if (!bytecode.opIs(code, at, .bury) or at + 2 >= code.len or code[at + bytecode.op_bytes] != 3) return null;
+            at += OpCode.bury.width();
+        }
+        const operator = bytecode.opAt(code, at) orelse return null;
+        switch (operator) {
+            .add, .subtract, .multiply, .divide, .modulo, .power, .concat, .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right => {},
+            else => return null,
+        }
+        at += operator.width();
+        if (!bytecode.opIs(code, at, .array_set)) return null;
+        return at + OpCode.array_set.width();
     }
 
     // the reference source of a property assigned by reference from a call
