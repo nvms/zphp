@@ -23597,6 +23597,8 @@ pub const VM = struct {
         self.trait_constant_sources.clearRetainingCapacity();
         for (enum_trait_names[0..enum_trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, enum_name);
         try self.bindClassTraits(&def, enum_name, enum_trait_names[0..enum_trait_count], .{});
+        // class_uses() and reflection list them as for a class
+        for (enum_trait_names) |trait_name| try def.used_traits.append(self.allocator, try self.internName(if (trait_name.len > 0 and trait_name[0] == '\\') trait_name[1..] else trait_name));
         try self.checkDeclaredInterfaces(&def, enum_name);
         try self.checkInterfacesImplemented(&def, enum_name);
 
