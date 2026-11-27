@@ -991,9 +991,24 @@ fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
         vm.runShutdownDestructors();
         if (vm.pending_exception != null and try handleOrReport(allocator, vm)) failed = true;
     }
-    // then every output buffer is flushed through its handler
+    // then every output buffer is flushed through its handler. a handler
+    // whose exception no exception handler takes bails out of
+    // php_output_end_all: what the buffers held, and the error's display
+    // copy written into them, are lost when the output layer is deactivated
+    const ob_base: ?usize = if (vm.ob_stack.items.len > 0) vm.ob_stack.items[0].start else null;
     output_control.endAll(vm) catch {
-        if (vm.pending_exception != null and try handleOrReport(allocator, vm)) failed = true;
+        if (vm.pending_exception != null) {
+            if (vm.user_exception_handler != null and !vm.uncatchable_fatal) {
+                if (try handleOrReport(allocator, vm)) failed = true;
+            } else {
+                if (ob_base) |base| if (base <= vm.output.items.len) vm.output.shrinkRetainingCapacity(base);
+                output_control.releaseAll(vm);
+                display_lost = true;
+                defer display_lost = false;
+                try reportRuntimeError(allocator, vm);
+                failed = true;
+            }
+        }
     };
     vm.sendHeadersAtShutdown() catch {
         if (vm.pending_exception != null and try handleOrReport(allocator, vm)) failed = true;
@@ -1020,6 +1035,9 @@ fn handleOrReport(allocator: std.mem.Allocator, vm: *VM) !bool {
 // does, a log copy per log_errors and a display copy per display_errors;
 // zphp's own fatals print their diagnostic to stderr
 // the display copy joins the script's buffered output so it lands in order
+// the display copy goes into an output buffer that is then discarded
+var display_lost = false;
+
 fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
     // a check that stopped the script with a bare message is php's fatal
     // error: reported like any other, per display_errors and log_errors
@@ -1057,6 +1075,7 @@ fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
     switch (vm.displayTarget()) {
         .none => {},
         .stdout => {
+            if (display_lost) return;
             if (vm.htmlErrors()) if (error_format.uncaughtParts(allocator, vm, description)) |parts| {
                 defer allocator.free(parts.message);
                 const text = try vm.displayedError(parts.level, parts.message, parts.file, parts.line);

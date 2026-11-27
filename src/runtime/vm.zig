@@ -17466,6 +17466,9 @@ pub const VM = struct {
                     if (i - 1 == self.hidden_trace_frame and i >= 2) {
                         break :blk if (i - 2 < self.finished_frames) null else self.framePosition(i - 2);
                     }
+                    // code the engine runs once the script ended (an output
+                    // handler flushed at shutdown) has no caller
+                    if (i - 1 < self.finished_frames) break :blk null;
                     break :blk self.framePosition(self.belowConstExprs(i - 1));
                 } else null;
                 // a generator running as a delegate was reached through the
