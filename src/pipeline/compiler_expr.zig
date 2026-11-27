@@ -3665,6 +3665,16 @@ fn compileNullsafePropertyFetch(self: *Compiler, node: Ast.Node, quiet: bool) Er
         try constExprPropFetch(self, node);
         return self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
     }
+    if (self.isDynamicProp(node)) {
+        // the name is only evaluated when the object isn't null
+        if (node.main_token == 0) {
+            try compileOutsideChain(self, node.data.rhs);
+        } else {
+            try self.emitGetVar(self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token));
+        }
+        try self.emitOp(if (quiet) .get_prop_coalesce_dynamic else .get_prop_dynamic);
+        return self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
+    }
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
     try self.emitOp(if (quiet) .get_prop_coalesce else .get_prop);
     try self.emitU16(name_idx);
