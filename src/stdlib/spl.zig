@@ -430,7 +430,7 @@ fn arrayDebugInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 // STD_PROP_LIST asks for the object's own properties
 fn arrayStorageProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
     const storage = obj.get("__data");
-    const is_self = storage == .object and storage.object == obj;
+    const is_self = isSelfStorage(obj);
     switch (purpose) {
         .debug => {
             const table = try object_properties.ownTable(ctx.vm, obj);
@@ -566,6 +566,7 @@ fn splStorage(ctx: *NativeContext, obj: *PhpObject) RuntimeError!SplStorage {
     var holder = obj;
     var depth: usize = 0;
     while (true) : (depth += 1) {
+        if (isSelfStorage(holder)) return .{ .object = holder };
         switch (holder.get("__data")) {
             .array => |arr| return .{ .array = .{ .holder = holder, .arr = arr } },
             .object => |other| {
@@ -1011,23 +1012,32 @@ pub fn splSetStorage(ctx: *NativeContext, obj: *PhpObject, storage: Value, flags
                 return error.RuntimeError;
             }
         }
+        if (other == obj) return splSetSelf(ctx, obj, flags);
     }
+    if (isSelfStorage(obj)) try obj.set(ctx.allocator, "__self", .{ .bool = false });
     try obj.set(ctx.allocator, "__data", storage);
     try obj.set(ctx.allocator, "__flags", .{ .int = flags & FLAGS_MASK });
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
 }
 
-// the object as its own storage (IS_SELF), from serialized data
+// the object as its own storage (IS_SELF): php keeps no reference to
+// itself (the storage zval is undef), so `__self` marks it and `__data`
+// holds nothing, or the object would keep itself alive
 pub fn splSetSelf(ctx: *NativeContext, obj: *PhpObject, flags: i64) RuntimeError!void {
-    try obj.set(ctx.allocator, "__data", .{ .object = obj });
+    try obj.set(ctx.allocator, "__self", .{ .bool = true });
+    try obj.set(ctx.allocator, "__data", .null);
     try obj.set(ctx.allocator, "__flags", .{ .int = flags & FLAGS_MASK });
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
 }
 
+pub fn isSelfStorage(obj: *PhpObject) bool {
+    const marked = obj.get("__self");
+    return marked == .bool and marked.bool;
+}
+
 // the flags serialize writes: IS_SELF when the object is its own storage
 pub fn serializedFlags(obj: *PhpObject) i64 {
-    const data = obj.get("__data");
-    return splFlags(obj) | (if (data == .object and data.object == obj) @as(i64, IS_SELF) else 0);
+    return splFlags(obj) | (if (isSelfStorage(obj)) @as(i64, IS_SELF) else 0);
 }
 
 // php's objects whose properties come from a handler rather than a table:
@@ -1044,7 +1054,7 @@ fn overloadedObject(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
 
 fn aoSerializeState(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (obj.get("__data") == .null) _ = try ensureData(ctx, obj);
+    if (obj.get("__data") == .null and !isSelfStorage(obj)) _ = try ensureData(ctx, obj);
     return @import("serialize.zig").splArrayState(ctx, obj);
 }
 
@@ -1059,7 +1069,7 @@ fn aoUnserializeState(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 
 fn aoSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (obj.get("__data") == .null) _ = try ensureData(ctx, obj);
+    if (obj.get("__data") == .null and !isSelfStorage(obj)) _ = try ensureData(ctx, obj);
     return @import("serialize.zig").serializeSplArray(ctx, obj);
 }
 
@@ -1387,7 +1397,9 @@ fn aoGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const ic = obj.get("__iter_class");
     const cls_name = if (ic == .string and ic.string.bytes().len > 0) ic.string.bytes() else "ArrayIterator";
     const it = try ctx.createObject(cls_name);
-    try it.set(ctx.allocator, "__data", .{ .object = obj });
+    // IS_SELF is among the flags the iterator copies (SPL_ARRAY_CLONE_MASK),
+    // and it wins over USE_OTHER: the iterator walks its own properties
+    if (isSelfStorage(obj)) try it.set(ctx.allocator, "__self", .{ .bool = true }) else try it.set(ctx.allocator, "__data", .{ .object = obj });
     try it.set(ctx.allocator, "__cursor", .{ .int = 0 });
     try it.set(ctx.allocator, "__flags", .{ .int = splFlags(obj) & CLONE_MASK });
     return NativeResult.borrowed(.{ .object = it });
@@ -1415,9 +1427,9 @@ fn aoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 // ArrayIterator works on the original's storage
 fn splArrayClone(vm: *VM, src: *PhpObject, copy: *PhpObject) bool {
     var ctx = vm.makeContext(null);
-    const data = src.get("__data");
-    if (data == .object and data.object == src) {
-        copy.set(vm.allocator, "__data", .{ .object = copy }) catch return false;
+    if (isSelfStorage(src)) {
+        copy.set(vm.allocator, "__self", .{ .bool = true }) catch return false;
+        copy.set(vm.allocator, "__data", .null) catch return false;
     } else if (vm.isInstanceOf(src.class_name, "ArrayIterator")) {
         copy.set(vm.allocator, "__data", .{ .object = src }) catch return false;
     } else {

@@ -1896,7 +1896,7 @@ fn findPropertyVisibility(cls: ClassDef, name: []const u8) ClassDef.Visibility {
 
 fn splInternal(name: []const u8) bool {
     return std.mem.eql(u8, name, "__data") or std.mem.eql(u8, name, "__flags") or
-        std.mem.eql(u8, name, "__cursor") or std.mem.eql(u8, name, "__iter_class");
+        std.mem.eql(u8, name, "__cursor") or std.mem.eql(u8, name, "__iter_class") or std.mem.eql(u8, name, "__self");
 }
 
 fn splMember(ctx: *NativeContext, obj: *PhpObject, members: *PhpArray, name: []const u8, val: Value) !void {
