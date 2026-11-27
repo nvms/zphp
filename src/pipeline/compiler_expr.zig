@@ -118,7 +118,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 else => {},
             }
         }
-        if (isAssignToSelf(self, node.data.lhs, node.data.rhs)) {
+        if (isAssignToSelf(self, node.data.lhs, node.data.rhs) or rhsAssignsRoot(self, node.data.lhs, node.data.rhs)) {
             // the right side is copied before the containers are fetched
             try self.compileNode(node.data.rhs);
             try compileVivifyChain(self, target.data.lhs);
@@ -3340,6 +3340,34 @@ pub fn compileReferenceBinding(self: *Compiler, source: u32, dst: u16) Error!boo
 
 // zend_is_assign_to_self: the right side is the plain variable at the root
 // of the target's chain
+// a right side that is an assignment (or a chain of them) writing the
+// variable the target's containers start from, or binding a reference to it:
+// php fetches the containers only after the right side ran
+// (zend_delayed_compile_var), so they see what it did to the variable
+fn rhsAssignsRoot(self: *Compiler, target_idx: u32, rhs_idx: u32) bool {
+    const root = assignRoot(self, target_idx) orelse return false;
+    var idx = rhs_idx;
+    while (true) {
+        const node = self.ast.nodes[idx];
+        if (node.tag != .assign) return false;
+        if (assignRoot(self, node.data.lhs)) |written| if (std.mem.eql(u8, written, root)) return true;
+        const value = self.ast.nodes[node.data.rhs];
+        if (value.tag == .ref_target) {
+            const bound = assignRoot(self, value.data.lhs) orelse return false;
+            return std.mem.eql(u8, bound, root);
+        }
+        idx = node.data.rhs;
+    }
+}
+
+// the variable a write target's containers start from
+fn assignRoot(self: *Compiler, target_idx: u32) ?[]const u8 {
+    var node = self.ast.nodes[target_idx];
+    while (node.tag == .array_access or node.tag == .array_push_target) node = self.ast.nodes[node.data.lhs];
+    if (node.tag != .variable) return null;
+    return self.ast.tokenSlice(node.main_token);
+}
+
 fn isAssignToSelf(self: *Compiler, target_idx: u32, rhs_idx: u32) bool {
     const rhs = self.ast.nodes[rhs_idx];
     if (rhs.tag != .variable) return false;
