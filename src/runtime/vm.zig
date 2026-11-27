@@ -1636,6 +1636,8 @@ pub const VM = struct {
     // EG(last_fatal_error_backtrace): the stack a fatal error stopped on,
     // which error_get_last() lists while fatal_error_backtraces is on
     last_fatal_trace: Value = .null,
+    // while a fatal error is printed: the stack trace php_error_cb appends
+    fatal_trace_text: ?[]const u8 = null,
     prev_error_handler: ?Value = null,
     error_reporting_level: i64 = 30719,
     ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .empty,
@@ -5191,6 +5193,14 @@ pub const VM = struct {
         const refused = account.refused orelse return err;
         if (account.reporting) return err;
         account.reporting = true;
+        // zend_handle_delayed_oom inside a running frame throws php's
+        // unwind_exit, whose handling (zend_exception_error) drops the
+        // error's trace: error_get_last() has none
+        const unwinds = self.oom_pending and self.frame_count > self.finished_frames;
+        defer if (unwinds) {
+            self.releaseValue(self.last_fatal_trace);
+            self.last_fatal_trace = .null;
+        };
         if (self.oom_pending) {
             self.oom_pending = false;
             self.execution_deadline_ns = self.oom_saved_deadline;
@@ -20058,7 +20068,17 @@ pub const VM = struct {
             (self.iniFlagOn("ignore_repeated_source", "0") or (self.last_error_line == at.line and std.mem.eql(u8, self.last_error_file, at.file)));
         if (!repeated) self.recordLastError(level, msg, at);
         const shown = !repeated and (self.error_reporting_level & level) != 0;
-        if (shown) self.printError(level, msg, at);
+        // zend_error_impl: a fatal error carries the stack it was raised on
+        // (EG(last_fatal_error_backtrace)), which php_error_cb prints
+        var trace_text: ?[]u8 = null;
+        defer if (trace_text) |text| self.allocator.free(text);
+        if (isFatalLevel(level) and self.fatalErrorBacktraces()) trace_text = self.fatalTraceText(!repeated) catch null;
+        if (shown) {
+            const outer = self.fatal_trace_text;
+            self.fatal_trace_text = trace_text;
+            defer self.fatal_trace_text = outer;
+            self.printError(level, msg, at);
+        }
         if (!isFatalLevel(level)) return;
         self.exit_code = 255;
         self.exit_requested = true;
@@ -20200,11 +20220,27 @@ pub const VM = struct {
         self.last_error_line = 0;
     }
 
+    // zend_fetch_debug_backtrace for a fatal error, as zend_trace_to_string
+    // writes it; record: keep the trace for error_get_last()
+    fn fatalTraceText(self: *VM, record: bool) RuntimeError![]u8 {
+        var ctx = self.makeContext(null);
+        const trace = try @import("../stdlib/system.zig").buildBacktraceFrom(&ctx, self.iniFlagOn("zend.exception_ignore_args", "0"), false, 0, false);
+        const value: Value = .{ .array = trace };
+        defer self.releaseUnheldArray(trace);
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+        @import("../error_format.zig").writeTrace(&buf, self.allocator, value, null);
+        if (record) self.recordFatalTrace(value);
+        return buf.toOwnedSlice(self.allocator);
+    }
+
     fn printError(self: *VM, level: i64, msg: []const u8, at: SourcePosition) void {
         const label = errorLabel(level);
         self.flushOutputToStdout();
+        const trace_lead: []const u8 = if (self.fatal_trace_text != null) "\nStack trace:\n" else "";
+        const trace = self.fatal_trace_text orelse "";
         if (self.logErrorsEnabled()) {
-            const log_text = std.fmt.allocPrint(self.allocator, "PHP {s}:  {s} in {s} on line {d}\n", .{ label, class_names.display(msg), at.file, at.line }) catch return;
+            const log_text = std.fmt.allocPrint(self.allocator, "PHP {s}:  {s} in {s} on line {d}{s}{s}\n", .{ label, class_names.display(msg), at.file, at.line, trace_lead, trace }) catch return;
             defer self.allocator.free(log_text);
             self.writeLog(log_text);
         }
@@ -20220,7 +20256,7 @@ pub const VM = struct {
                 if (self.ob_chunk_watch) output_control.checkChunks(self) catch {};
             },
             .stderr => {
-                const display_text = std.fmt.allocPrint(self.allocator, "{s}: {s} in {s} on line {d}\n", .{ label, msg, at.file, at.line }) catch return;
+                const display_text = std.fmt.allocPrint(self.allocator, "{s}: {s} in {s} on line {d}{s}{s}\n", .{ label, msg, at.file, at.line, trace_lead, trace }) catch return;
                 defer self.allocator.free(display_text);
                 _ = platform.write(std.Io.File.stderr(), display_text) catch {};
             },
@@ -20244,13 +20280,15 @@ pub const VM = struct {
         const label = errorLabel(level);
         const prepend = self.iniText("error_prepend_string");
         const append = self.iniText("error_append_string");
-        if (!self.htmlErrors()) return std.fmt.allocPrint(a, "{s}\n{s}: {s} in {s} on line {d}\n{s}", .{ prepend, label, msg, file, line, append });
+        const trace_lead: []const u8 = if (self.fatal_trace_text != null) "\nStack trace:\n" else "";
+        const trace = self.fatal_trace_text orelse "";
+        if (!self.htmlErrors()) return std.fmt.allocPrint(a, "{s}\n{s}: {s} in {s} on line {d}{s}{s}\n{s}", .{ prepend, label, msg, file, line, trace_lead, trace, append });
         var text: std.ArrayListUnmanaged(u8) = .empty;
         defer text.deinit(a);
         if (level == 1 or level == 4) {
             try self.escapeErrorHtml(msg, &text);
         } else if (try self.docrefHtml(msg, &text)) {} else try text.appendSlice(a, msg);
-        return std.fmt.allocPrint(a, "{s}<br />\n<b>{s}</b>:  {s} in <b>{s}</b> on line <b>{d}</b><br />\n{s}", .{ prepend, label, text.items, file, line, append });
+        return std.fmt.allocPrint(a, "{s}<br />\n<b>{s}</b>:  {s} in <b>{s}</b> on line <b>{d}</b><br />{s}{s}\n{s}", .{ prepend, label, text.items, file, line, trace_lead, trace, append });
     }
 
     fn escapeErrorHtml(self: *VM, text: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {

@@ -1045,11 +1045,18 @@ fn createTempFile(ctx: *NativeContext, dir: []const u8, prefix: []const u8) Runt
 }
 
 pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, limit: usize) RuntimeError!*PhpArray {
+    return buildBacktraceFrom(ctx, ignore_args, provide_object, limit, true);
+}
+
+// skip_running: leave out the native running at the top (debug_backtrace
+// itself); a fatal error's trace lists it (zend_fetch_debug_backtrace with
+// skip_last 0)
+pub fn buildBacktraceFrom(ctx: *NativeContext, ignore_args: bool, provide_object: bool, limit: usize, skip_running: bool) RuntimeError!*PhpArray {
     const vm = ctx.vm;
     const alloc = ctx.allocator;
     var result = try ctx.createArray();
 
-    if (vm.frame_count <= 1) return result;
+    if (vm.frame_count == 0 or (vm.frame_count == 1 and (skip_running or vm.native_call == null))) return result;
     // frames in the order calls were made, for a fiber suspended inside
     // native code and resumed from elsewhere
     var layout = try vm.layOutForTrace();
@@ -1066,7 +1073,7 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
     var natives: [64]*const @import("../runtime/vm.zig").NativeCall = undefined;
     var native_count: usize = 0;
     var call = vm.native_call;
-    if (call) |c| if (c.depth == vm.frame_count) {
+    if (call) |c| if (skip_running and c.depth == vm.frame_count) {
         call = c.outer;
     };
     while (call) |c| : (call = c.outer) {
