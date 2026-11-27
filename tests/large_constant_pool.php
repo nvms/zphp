@@ -27,7 +27,7 @@ class Probe
 $code = [];
 $code[] = 'function big_strings() { $a = ' . literals(70000, 'string') . '; $p = new Probe(); return [count($a), $a["s0"], $a["s69999"], $p->hello(1), $p->bye(2), Probe::make()::class]; }';
 $code[] = 'function big_floats() { $a = ' . literals(70000, 'float') . '; $f = fn($x) => $x * 2; return [count($a), $a[0], $a[69999], array_sum($a), $f(21)]; }';
-$code[] = 'function big_ints() { $a = ' . literals(70000, 'int') . '; $g = (function () { yield 1; yield 2; yield "three"; })(); return [count($a), $a[0], $a[69999], array_sum($a), iterator_to_array($g)]; }';
+$code[] = 'function big_ints() { $a = ' . literals(100000, 'int') . '; $g = (function () { yield 1; yield 2; yield "three"; })(); return [count($a), $a[0], $a[99999], array_sum($a), iterator_to_array($g)]; }';
 // one expression with more distinct terms than u16 indexes
 // (in groups: php's compiler recurses once per operator)
 $groups = [];
