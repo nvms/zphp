@@ -74,6 +74,9 @@ pair(['local_cert' => "$dir/server.pem"], ['cafile' => "$dir/ca.pem"]);
 
 echo "-- local certificates\n";
 pair(['local_cert' => "$dir/missing.pem"], ['verify_peer' => false]);
+// php prints the paths as c strings
+pair(['local_cert' => "$dir/server.pem\0junk"], ['verify_peer' => false]);
+pair(['local_cert' => "$dir/server-cert.pem", 'local_pk' => "$dir/key\0junk"], ['verify_peer' => false]);
 pair(['local_cert' => "$dir/server-cert.pem", 'local_pk' => "$dir/server-key-encrypted.pem", 'passphrase' => 'secret'], ['cafile' => "$dir/ca.pem", 'peer_name' => 'localhost']);
 pair(['local_cert' => "$dir/server-cert.pem", 'local_pk' => "$dir/server-key-encrypted.pem", 'passphrase' => 'wrong'], ['cafile' => "$dir/ca.pem", 'peer_name' => 'localhost']);
 

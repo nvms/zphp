@@ -752,6 +752,11 @@ fn checkPath(ctx: *NativeContext, obj: *PhpObject, path: []const u8, out: []u8, 
     return result;
 }
 
+// a path as php's %s prints it: up to its first nul
+fn cstr(s: []const u8) []const u8 {
+    return s[0 .. std.mem.indexOfScalar(u8, s, 0) orelse s.len];
+}
+
 // php_openssl_set_local_cert
 fn setLocalCert(ctx: *NativeContext, obj: *PhpObject, ssl_ctx: *c.SSL_CTX) RuntimeError!bool {
     const context = contextOfStream(ctx.vm, obj);
@@ -759,18 +764,18 @@ fn setLocalCert(ctx: *NativeContext, obj: *PhpObject, ssl_ctx: *c.SSL_CTX) Runti
     defer ctx.allocator.free(certfile);
     var resolved_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     var resolved = (try checkPath(ctx, obj, certfile, &resolved_buf, "local_cert in ssl stream context", false)) orelse {
-        try warn(ctx, obj, .NotFound, "Unable to get real path of certificate file `{s}'", .{certfile});
+        try warn(ctx, obj, .NotFound, "Unable to get real path of certificate file `{s}'", .{cstr(certfile)});
         return false;
     };
     if (c.SSL_CTX_use_certificate_chain_file(ssl_ctx, resolved.ptr) != 1) {
-        try warn(ctx, obj, .WriteFailed, "Unable to set local cert chain file `{s}'; Check that your cafile/capath settings include details of your certificate and its issuer", .{certfile});
+        try warn(ctx, obj, .WriteFailed, "Unable to set local cert chain file `{s}'; Check that your cafile/capath settings include details of your certificate and its issuer", .{cstr(certfile)});
         return false;
     }
     const private_key = try optionString(ctx, context, "local_pk");
     defer if (private_key) |k| ctx.allocator.free(k);
     if (private_key) |k| {
         resolved = (try checkPath(ctx, obj, k, &resolved_buf, "local_pk in ssl stream context", false)) orelse {
-            try warn(ctx, obj, .NotFound, "Unable to get real path of private key file `{s}'", .{k});
+            try warn(ctx, obj, .NotFound, "Unable to get real path of private key file `{s}'", .{cstr(k)});
             return false;
         };
     }
@@ -917,7 +922,7 @@ fn enableServerSni(ctx: *NativeContext, obj: *PhpObject, t: *Tls, ssl_ctx: *c.SS
             const cert_str = try arrayString(ctx, local_cert);
             defer ctx.allocator.free(cert_str);
             const cert_path = (try checkPath(ctx, obj, cert_str, &cert_buf, "SNI_server_certs local_cert in ssl stream context", false)) orelse {
-                try warn(ctx, obj, .OpenFailed, "Failed setting local cert chain file `{s}'; could not open file", .{cert_str});
+                try warn(ctx, obj, .OpenFailed, "Failed setting local cert chain file `{s}'; could not open file", .{cstr(cert_str)});
                 return false;
             };
             if (!current.array.contains(.{ .string = Value.String.borrowed("local_pk") })) {
@@ -927,7 +932,7 @@ fn enableServerSni(ctx: *NativeContext, obj: *PhpObject, t: *Tls, ssl_ctx: *c.SS
             const pk_str = try arrayString(ctx, current.array.get(.{ .string = Value.String.borrowed("local_pk") }));
             defer ctx.allocator.free(pk_str);
             const pk_path = (try checkPath(ctx, obj, pk_str, &pk_buf, "SNI_server_certs local_pk in ssl stream context", false)) orelse {
-                try warn(ctx, obj, .OpenFailed, "Failed setting local private key file `{s}';  could not open file", .{pk_str});
+                try warn(ctx, obj, .OpenFailed, "Failed setting local private key file `{s}';  could not open file", .{cstr(pk_str)});
                 return false;
             };
             sni_ctx = try createSniServerCtx(ctx, obj, cert_path, pk_path);
@@ -935,7 +940,7 @@ fn enableServerSni(ctx: *NativeContext, obj: *PhpObject, t: *Tls, ssl_ctx: *c.SS
             var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
             if (try checkPath(ctx, obj, current.string.bytes(), &buf, "SNI_server_certs in ssl stream context", false)) |p| {
                 sni_ctx = try createSniServerCtx(ctx, obj, p, p);
-            } else try warn(ctx, obj, .NotFound, "Failed setting local cert chain file `{s}'; file not found", .{current.string.bytes()});
+            } else try warn(ctx, obj, .NotFound, "Failed setting local cert chain file `{s}'; file not found", .{cstr(current.string.bytes())});
         } else try warn(ctx, obj, .Generic, "SNI_server_certs options values must be of type array|string", .{});
         const made = sni_ctx orelse return false;
         if (!verify_peer) {
