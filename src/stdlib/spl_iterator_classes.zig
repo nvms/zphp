@@ -1783,6 +1783,9 @@ const Rec = struct {
         const e = l.entries.pop().?;
         l.next_int_key = @intCast(l.entries.items.len);
         ctx.vm.releaseValue(e.value);
+        // zend_iterator_dtor: the level's iterator goes now, its destructor
+        // run from the code that moved the iteration on
+        if (ctx.vm.hasPendingReleases()) ctx.vm.drainPendingDestruct();
     }
 
     fn push(self: Rec, ctx: *NativeContext, target: Value) RuntimeError!void {
@@ -1957,6 +1960,7 @@ fn recMoveForward(ctx: *NativeContext, r: Rec) RuntimeError!void {
             }
             if (r.levels() != null and r.level() > 0 and r.level() == lvl and r.levelArr(lvl) == it_arr) {
                 r.pop(ctx);
+                if (pending(ctx)) return;
             }
         } else {
             return;
