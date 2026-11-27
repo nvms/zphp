@@ -73,6 +73,8 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
     const attr_slice = try p.attr_ranges.toOwnedSlice(allocator);
     errdefer allocator.free(attr_slice);
     const case_slice = try p.case_semicolons.toOwnedSlice(allocator);
+    errdefer if (case_slice.len > 0) allocator.free(case_slice);
+    const const_names = try constArrayPropNames(allocator, nodes_slice, extra_slice, tok_slice);
 
     return .{
         .halt_offset = if (lexer.halt_offset) |o| @intCast(o) else null,
@@ -83,8 +85,55 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         .errors = errors_slice,
         .attr_ranges = attr_slice,
         .case_semicolons = case_slice,
+        .const_array_prop_names = const_names,
         .allocator = allocator,
         .compile_error = p.compile_error,
+    };
+}
+
+// the array expressions naming a property that php folds to a constant
+// array while compiling (zend_try_ct_eval_array over literal elements)
+fn constArrayPropNames(allocator: Allocator, nodes: []const Ast.Node, extra: []const u32, tokens: []const Token) Allocator.Error![]const u32 {
+    var found: std.ArrayListUnmanaged(u32) = .empty;
+    defer found.deinit(allocator);
+    for (nodes) |n| {
+        if (n.tag != .property_access and n.tag != .nullsafe_property_access) continue;
+        if (n.main_token != 0 or n.data.rhs == 0 or n.data.rhs >= nodes.len) continue;
+        var idx = n.data.rhs;
+        while (nodes[idx].tag == .grouped_expr) idx = nodes[idx].data.lhs;
+        if (nodes[idx].tag != .array_literal or !constOperand(nodes, extra, tokens, idx)) continue;
+        try found.append(allocator, idx);
+    }
+    if (found.items.len == 0) return &.{};
+    std.mem.sort(u32, found.items, {}, std.sort.asc(u32));
+    return found.toOwnedSlice(allocator);
+}
+
+fn constOperand(nodes: []const Ast.Node, extra: []const u32, tokens: []const Token, idx: u32) bool {
+    const n = nodes[idx];
+    return switch (n.tag) {
+        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,
+        .string_literal => n.data.rhs != Ast.interpolated,
+        .grouped_expr => constOperand(nodes, extra, tokens, n.data.lhs),
+        .prefix_op => switch (tokens[n.main_token].tag) {
+            .minus, .plus => switch (nodes[n.data.lhs].tag) {
+                .integer_literal, .float_literal, .grouped_expr, .prefix_op => constOperand(nodes, extra, tokens, n.data.lhs),
+                else => false,
+            },
+            else => false,
+        },
+        .array_literal => {
+            const list = extra[n.data.lhs..];
+            const len = list[0];
+            for (list[1 .. 1 + len]) |el_idx| {
+                const el = nodes[el_idx];
+                if (el.tag != .array_element) return false;
+                if (!constOperand(nodes, extra, tokens, el.data.lhs)) return false;
+                if (el.data.rhs != 0 and !constOperand(nodes, extra, tokens, el.data.rhs)) return false;
+            }
+            return true;
+        },
+        else => false,
     };
 }
 

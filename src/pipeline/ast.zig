@@ -47,6 +47,9 @@ pub const Ast = struct {
     // the `;` tokens that end a case or default label, which php's grammar
     // deprecates
     case_semicolons: []const u32 = &.{},
+    // the constant arrays that name a property (`$o->{[]}`), sorted: php
+    // turns them into the string "Array" while compiling (zend_compile_prop)
+    const_array_prop_names: []const u32 = &.{},
     allocator: std.mem.Allocator,
     halt_offset: ?u32 = null,
     // the first error php's compiler raises for code the grammar accepts
@@ -69,6 +72,15 @@ pub const Ast = struct {
         }
     };
 
+    pub fn isConstArrayPropName(self: *const Ast, idx: u32) bool {
+        if (self.const_array_prop_names.len == 0) return false;
+        return std.sort.binarySearch(u32, self.const_array_prop_names, idx, orderU32) != null;
+    }
+
+    fn orderU32(key: u32, item: u32) std.math.Order {
+        return std.math.order(key, item);
+    }
+
     pub fn deinit(self: *Ast) void {
         self.allocator.free(self.tokens);
         self.allocator.free(self.nodes);
@@ -76,6 +88,7 @@ pub const Ast = struct {
         self.allocator.free(self.errors);
         if (self.attr_ranges.len > 0) self.allocator.free(self.attr_ranges);
         if (self.case_semicolons.len > 0) self.allocator.free(self.case_semicolons);
+        if (self.const_array_prop_names.len > 0) self.allocator.free(self.const_array_prop_names);
     }
 
     pub fn tokenSlice(self: *const Ast, index: u32) []const u8 {

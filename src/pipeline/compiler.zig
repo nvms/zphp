@@ -1288,7 +1288,17 @@ pub const Compiler = struct {
                     try self.compileNode(expr);
                 }
             },
-            .array_literal => try compiler_expr.compileArrayLiteral(self, node),
+            .array_literal => {
+                // a constant array naming a property is converted while
+                // compiling (zend_compile_prop's convert_to_string), so its
+                // warning comes before the script runs. a constant
+                // expression evaluates the name when it runs
+                if (!self.const_expr and self.ast.isConstArrayPropName(idx)) {
+                    try self.warnOnce(node.main_token, 2, "Array to string conversion", .{});
+                    return self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed("Array") }));
+                }
+                try compiler_expr.compileArrayLiteral(self, node);
+            },
             .array_element => {},
             .array_spread => {},
             .grouped_expr => try self.compileNode(node.data.lhs),
