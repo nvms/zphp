@@ -332,6 +332,10 @@ const module_infos = [_]ModuleInfo{
     } }} },
     .{ .name = "json", .tables = &.{.{ .rows = &.{enabled("json support")} }} },
     .{ .name = "ldap", .tables = &.{.{ .rows = &.{enabled("LDAP Support")} }} },
+    .{ .name = "lexbor", .tables = &.{.{ .rows = &.{
+        .{ t("Lexbor support"), t("active") },
+        .{ t("Lexbor version"), t("2.7.0") },
+    } }} },
     .{ .name = "libxml", .tables = &.{.{ .rows = &.{
         .{ t("libXML support"), t("active") },
         .{ t("libXML Compiled Version"), .{ .constant = "LIBXML_DOTTED_VERSION" } },
@@ -372,6 +376,10 @@ const module_infos = [_]ModuleInfo{
     } },
     .{ .name = "posix", .tables = &.{.{ .rows = &.{enabled("POSIX support")} }} },
     .{ .name = "Reflection", .tables = &.{.{ .rows = &.{enabled("Reflection")} }} },
+    .{ .name = "uri", .tables = &.{.{ .rows = &.{
+        .{ t("URI support"), t("active") },
+        .{ t("uriparser bundled version"), t("1.0.3") },
+    } }} },
     .{ .name = "session", .tables = &.{.{ .rows = &.{
         enabled("Session Support"),
         .{ t("Registered save handlers"), t("files user ") },

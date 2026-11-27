@@ -1247,6 +1247,8 @@ pub const NativeHandle = struct {
         poll_watcher,
         // an OpenSSLCertificate's X509 (xp_ssl.zig)
         x509,
+        // a Uri\Rfc3986\Uri's or Uri\WhatWg\Url's parsed uri (uri.zig)
+        uri,
         _,
     };
 

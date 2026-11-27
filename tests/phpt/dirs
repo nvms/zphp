@@ -7,3 +7,4 @@ ext/spl/tests
 ext/reflection/tests
 ext/date/tests
 ext/hash/tests
+ext/uri/tests

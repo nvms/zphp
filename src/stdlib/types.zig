@@ -2331,6 +2331,7 @@ pub const SUPPORTED_EXTENSIONS = [_][]const u8{
     "bcmath",    "libxml",     "dom",       "SimpleXML", "xml",
     "xmlreader", "xmlwriter",  "intl",      "fileinfo",  "Phar",
     "soap",      "zlib",       "posix",     "pcntl",     "random",
+    "lexbor",    "uri",
 };
 
 fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {

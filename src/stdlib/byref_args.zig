@@ -68,6 +68,10 @@ pub fn isByRef(name: []const u8, index: usize) bool {
         .{ .name = "pfsockopen", .index = 3 },
         .{ .name = "flock", .index = 2 },
         .{ .name = "SplFileObject::flock", .index = 1 },
+        .{ .name = "Url::parse", .index = 2 },
+        .{ .name = "Url::__construct", .index = 2 },
+        .{ .name = "Url::resolve", .index = 1 },
+        .{ .name = "UrlBuilder::build", .index = 1 },
         .{ .name = "getmxrr", .index = 1 },
         .{ .name = "getmxrr", .index = 2 },
         .{ .name = "dns_get_mx", .index = 1 },
@@ -107,7 +111,8 @@ const by_ref_names = std.StaticStringMap(void).initComptime(.{
     .{"stream_socket_client"},        .{"stream_socket_server"},  .{"stream_socket_accept"},   .{"fsockopen"},              .{"pfsockopen"},
     .{"flock"},                       .{"splfileobject::fscanf"}, .{"splfileobject::flock"},   .{"getmxrr"},                .{"dns_get_mx"},
     .{"dns_get_record"},              .{"getimagesize"},          .{"getimagesizefromstring"}, .{"stream_socket_recvfrom"}, .{"settype"},
-    .{"headers_sent"},                .{"gmp_prevprime"},
+    .{"headers_sent"},                .{"gmp_prevprime"},         .{"url::parse"},             .{"url::__construct"},       .{"url::resolve"},
+    .{"urlbuilder::build"},
 });
 
 pub fn hasByRefParams(name: []const u8) bool {
