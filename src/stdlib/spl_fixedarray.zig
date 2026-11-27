@@ -38,7 +38,7 @@ fn registerClass(vm: *VM, a: Allocator, def: ClassDef, comptime name: []const u8
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    var fa = ClassDef{ .name = "SplFixedArray", .native_properties = properties };
+    var fa = ClassDef{ .name = "SplFixedArray", .native_properties = properties, .native_free = freeElements };
     inline for (.{ "IteratorAggregate", "ArrayAccess", "Countable", "JsonSerializable" }) |i| try fa.interfaces.append(a, i);
     try registerClass(vm, a, fa, "SplFixedArray", &.{
         .{ "__construct", construct },   .{ "__wakeup", wakeup },
@@ -69,6 +69,24 @@ pub fn register(vm: *VM, a: Allocator) !void {
 // ==========================================
 // the array
 // ==========================================
+
+// spl_fixedarray_object_free_storage: the elements go before the object's
+// own properties, last first (spl_fixedarray_dtor)
+fn freeElements(vm: *VM, obj: *PhpObject) void {
+    const old = obj.removeProperty(vm.allocator, P.elements) orelse return;
+    if (old == .array and old.array.refcount == 1) {
+        const entries = old.array.entries.items;
+        var i = entries.len;
+        while (i > 0) {
+            i -= 1;
+            if (entries[i].ref != null) continue;
+            const v = entries[i].value;
+            entries[i].value = .null;
+            vm.releaseValue(v);
+        }
+    }
+    vm.releaseValue(old);
+}
 
 fn this(ctx: *NativeContext) RuntimeError!*PhpObject {
     return sic.thisObj(ctx) orelse {
@@ -404,9 +422,8 @@ fn serializeM(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     try noArgs(ctx, "SplFixedArray::__serialize", args);
     const out = try ctx.createArray();
     if (elementsOf(obj)) |arr| for (0..arr.entries.items.len) |i| try out.append(ctx.allocator, elementAt(arr, i));
-    const members = try @import("spl_dllist.zig").memberTable(ctx, obj);
-    for (members.entries.items) |e| if (e.key == .string) try out.set(ctx.allocator, e.key, e.value);
-    ctx.vm.releaseUnheldArray(members);
+    // the members: the property table's string keys
+    try appendPropertyTable(ctx, obj, out, true);
     return NativeResult.borrowed(.{ .array = out });
 }
 
@@ -422,6 +439,7 @@ fn unserializeM(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const arr = try ctx.createArray();
     arr.uncounted = true;
     const members = try ctx.createArray();
+    defer ctx.vm.releaseUnheldArray(members);
     for (args[0].array.entries.items) |e| {
         const v = if (e.ref) |r| r.* else e.value;
         if (e.key == .int) try arr.append(ctx.allocator, v) else try members.set(ctx.allocator, e.key, v);
@@ -465,16 +483,32 @@ const period_it = @import("datetime.zig");
 
 // spl_fixedarray_object_get_properties_for: the elements, then the object's
 // own properties
+// spl_fixedarray_object_get_properties_for: the elements, then the object's
+// property table as it is (an uninitialized typed property has no entry, a
+// numeric name stays a string key)
 fn properties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
     if (purpose == .serialize) return null;
-    const own = try object_properties.ownTable(ctx.vm, obj);
-    const size = sizeOf(obj);
-    if (size == 0 and own.length() == 0) return own;
     const t = try ctx.vm.allocArray();
     if (elementsOf(obj)) |arr| for (0..arr.entries.items.len) |i| try t.append(ctx.allocator, elementAt(arr, i));
-    for (own.entries.items) |e| try t.set(ctx.allocator, e.key, e.value);
-    ctx.vm.releaseUnheldArray(own);
+    try appendPropertyTable(ctx, obj, t, false);
     return t;
+}
+
+fn appendPropertyTable(ctx: *NativeContext, obj: *PhpObject, t: *PhpArray, string_keys_only: bool) RuntimeError!void {
+    var listing: object_properties.Listing = .{};
+    defer listing.deinit(ctx.allocator);
+    try object_properties.appendOwn(ctx.vm, obj, .debug, &listing, ctx.allocator);
+    for (listing.items.items) |p| {
+        if (p.value == .undef or p.uninitialized != null) continue;
+        switch (p.key) {
+            .int => |i| if (!string_keys_only) try t.set(ctx.allocator, .{ .int = i }, p.value),
+            .name => |n| {
+                const before = t.entries.items.len;
+                try object_properties.setMangledProperty(ctx.vm, t, n, p.visibility, p.declaring, p.value);
+                if (string_keys_only and t.entries.items.len > before) try @import("serialize.zig").keepPropertyReference(ctx, obj, t, n);
+            },
+        }
+    }
 }
 
 // foreach's own iterator (spl_fixedarray_get_iterator), kept on the loop's

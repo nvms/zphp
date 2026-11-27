@@ -713,6 +713,9 @@ pub const ClassDef = struct {
     // an internal class php refuses to clone though it holds no native handle
     uncloneable: bool = false,
     native_cleanup: ?*const fn (*PhpObject) bool = null,
+    // the part of php's free_obj that runs before the property table goes
+    // (zend_object_std_dtor): SplFixedArray's elements
+    native_free: ?*const fn (*VM, *PhpObject) void = null,
     // completes `clone` after the properties are copied: a native handle, or
     // state a built-in class keeps in its properties. a class with a handle
     // and no hook is uncloneable, like php's handle classes
@@ -2786,14 +2789,21 @@ pub const VM = struct {
         return created;
     }
 
-    fn nativeCleanup(self: *VM, class_name: []const u8) ?*const fn (*PhpObject) bool {
+    const NativeHooks = struct {
+        cleanup: ?*const fn (*PhpObject) bool = null,
+        free: ?*const fn (*VM, *PhpObject) void = null,
+    };
+
+    fn nativeHooks(self: *VM, class_name: []const u8) NativeHooks {
+        var hooks: NativeHooks = .{};
         var current: ?[]const u8 = class_name;
         while (current) |name| {
-            const class = self.classes.get(name) orelse return null;
-            if (class.native_cleanup) |cleanup| return cleanup;
+            const class = self.classes.get(name) orelse break;
+            if (hooks.cleanup == null) hooks.cleanup = class.native_cleanup;
+            if (hooks.free == null) hooks.free = class.native_free;
             current = class.parent;
         }
-        return null;
+        return hooks;
     }
 
     // releases what a dead object holds outside the heap; false when some
@@ -2811,8 +2821,10 @@ pub const VM = struct {
             self.releaseValue(callable);
             return true;
         }
-        if (self.nativeCleanup(obj.class_name)) |cleanup| return cleanup(obj);
-        return obj.native.kind == .none;
+        const hooks = self.nativeHooks(obj.class_name);
+        const reusable = if (hooks.cleanup) |cleanup| cleanup(obj) else obj.native.kind == .none;
+        if (hooks.free) |free| free(self, obj);
+        return reusable;
     }
 
     pub fn allocArray(self: *VM) RuntimeError!*PhpArray {

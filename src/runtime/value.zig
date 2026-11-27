@@ -463,6 +463,30 @@ pub const PhpArray = struct {
         try self.set(allocator, .{ .string = owned }, value);
     }
 
+    // a property table's key: php keeps a numeric property name as a string
+    // there ("0"), which only a listing of the table reads, so it goes in
+    // as written. lookups normalize, so get("0") does not find it
+    pub fn setPropertyName(self: *PhpArray, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        const key: Key = .{ .string = try PhpString.create(allocator, name) };
+        defer key.string.release();
+        if (normalizeKey(key) == .string) return self.set(allocator, key, value);
+        if (self.string_index.get(name)) |idx| {
+            if (!self.weak) retainStored(value);
+            const old = self.entries.items[idx].value;
+            self.entries.items[idx].value = value;
+            if (!self.weak) releaseReplaced(old);
+            return;
+        }
+        const new_idx = self.entries.items.len;
+        try self.reserve(allocator, new_idx + 1, true);
+        try self.string_index.ensureUnusedCapacity(allocator, 1);
+        if (!self.weak) retainStored(value);
+        key.string.retain();
+        self.entries.appendAssumeCapacity(.{ .key = key, .value = value });
+        self.string_index.putAssumeCapacity(key.string.bytes(), new_idx);
+        self.settleMemory(allocator);
+    }
+
     // every int key is below next_int_key (which stops at maxInt, so a key
     // of maxInt may sit at it), and has_int_keys is false only when there
     // are none: an int key past them is absent without a scan. code that

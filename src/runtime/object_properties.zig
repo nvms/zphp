@@ -340,13 +340,25 @@ pub fn ownTable(vm: *VM, obj: *PhpObject) RuntimeError!*PhpArray {
 
 // a property in a hook's table under its mangled name
 pub fn setMangled(vm: *VM, arr: *PhpArray, name: []const u8, visibility: ClassDef.Visibility, declaring: []const u8, value: Value) RuntimeError!void {
-    const key = switch (visibility) {
+    const key = try mangledName(vm, name, visibility, declaring);
+    defer vm.allocator.free(key);
+    try arr.setCopiedKey(vm.allocator, key, value);
+}
+
+// setMangled keeping a numeric name a string key, as php's property tables
+// do (a dynamic property "0" beside an element 0)
+pub fn setMangledProperty(vm: *VM, arr: *PhpArray, name: []const u8, visibility: ClassDef.Visibility, declaring: []const u8, value: Value) RuntimeError!void {
+    const key = try mangledName(vm, name, visibility, declaring);
+    defer vm.allocator.free(key);
+    try arr.setPropertyName(vm.allocator, key, value);
+}
+
+fn mangledName(vm: *VM, name: []const u8, visibility: ClassDef.Visibility, declaring: []const u8) RuntimeError![]u8 {
+    return switch (visibility) {
         .public => try vm.allocator.dupe(u8, name),
         .protected => try std.fmt.allocPrint(vm.allocator, "\x00*\x00{s}", .{name}),
         .private => try std.fmt.allocPrint(vm.allocator, "\x00{s}\x00{s}", .{ declaring, name }),
     };
-    defer vm.allocator.free(key);
-    try arr.setCopiedKey(vm.allocator, key, value);
 }
 
 pub fn unmangle(key: []const u8, value: Value) Property {
