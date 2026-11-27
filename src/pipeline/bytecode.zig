@@ -717,6 +717,9 @@ pub const OpCode = enum(u16) {
     get_var_var_w,
     // u16 dst: make_var_ref with the source variable's name popped
     make_var_var_ref,
+    // u32: constant pool index. `constant` for a literal past the part of
+    // the pool u16 operands reach (Chunk.addLiteral)
+    constant_w,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -730,6 +733,7 @@ pub const OpCode = enum(u16) {
             .jump_if_class_declared, .bind_const_attributes => 6,
             .early_bind_end => 3,
             .make_var_var_ref => 4,
+            .constant_w => 6,
             .late_bind => 7,
             // the class names follow
             .early_bind => 8,
@@ -860,6 +864,7 @@ pub const OpCode = enum(u16) {
             // push a value
             .reference_source,
             .constant,
+            .constant_w,
             .op_null,
             .append_op_read,
             .op_true,
@@ -995,11 +1000,22 @@ pub const Chunk = struct {
     code: std.ArrayListUnmanaged(u8) = .empty,
     constants: std.ArrayListUnmanaged(Value) = .empty,
     lines: std.ArrayListUnmanaged(u32) = .empty,
+    // compile time only: once the pool reaches narrow_split entries, the
+    // rest of what u16 operands reach is reserved for them, filled from
+    // narrow_next, and literals go past it (addLiteral, constant_w)
+    narrow_next: u32 = 0,
+    narrow_strings: std.StringHashMapUnmanaged(u16) = .empty,
+
+    // the pool indexes u16 operands may hold: 0xffff and 0xfffe are the
+    // "none" and "the class itself" markers of declaration operands
+    pub const narrow_limit: u32 = 0xfff0;
+    pub const narrow_split: u32 = 0x8000;
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
         self.code.deinit(allocator);
         self.constants.deinit(allocator);
         self.lines.deinit(allocator);
+        self.narrow_strings.deinit(allocator);
     }
 
     pub fn write(self: *Chunk, allocator: std.mem.Allocator, byte: u8, source_offset: u32) !void {
@@ -1007,9 +1023,46 @@ pub const Chunk = struct {
         try self.lines.append(allocator, source_offset);
     }
 
-    pub fn addConstant(self: *Chunk, allocator: std.mem.Allocator, value: Value) !u16 {
+    // a constant for a u16 operand. error.TooManyConstants once the part of
+    // the pool those reach is full: never an index that wraps
+    pub fn addConstant(self: *Chunk, allocator: std.mem.Allocator, value: Value) error{ OutOfMemory, TooManyConstants }!u16 {
+        if (self.narrow_next == 0) {
+            if (self.constants.items.len < narrow_split) {
+                try self.constants.append(allocator, value);
+                return @intCast(self.constants.items.len - 1);
+            }
+            try self.splitPool(allocator);
+        }
+        // a big function names the same things over and over
+        if (value == .string) if (self.narrow_strings.get(value.string.bytes())) |idx| return idx;
+        if (self.narrow_next >= narrow_limit) return error.TooManyConstants;
+        const idx: u16 = @intCast(self.narrow_next);
+        self.constants.items[idx] = value;
+        self.narrow_next += 1;
+        if (value == .string) try self.narrow_strings.put(allocator, value.string.bytes(), idx);
+        return idx;
+    }
+
+    // a constant only a `constant` push reads: its index, which may be past
+    // what u16 reaches once the pool is split
+    pub fn addLiteral(self: *Chunk, allocator: std.mem.Allocator, value: Value) error{ OutOfMemory, TooManyConstants }!u32 {
+        if (self.narrow_next == 0 and self.constants.items.len < narrow_split) return try self.addConstant(allocator, value);
+        if (self.narrow_next == 0) try self.splitPool(allocator);
+        if (self.constants.items.len >= std.math.maxInt(u32)) return error.TooManyConstants;
         try self.constants.append(allocator, value);
         return @intCast(self.constants.items.len - 1);
+    }
+
+    // reserve [narrow_split, narrow_limit) for u16 operands; the strings
+    // already pooled are found again rather than added twice
+    fn splitPool(self: *Chunk, allocator: std.mem.Allocator) !void {
+        try self.constants.appendNTimes(allocator, .null, narrow_limit - narrow_split);
+        self.narrow_next = narrow_split;
+        for (self.constants.items[0..narrow_split], 0..) |c, i| {
+            if (c != .string) continue;
+            const gop = try self.narrow_strings.getOrPut(allocator, c.string.bytes());
+            if (!gop.found_existing) gop.value_ptr.* = @intCast(i);
+        }
     }
 
     pub fn offset(self: *const Chunk) usize {

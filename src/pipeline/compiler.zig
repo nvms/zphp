@@ -220,7 +220,7 @@ pub const Diagnostic = struct {
 
 // `require 'path';` for auto_prepend_file and auto_append_file
 fn emitAutoRequire(self: *Compiler, path: []const u8) Error!void {
-    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(path) }));
+    try self.emitLiteral(.{ .string = Value.String.borrowed(path) });
     try self.emitOp(.require);
     try self.emitByte(0);
     try self.emitOp(.pop);
@@ -1243,8 +1243,7 @@ pub const Compiler = struct {
             .cast_expr => try compiler_expr.compileCast(self, node),
             .inline_html => {
                 const text = self.ast.tokenSlice(node.main_token);
-                const idx2 = try self.addConstant(.{ .string = Value.String.borrowed(text) });
-                try self.emitConstant(idx2);
+                try self.emitLiteral(.{ .string = Value.String.borrowed(text) });
                 try self.emitOp(.echo);
             },
             .empty_stmt => {},
@@ -1283,9 +1282,7 @@ pub const Compiler = struct {
             .print_expr => {
                 try self.compileNode(node.data.lhs);
                 try self.emitOp(.echo);
-                const one_idx = try self.addConstant(.{ .int = 1 });
-                try self.emitOp(.constant);
-                try self.emitU16(one_idx);
+                try self.emitLiteral(.{ .int = 1 });
             },
             .try_catch => try compiler_stmt.compileTryCatch(self, node),
             .catch_clause => {},
@@ -1348,7 +1345,7 @@ pub const Compiler = struct {
                 // expression evaluates the name when it runs
                 if (!self.const_expr and self.ast.isConstArrayPropName(idx)) {
                     try self.warnOnce(node.main_token, 2, "Array to string conversion", .{});
-                    return self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed("Array") }));
+                    return self.emitLiteral(.{ .string = Value.String.borrowed("Array") });
                 }
                 try compiler_expr.compileArrayLiteral(self, node);
             },
@@ -1478,7 +1475,7 @@ pub const Compiler = struct {
                 // zend_compile_const: `\__COMPILER_HALT_OFFSET__` is the
                 // offset too (namespace\ names another constant)
                 if (self.ast.halt_offset) |offset| if (std.mem.eql(u8, std.mem.trimStart(u8, resolved, "\\"), "__COMPILER_HALT_OFFSET__")) {
-                    try self.emitConstant(try self.addConstant(.{ .int = offset }));
+                    try self.emitLiteral(.{ .int = offset });
                     return;
                 };
                 // a qualified name is no `use const` alias
@@ -1497,15 +1494,13 @@ pub const Compiler = struct {
     fn compileInteger(self: *Compiler, node: Ast.Node) Error!void {
         const lexeme = self.ast.tokenSlice(node.main_token);
         // an integer literal that overflows i64 becomes a float (PHP semantics)
-        const idx = try self.addConstant(parsePhpIntLiteral(lexeme));
-        try self.emitConstant(idx);
+        try self.emitLiteral(parsePhpIntLiteral(lexeme));
     }
 
     fn compileFloat(self: *Compiler, node: Ast.Node) Error!void {
         const lexeme = self.ast.tokenSlice(node.main_token);
         const val = parsePhpFloat(lexeme);
-        const idx = try self.addConstant(.{ .float = val });
-        try self.emitConstant(idx);
+        try self.emitLiteral(.{ .float = val });
     }
 
     // ==================================================================
@@ -1519,19 +1514,16 @@ pub const Compiler = struct {
 
         if (std.mem.eql(u8, magic, "__DIR__")) {
             const dir = self.getFileDir();
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(dir) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .string = Value.String.borrowed(dir) });
             return;
         }
         if (std.mem.eql(u8, magic, "__FILE__")) {
             const path = if (self.file_path.len > 0) self.file_path else "";
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(path) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .string = Value.String.borrowed(path) });
             return;
         }
         if (std.mem.eql(u8, magic, "__FUNCTION__")) {
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(self.class_body_function orelse self.current_function) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .string = Value.String.borrowed(self.class_body_function orelse self.current_function) });
             return;
         }
         if (std.mem.eql(u8, magic, "__CLASS__")) {
@@ -1545,8 +1537,7 @@ pub const Compiler = struct {
                 try self.emitU16(prop_idx);
                 return;
             }
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(self.current_class) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .string = Value.String.borrowed(self.current_class) });
             return;
         }
         if (std.mem.eql(u8, magic, "__METHOD__")) {
@@ -1561,8 +1552,7 @@ pub const Compiler = struct {
                 self.current_function
             else
                 @as([]const u8, "");
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(val) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .string = Value.String.borrowed(val) });
             return;
         }
         if (std.mem.eql(u8, magic, "__PROPERTY__")) {
@@ -1577,31 +1567,26 @@ pub const Compiler = struct {
                 (if (std.mem.lastIndexOf(u8, f[0..at], "::")) |sep| f[sep + 2 .. at] else f[0..at])
             else
                 "";
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(val) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .string = Value.String.borrowed(val) });
             return;
         }
         if (std.mem.eql(u8, magic, "__NAMESPACE__")) {
             const ns = if (self.namespace.len > 0) self.namespace else "";
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(ns) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .string = Value.String.borrowed(ns) });
             return;
         }
         if (std.mem.eql(u8, magic, "__TRAIT__")) {
             const val = if (self.in_trait) self.current_class else "";
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(val) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .string = Value.String.borrowed(val) });
             return;
         }
         if (self.ast.halt_offset) |offset| if (std.mem.eql(u8, name, "__COMPILER_HALT_OFFSET__")) {
-            const idx = try self.addConstant(.{ .int = offset });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .int = offset });
             return;
         };
         if (std.mem.eql(u8, magic, "__LINE__")) {
             const line = self.getLineNumber();
-            const idx = try self.addConstant(.{ .int = @intCast(line) });
-            try self.emitConstant(idx);
+            try self.emitLiteral(.{ .int = @intCast(line) });
             return;
         }
 
@@ -1664,9 +1649,15 @@ pub const Compiler = struct {
         // zend_compile_simple_var_no_cv: a read of a name known while
         // compiling (`${'name'}`, `${__FUNCTION__}`) deprecates
         // $http_response_header as a plain read does
-        if (!self.quiet_reads and self.chunk.offset() == start + bytecode.op_bytes + 2 and bytecode.opIs(self.chunk.code.items, start, .constant)) {
-            const idx = (@as(u16, self.chunk.code.items[start + bytecode.op_bytes]) << 8) | self.chunk.code.items[start + bytecode.op_bytes + 1];
-            const name = self.chunk.constants.items[idx];
+        const code = self.chunk.code.items;
+        const pushed: ?usize = if (self.chunk.offset() == start + OpCode.constant.width() and bytecode.opIs(code, start, .constant))
+            std.mem.readInt(u16, code[start + bytecode.op_bytes ..][0..2], .big)
+        else if (self.chunk.offset() == start + OpCode.constant_w.width() and bytecode.opIs(code, start, .constant_w))
+            std.mem.readInt(u32, code[start + bytecode.op_bytes ..][0..4], .big)
+        else
+            null;
+        if (!self.quiet_reads and pushed != null) {
+            const name = self.chunk.constants.items[pushed.?];
             if (name == .string and std.mem.eql(u8, name.string.bytes(), "http_response_header"))
                 try self.warn(node.main_token, 8192, "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead", .{});
         }
@@ -1768,9 +1759,7 @@ pub const Compiler = struct {
                     continue;
                 }
                 try self.emitOp(.dup);
-                const key_idx = try self.addConstant(.{ .int = @intCast(i) });
-                try self.emitOp(.constant);
-                try self.emitU16(key_idx);
+                try self.emitLiteral(.{ .int = @intCast(i) });
                 try self.emitOp(self.listFetchOp(slot));
                 try self.compileStoreTop(slot);
             }
@@ -1793,9 +1782,7 @@ pub const Compiler = struct {
                 if (elem.data.rhs != 0) {
                     try self.compileNode(elem.data.rhs);
                 } else {
-                    const key_idx = try self.addConstant(.{ .int = @intCast(i) });
-                    try self.emitOp(.constant);
-                    try self.emitU16(key_idx);
+                    try self.emitLiteral(.{ .int = @intCast(i) });
                 }
                 try self.emitOp(self.listFetchOp(elem.data.lhs));
                 try self.compileStoreTop(elem.data.lhs);
@@ -1892,9 +1879,7 @@ pub const Compiler = struct {
         try self.emitOp(.dup);
         switch (key) {
             .index => |i| {
-                const ki = try self.addConstant(.{ .int = i });
-                try self.emitOp(.constant);
-                try self.emitU16(ki);
+                try self.emitLiteral(.{ .int = i });
             },
             .key_node => |kn| try self.compileNode(kn),
         }
@@ -1909,9 +1894,7 @@ pub const Compiler = struct {
         try self.emitOp(.dup);
         switch (key) {
             .index => |i| {
-                const ki = try self.addConstant(.{ .int = i });
-                try self.emitOp(.constant);
-                try self.emitU16(ki);
+                try self.emitLiteral(.{ .int = i });
             },
             .key_node => |kn| try self.compileNode(kn),
         }
@@ -3183,6 +3166,14 @@ pub const Compiler = struct {
         try self.emitU16(idx);
     }
 
+    // push a literal: constant_w once the pool is past what u16 reaches
+    pub fn emitLiteral(self: *Compiler, value: Value) Error!void {
+        const idx = self.chunk.addLiteral(self.allocator, value) catch |err| return self.poolFull(err);
+        if (idx <= std.math.maxInt(u16)) return self.emitConstant(@intCast(idx));
+        try self.emitOp(.constant_w);
+        try self.emitU32(idx);
+    }
+
     pub fn emitJump(self: *Compiler, op: OpCode) Error!usize {
         try self.emitOp(op);
         try self.emitU16(0xffff);
@@ -3208,7 +3199,15 @@ pub const Compiler = struct {
     }
 
     pub fn addConstant(self: *Compiler, value: Value) Error!u16 {
-        return self.chunk.addConstant(self.allocator, value);
+        return self.chunk.addConstant(self.allocator, value) catch |err| self.poolFull(err);
+    }
+
+    // php has no such limit; zphp refuses to compile rather than wrap an index
+    fn poolFull(self: *Compiler, err: error{ OutOfMemory, TooManyConstants }) Error {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.TooManyConstants => self.fail(self.tokenAtOffset(self.current_source_offset), "Function body too large to compile: it names too many distinct functions, classes, methods, properties and constants; split it into smaller functions"),
+        };
     }
 
     // ==================================================================

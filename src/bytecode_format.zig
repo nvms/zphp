@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 108;
+pub const FORMAT_VERSION: u16 = 109;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -248,7 +248,7 @@ fn serializeChunk(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab
     try buf.appendSlice(allocator, chunk.code.items);
 
     // constants
-    try writeU16(buf, allocator, @intCast(chunk.constants.items.len));
+    try writeU32(buf, allocator, @intCast(chunk.constants.items.len));
     for (chunk.constants.items) |val| {
         try serializeValue(buf, allocator, strtab, val);
     }
@@ -669,7 +669,7 @@ fn deserializeChunk(r: *Reader, ctx: *DeserCtx) !Chunk {
     const code_data = try r.readSlice(code_len);
     try chunk.code.appendSlice(ctx.allocator, code_data);
 
-    const const_count = try r.readU16();
+    const const_count = try r.readU32();
     for (0..const_count) |_| {
         try chunk.constants.append(ctx.allocator, try deserializeValue(r, ctx));
     }

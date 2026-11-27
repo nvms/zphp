@@ -6156,6 +6156,10 @@ pub const VM = struct {
                     const idx = self.readU16();
                     self.push(self.currentChunk().constants.items[idx]);
                 },
+                .constant_w => {
+                    const idx = self.readU32();
+                    self.push(self.currentChunk().constants.items[idx]);
+                },
                 .op_null => self.push(.null),
                 .op_true => self.push(.{ .bool = true }),
                 .op_false => self.push(.{ .bool = false }),
@@ -27114,6 +27118,8 @@ pub const VM = struct {
                 scan_end -= ob + 2;
             } else if (with_u16 and bytecode.opIs(code, scan_end - ob - 2, .constant)) {
                 scan_end -= ob + 2;
+            } else if (scan_end >= ob + 4 and bytecode.opIs(code, scan_end - ob - 4, .constant_w)) {
+                scan_end -= ob + 4;
             } else if (bytecode.opIs(code, scan_end - ob, .op_null) or
                 bytecode.opIs(code, scan_end - ob, .op_true) or
                 bytecode.opIs(code, scan_end - ob, .op_false))

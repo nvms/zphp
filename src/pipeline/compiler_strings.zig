@@ -33,25 +33,21 @@ pub fn compileString(self: *Compiler, node: Ast.Node) (Allocator.Error || error{
 
     if (tok_tag == .nowdoc) {
         const body = try literalText(self, try extractHeredocBody(self, node.main_token));
-        const idx = try self.addConstant(.{ .string = Value.String.borrowed(body) });
-        try self.emitConstant(idx);
+        try self.emitLiteral(.{ .string = Value.String.borrowed(body) });
         return;
     }
 
     if (lexeme.len < 2) {
-        const idx = try self.addConstant(.{ .string = Value.String.borrowed(lexeme) });
-        try self.emitConstant(idx);
+        try self.emitLiteral(.{ .string = Value.String.borrowed(lexeme) });
         return;
     }
     const inner = lexeme[1 .. lexeme.len - 1];
     const processed = try processSingleQuoteEscapes(self.allocator, inner);
     if (processed) |p| {
         try self.string_allocs.append(self.allocator, p);
-        const idx = try self.addConstant(.{ .string = Value.String.borrowed(try literalText(self, p)) });
-        try self.emitConstant(idx);
+        try self.emitLiteral(.{ .string = Value.String.borrowed(try literalText(self, p)) });
     } else {
-        const idx = try self.addConstant(.{ .string = Value.String.borrowed(try literalText(self, inner)) });
-        try self.emitConstant(idx);
+        try self.emitLiteral(.{ .string = Value.String.borrowed(try literalText(self, inner)) });
     }
 }
 
@@ -72,7 +68,7 @@ pub fn extractHeredocBody(self: *Compiler, token_idx: u32) (Allocator.Error || e
 fn compileInterpolating(self: *Compiler, node: Ast.Node, quote: u8) (Allocator.Error || error{CompileError})!void {
     const src = self.ast.source;
     const b = interp.body(src, self.ast.tokens[node.main_token]) orelse {
-        try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed("") }));
+        try self.emitLiteral(.{ .string = Value.String.borrowed("") });
         return;
     };
     if (node.data.rhs != Ast.interpolated) {
@@ -96,7 +92,7 @@ fn compileInterpolating(self: *Compiler, node: Ast.Node, quote: u8) (Allocator.E
         if (k > 0) try self.emitOp(.concat);
     }
     if (parts.len == 0) {
-        try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed("") }));
+        try self.emitLiteral(.{ .string = Value.String.borrowed("") });
     } else if (parts.len == 1 and literal_count == 0) {
         // "$x" alone is still a string
         try self.emitOp(.cast_string);
@@ -125,8 +121,8 @@ pub fn compileInterpPart(self: *Compiler, idx: u32) (Allocator.Error || error{Co
             try self.string_allocs.append(self.allocator, name);
             try self.emitGetVar(name);
         },
-        .interp_offset => try self.emitConstant(try self.addConstant(try interpOffsetValue(self, node))),
-        .interp_literal => try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(self.ast.source[node.data.lhs..node.data.rhs]) })),
+        .interp_offset => try self.emitLiteral(try interpOffsetValue(self, node)),
+        .interp_literal => try self.emitLiteral(.{ .string = Value.String.borrowed(self.ast.source[node.data.lhs..node.data.rhs]) }),
         else => try self.compileNode(idx),
     }
 }
@@ -167,8 +163,7 @@ fn emitLiteralSegment(self: *Compiler, token: u32, b: interp.Body, quote: u8, st
         try self.string_allocs.append(self.allocator, processed);
         text = processed;
     }
-    const idx = try self.addConstant(.{ .string = Value.String.borrowed(try literalText(self, text)) });
-    try self.emitConstant(idx);
+    try self.emitLiteral(.{ .string = Value.String.borrowed(try literalText(self, text)) });
 }
 
 pub fn processSingleQuoteEscapes(allocator: Allocator, s: []const u8) Allocator.Error!?[]const u8 {

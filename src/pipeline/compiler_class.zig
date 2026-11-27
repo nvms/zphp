@@ -2821,8 +2821,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         self.functions.items[self.functions.items.len - 1].static_vars.len == 0 and
         !(is_arrow and arrowCaptures(slot_names, param_names));
 
-    const idx = try self.addConstant(.{ .string = Value.String.borrowed(owned_name) });
-    try self.emitConstant(idx);
+    try self.emitLiteral(.{ .string = Value.String.borrowed(owned_name) });
     try self.emitOp(if (stateless) .closure_new_cached else .closure_new);
 
     for (use_vars) |use_var_node| {
@@ -3686,7 +3685,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             if (defaultNamesClass(self, tmember)) {
                 const tname = self.trait_property_owner.get(tpi) orelse "";
                 const name = try traitDefaultInitializer(self, tname, tmember);
-                try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+                try self.emitLiteral(.{ .string = Value.String.borrowed(name) });
             } else try self.compileNode(tmember.data.lhs);
         }
     }
@@ -4526,7 +4525,7 @@ fn compileTraitPropertyDefault(self: *Compiler, trait_name: []const u8, member: 
         }
         try compileInitializer(self, name, .argument, default, self.ast.nodes[default].main_token);
     }
-    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+    try self.emitLiteral(.{ .string = Value.String.borrowed(name) });
 }
 
 // pushes a trait constant's value, or for one naming the using class the
@@ -4544,7 +4543,7 @@ fn compileTraitConstantValue(self: *Compiler, trait_name: []const u8, member: As
         self.in_trait = prev_in_trait;
     }
     try compileInitializer(self, name, .argument, member.data.lhs, member.main_token);
-    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+    try self.emitLiteral(.{ .string = Value.String.borrowed(name) });
 }
 
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
@@ -4919,7 +4918,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
                     const name = try @import("bytecode.zig").enumCaseInitializerName(self.allocator, enum_name, self.ast.tokenSlice(member.main_token));
                     try self.string_allocs.append(self.allocator, name);
                     try compileInitializer(self, name, .{ .class = enum_name }, member.data.lhs, member.main_token);
-                    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+                    try self.emitLiteral(.{ .string = Value.String.borrowed(name) });
                 } else try self.compileNode(member.data.lhs);
             }
             case_count += 1;

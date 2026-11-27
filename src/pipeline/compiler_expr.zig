@@ -1371,9 +1371,7 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
         // php compiles unary `+` as a multiplication by 1, which keeps -0.0
         // and names the operand first in a TypeError
         .plus => {
-            const one_idx = try self.addConstant(.{ .int = 1 });
-            try self.emitOp(.constant);
-            try self.emitU16(one_idx);
+            try self.emitLiteral(.{ .int = 1 });
             try self.emitOp(.multiply);
         },
         .minus => try self.emitOp(.negate),
@@ -1580,7 +1578,7 @@ pub fn compileSeparatedFetch(self: *Compiler, node_idx: u32) Error!bool {
             if (self.isDynamicProp(node)) {
                 try self.compileNode(node.data.rhs);
             } else {
-                try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) }));
+                try self.emitLiteral(.{ .string = Value.String.borrowed(self.propName(node)) });
             }
             try self.emitOp(.separate_prop_array);
             try self.emitOp(.get_prop_coalesce_dynamic);
@@ -1648,7 +1646,7 @@ fn compileUnsetDimensionBase(self: *Compiler, node_idx: u32) Error!void {
         if (self.isDynamicProp(node)) {
             try self.compileNode(node.data.rhs);
         } else {
-            try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) }));
+            try self.emitLiteral(.{ .string = Value.String.borrowed(self.propName(node)) });
         }
         try self.emitOp(.check_prop_dimension);
         try self.emitOp(.separate_prop_array);
@@ -2040,7 +2038,7 @@ fn compileAssert(self: *Compiler, node: Ast.Node) Error!void {
         // a named assertion gets a named description, as positional after
         // named isn't allowed
         var guards = try emitSpreadArgs(self, args);
-        try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed("description") }));
+        try self.emitLiteral(.{ .string = Value.String.borrowed("description") });
         try self.emitConstant(message_idx);
         try self.emitOp(.arg_array_set);
         self.current_source_offset = call_offset;
@@ -2353,7 +2351,7 @@ fn compilePrintfRope(self: *Compiler, args: []const u32) Error!bool {
         if (fmt == .string and std.mem.indexOfScalar(u8, fmt.string.bytes(), '%') == null) {
             try self.compileNode(args[0]);
             try self.emitOp(.echo);
-            try self.emitConstant(try self.addConstant(.{ .int = @intCast(fmt.string.bytes().len) }));
+            try self.emitLiteral(.{ .int = @intCast(fmt.string.bytes().len) });
             return true;
         }
     }
@@ -2676,7 +2674,7 @@ fn compileSprintfRope(self: *Compiler, args: []const u32) Error!bool {
 fn emitRopeLiteral(self: *Compiler, text: []const u8) Error!void {
     const owned = try self.allocator.dupe(u8, text);
     try self.string_allocs.append(self.allocator, owned);
-    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(owned) }));
+    try self.emitLiteral(.{ .string = Value.String.borrowed(owned) });
 }
 
 // whether a call compiles to its spread form, which carries its arguments in
@@ -3007,7 +3005,7 @@ pub fn compilePartialCall(self: *Compiler, idx: u32, node: Ast.Node, args: []con
             try desc.append(self.allocator, @intCast(name.len));
             try desc.appendSlice(self.allocator, name);
             if (placeholder) continue;
-            try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+            try self.emitLiteral(.{ .string = Value.String.borrowed(name) });
             // a constant expression's arguments are values, which a
             // by-reference parameter refuses when the closure is made
             if (self.const_expr) try self.compileNode(arg.data.lhs) else try compileArg(self, arg.data.lhs, .{ .pos = ArgPos.named, .guards = &guards });
@@ -3089,7 +3087,7 @@ fn emitCallableTarget(self: *Compiler, callee_idx: u32, ref_tok: u32) Error!void
             try self.compileNode(callee.data.lhs);
         } else {
             const class_name = try resolveNodeClassName(self, class_node);
-            try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
+            try self.emitLiteral(.{ .string = Value.String.borrowed(class_name) });
         }
         try self.emitOp(.array_push);
         try self.emitGetVar(self.ast.tokenSlice(callee.main_token));
@@ -3732,7 +3730,7 @@ fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error
 // be read
 fn constExprPropFetch(self: *Compiler, node: Ast.Node) Error!void {
     if (!self.isDynamicProp(node)) {
-        try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) }));
+        try self.emitLiteral(.{ .string = Value.String.borrowed(self.propName(node)) });
     } else if (node.main_token != 0) {
         try self.emitGetVar(self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token));
     } else {
@@ -4187,7 +4185,7 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
             if (what.len > 0) return self.failFmt(firstToken(self, node.data.lhs), "Cannot use \"::class\" on {s}", .{what});
             if (v == .string) {
                 const name = v.string.bytes();
-                try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(if (name.len > 0 and name[0] == '\\') name[1..] else name) }));
+                try self.emitLiteral(.{ .string = Value.String.borrowed(if (name.len > 0 and name[0] == '\\') name[1..] else name) });
                 return;
             }
         }
@@ -4222,7 +4220,7 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
     if (self.trait_const_values and std.mem.eql(u8, prop_name, "class") and
         (std.ascii.eqlIgnoreCase(written_class, "self") or std.ascii.eqlIgnoreCase(written_class, "parent") or std.ascii.eqlIgnoreCase(written_class, "static")))
     {
-        return self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(written_class) }));
+        return self.emitLiteral(.{ .string = Value.String.borrowed(written_class) });
     }
     // a global constant's expression has no class of its own
     if (self.const_expr and self.current_class.len == 0 and std.mem.eql(u8, prop_name, "class") and

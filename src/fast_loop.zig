@@ -444,6 +444,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += op_bytes;
                     continue :dispatch _next;
                 },
+                .constant_w => {
+                    const idx = std.mem.readInt(u32, code[ip..][0..4], .big);
+                    ip += 4;
+                    stack[sp] = consts[idx];
+                    sp += 1;
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
+                },
                 .jump_if_false => {
                     if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
