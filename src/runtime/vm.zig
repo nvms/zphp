@@ -1352,6 +1352,9 @@ pub const VM = struct {
     user_call_by_name: bool = false,
     // the destructors php's request shutdown runs, with no script running
     shutdown_destructors: bool = false,
+    // the frames left when they started: a destructor called at this depth
+    // runs with no php frame below it (EG(current_execute_data) is NULL)
+    shutdown_frame: usize = 0,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
@@ -4975,6 +4978,7 @@ pub const VM = struct {
     pub fn runShutdownDestructors(self: *VM) void {
         self.shutdown_destructors = true;
         defer self.shutdown_destructors = false;
+        self.shutdown_frame = self.frame_count;
         // what shutdown runs is called by the engine: no user frame calls it
         var engine = self.engineCall();
         self.native_call = &engine;
@@ -36047,7 +36051,7 @@ pub const VM = struct {
             }
             // an exception in flight waits while the destructor runs, and
             // becomes the previous of one the destructor throws
-            const in_flight = self.takePending();
+            var in_flight = self.takePending();
             // the destructor's own statements consume the flag an earlier
             // destructor of this drain set for the exception now waiting
             const raised = self.drain_raised;
@@ -36055,6 +36059,16 @@ pub const VM = struct {
             const base_frame = self.frame_count;
             if (!refused) {
                 if (self.callMethod(obj, "__destruct", &.{})) |_| {} else |_| self.dropExitedFrames(base_frame);
+            }
+            // with no php frame below (a destructor shutdown runs releasing
+            // a value), what the destructor throws is fatal at once
+            // (zend_throw_exception_internal bails out): the exception that
+            // was in flight never becomes its previous
+            if (self.shutdown_destructors and base_frame <= self.shutdown_frame and in_flight != null and self.pending_exception != null and !self.exit_requested) {
+                if (!self.isUnwindMarker(self.pending_exception.?)) {
+                    self.stackRelease(in_flight.?);
+                    in_flight = null;
+                }
             }
             if (raised) self.drain_raised = true;
             self.settleDrainException(in_flight);
