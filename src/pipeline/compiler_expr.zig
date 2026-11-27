@@ -700,6 +700,81 @@ pub fn compilePipeExpr(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
+    const lhs = self.ast.nodes[node.data.lhs];
+    if (lhs.tag == .binary_op and plainBinaryOrder(self, node) and plainBinaryOrder(self, lhs)) return compileBinaryChain(self, node);
+    return compileBinaryOne(self, node);
+}
+
+// a left-nested chain (`1 + 1 + ...`, `$a . $b . ...`) whose operators each
+// compile left, right, then the opcode: the left spine is walked in a loop
+// instead of recursed into, one level per operator. php compiles such chains
+// about 57000 operators deep. what it emits is what the recursion would
+// (nothing comes before a spine node's left operand)
+fn compileBinaryChain(self: *Compiler, top: Ast.Node) Error!void {
+    var spine: std.ArrayListUnmanaged(Ast.Node) = .empty;
+    defer spine.deinit(self.allocator);
+    var n = top;
+    while (true) {
+        try spine.append(self.allocator, n);
+        const lhs = self.ast.nodes[n.data.lhs];
+        if (lhs.tag != .binary_op or !plainBinaryOrder(self, lhs)) break;
+        n = lhs;
+    }
+    try self.compileNode(n.data.lhs);
+    var i = spine.items.len;
+    while (i > 0) {
+        i -= 1;
+        const s = spine.items[i];
+        try self.compileNode(s.data.rhs);
+        try self.emitOp(binaryOpcode(self.ast.tokens[s.main_token].tag));
+    }
+}
+
+// whether compileBinaryOne compiles the node's left operand, its right one,
+// then the operator's opcode
+fn plainBinaryOrder(self: *Compiler, node: Ast.Node) bool {
+    const op_tag = self.ast.tokens[node.main_token].tag;
+    if (op_tag == .kw_instanceof) return false;
+    const swap = switch (op_tag) {
+        .equal_equal, .bang_equal, .equal_equal_equal, .bang_equal_equal, .lt_gt => isCompileConst(self, node.data.lhs) and !isCompileConst(self, node.data.rhs),
+        else => false,
+    };
+    if (swap) return false;
+    const commutative = op_tag == .star or op_tag == .amp or op_tag == .pipe or op_tag == .caret;
+    if (commutative and phpOperandKind(self, node.data.lhs) < phpOperandKind(self, node.data.rhs)) return false;
+    return !lateVariableOperand(self, node.data.lhs, node.data.rhs);
+}
+
+fn binaryOpcode(op_tag: Token.Tag) OpCode {
+    return switch (op_tag) {
+        .plus => .add,
+        .minus => .subtract,
+        .star => .multiply,
+        .slash => .divide,
+        .percent => .modulo,
+        .star_star => .power,
+        .dot => .concat,
+        .equal_equal => .equal,
+        .bang_equal => .not_equal,
+        .equal_equal_equal => .identical,
+        .bang_equal_equal => .not_identical,
+        .lt => .less,
+        .lt_equal => .less_equal,
+        .gt => .greater,
+        .gt_equal => .greater_equal,
+        .spaceship => .spaceship,
+        .amp => .bit_and,
+        .pipe => .bit_or,
+        .caret => .bit_xor,
+        .lt_lt => .shift_left,
+        .gt_gt => .shift_right,
+        .lt_gt => .not_equal,
+        .kw_xor => .logical_xor,
+        else => unreachable,
+    };
+}
+
+fn compileBinaryOne(self: *Compiler, node: Ast.Node) Error!void {
     const op_tag = self.ast.tokens[node.main_token].tag;
 
     if (op_tag == .kw_instanceof) {
@@ -764,32 +839,7 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
         try self.compileNode(if (swap) node.data.rhs else node.data.lhs);
         try self.compileNode(if (swap) node.data.lhs else node.data.rhs);
     }
-    try self.emitOp(switch (op_tag) {
-        .plus => .add,
-        .minus => .subtract,
-        .star => .multiply,
-        .slash => .divide,
-        .percent => .modulo,
-        .star_star => .power,
-        .dot => .concat,
-        .equal_equal => .equal,
-        .bang_equal => .not_equal,
-        .equal_equal_equal => .identical,
-        .bang_equal_equal => .not_identical,
-        .lt => .less,
-        .lt_equal => .less_equal,
-        .gt => .greater,
-        .gt_equal => .greater_equal,
-        .spaceship => .spaceship,
-        .amp => .bit_and,
-        .pipe => .bit_or,
-        .caret => .bit_xor,
-        .lt_lt => .shift_left,
-        .gt_gt => .shift_right,
-        .lt_gt => .not_equal,
-        .kw_xor => .logical_xor,
-        else => unreachable,
-    });
+    try self.emitOp(binaryOpcode(op_tag));
 }
 
 // whether a binary operation's left operand is a variable its right side
@@ -1391,7 +1441,43 @@ fn literalTruth(self: *Compiler, idx: u32) ?bool {
     }
 }
 
+// a left-nested `&&` or `||` chain: the spine is walked in a loop, as
+// compileBinaryChain does, the innermost operation compiled as the recursion
+// would (from its own node's start) and each one above it adding its
+// short-circuit jump and right operand
+fn compileShortCircuitChain(self: *Compiler, top: Ast.Node, comptime is_and: bool) Error!void {
+    var spine: std.ArrayListUnmanaged(Ast.Node) = .empty;
+    defer spine.deinit(self.allocator);
+    var n = top;
+    while (self.ast.nodes[n.data.lhs].tag == top.tag) {
+        try spine.append(self.allocator, n);
+        n = self.ast.nodes[n.data.lhs];
+    }
+    self.current_source_offset = self.ast.tokens[n.main_token].start;
+    if (is_and) try compileLogicalAndOne(self, n) else try compileLogicalOrOne(self, n);
+    var i = spine.items.len;
+    while (i > 0) {
+        i -= 1;
+        const s = spine.items[i];
+        const end_jump = try self.emitJump(if (is_and) .jump_if_false else .jump_if_true);
+        try self.emitOp(.pop_boundary);
+        try self.compileNode(s.data.rhs);
+        self.patchJump(end_jump);
+        try self.emitOp(.cast_bool);
+    }
+}
+
 pub fn compileLogicalAnd(self: *Compiler, node: Ast.Node) Error!void {
+    if (self.ast.nodes[node.data.lhs].tag == .logical_and) return compileShortCircuitChain(self, node, true);
+    return compileLogicalAndOne(self, node);
+}
+
+pub fn compileLogicalOr(self: *Compiler, node: Ast.Node) Error!void {
+    if (self.ast.nodes[node.data.lhs].tag == .logical_or) return compileShortCircuitChain(self, node, false);
+    return compileLogicalOrOne(self, node);
+}
+
+fn compileLogicalAndOne(self: *Compiler, node: Ast.Node) Error!void {
     if (literalTruth(self, node.data.lhs) == false) {
         try self.emitOp(.op_false);
         return;
@@ -1404,7 +1490,7 @@ pub fn compileLogicalAnd(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.cast_bool);
 }
 
-pub fn compileLogicalOr(self: *Compiler, node: Ast.Node) Error!void {
+fn compileLogicalOrOne(self: *Compiler, node: Ast.Node) Error!void {
     if (literalTruth(self, node.data.lhs) == true) {
         try self.emitOp(.op_true);
         return;

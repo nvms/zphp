@@ -2001,6 +2001,79 @@ pub const Compiler = struct {
         return .{ .string = Value.String.borrowed(sentinel) };
     }
 
+    // a binary operation of two evaluated constant operands
+    fn foldBinaryConst(self: *Compiler, op: Token.Tag, lhs: Value, rhs: Value) Value {
+        if (lhs == .int and rhs == .int) {
+            return switch (op) {
+                .pipe => Value{ .int = lhs.int | rhs.int },
+                .amp => Value{ .int = lhs.int & rhs.int },
+                .caret => Value{ .int = lhs.int ^ rhs.int },
+                .plus => Value{ .int = lhs.int +% rhs.int },
+                .minus => Value{ .int = lhs.int -% rhs.int },
+                .star => Value{ .int = lhs.int *% rhs.int },
+                .lt_lt => if (rhs.int >= 0 and rhs.int < 64) Value{ .int = lhs.int << @intCast(rhs.int) } else Value.null,
+                .gt_gt => if (rhs.int >= 0 and rhs.int < 64) Value{ .int = lhs.int >> @intCast(rhs.int) } else Value.null,
+                .percent => if (rhs.int == -1) Value{ .int = 0 } else if (rhs.int != 0) Value{ .int = @rem(lhs.int, rhs.int) } else Value.null,
+                .star_star => blk2: {
+                    if (rhs.int < 0) break :blk2 Value.null;
+                    var acc: i64 = 1;
+                    var e: i64 = 0;
+                    while (e < rhs.int) : (e += 1) acc *%= lhs.int;
+                    break :blk2 Value{ .int = acc };
+                },
+                .lt => Value{ .bool = lhs.int < rhs.int },
+                .gt => Value{ .bool = lhs.int > rhs.int },
+                .lt_equal => Value{ .bool = lhs.int <= rhs.int },
+                .gt_equal => Value{ .bool = lhs.int >= rhs.int },
+                .equal_equal => Value{ .bool = lhs.int == rhs.int },
+                .equal_equal_equal => Value{ .bool = lhs.int == rhs.int },
+                .bang_equal, .lt_gt => Value{ .bool = lhs.int != rhs.int },
+                .bang_equal_equal => Value{ .bool = lhs.int != rhs.int },
+                .spaceship => Value{ .int = if (lhs.int < rhs.int) @as(i64, -1) else if (lhs.int > rhs.int) @as(i64, 1) else @as(i64, 0) },
+                else => Value.null,
+            };
+        }
+        // string concat in a constant default: 'a' . 'b', and chains.
+        // fold when both operands are concrete scalars; otherwise defer
+        // (an operand is a constant sentinel resolved at call time)
+        if (op == .dot) {
+            if (constScalarToStr(self, lhs)) |ls| {
+                if (constScalarToStr(self, rhs)) |rs| {
+                    const joined = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ls, rs }) catch return .null;
+                    self.string_allocs.append(self.allocator, joined) catch return .null;
+                    return .{ .string = Value.String.borrowed(joined) };
+                }
+            }
+            return self.makeDeferredExpr(.concat, lhs, rhs);
+        }
+        // php folds arithmetic that can't raise anything
+        // (zend_binary_op_produces_error): numbers and numeric strings
+        if (foldableNumber(lhs) and foldableNumber(rhs)) switch (op) {
+            .plus => return Value.add(lhs, rhs),
+            .minus => return Value.subtract(lhs, rhs),
+            .star => return Value.multiply(lhs, rhs),
+            else => {},
+        };
+        // a compound arithmetic/bitwise expression that didn't fold -
+        // an operand is a deferred constant. defer the whole op
+        const dop: ?bytecode.DeferredExpr.Op = switch (op) {
+            .pipe => .bor,
+            .amp => .band,
+            .caret => .bxor,
+            .plus => .add,
+            .minus => .sub,
+            .star => .mul,
+            .slash => .div,
+            .percent => .mod,
+            .lt_lt => .shl,
+            .gt_gt => .shr,
+            .star_star => .pow,
+            else => null,
+        };
+        if (dop) |o| return self.makeDeferredExpr(o, lhs, rhs);
+        return .null;
+    }
+
     pub fn evalConstExpr(self: *Compiler, idx: u32) Value {
         if (stack_grow.needed()) return stack_grow.call(evalConstExpr, .{ self, idx }) orelse .null;
         const n = self.ast.nodes[idx];
@@ -2086,78 +2159,23 @@ pub const Compiler = struct {
                 break :blk .null;
             },
             .binary_op => blk: {
-                const tok = self.ast.tokens[n.main_token];
-                const lhs = self.evalConstExpr(n.data.lhs);
-                const rhs = self.evalConstExpr(n.data.rhs);
-                if (lhs == .int and rhs == .int) {
-                    break :blk switch (tok.tag) {
-                        .pipe => Value{ .int = lhs.int | rhs.int },
-                        .amp => Value{ .int = lhs.int & rhs.int },
-                        .caret => Value{ .int = lhs.int ^ rhs.int },
-                        .plus => Value{ .int = lhs.int +% rhs.int },
-                        .minus => Value{ .int = lhs.int -% rhs.int },
-                        .star => Value{ .int = lhs.int *% rhs.int },
-                        .lt_lt => if (rhs.int >= 0 and rhs.int < 64) Value{ .int = lhs.int << @intCast(rhs.int) } else Value.null,
-                        .gt_gt => if (rhs.int >= 0 and rhs.int < 64) Value{ .int = lhs.int >> @intCast(rhs.int) } else Value.null,
-                        .percent => if (rhs.int == -1) Value{ .int = 0 } else if (rhs.int != 0) Value{ .int = @rem(lhs.int, rhs.int) } else Value.null,
-                        .star_star => blk2: {
-                            if (rhs.int < 0) break :blk2 Value.null;
-                            var acc: i64 = 1;
-                            var e: i64 = 0;
-                            while (e < rhs.int) : (e += 1) acc *%= lhs.int;
-                            break :blk2 Value{ .int = acc };
-                        },
-                        .lt => Value{ .bool = lhs.int < rhs.int },
-                        .gt => Value{ .bool = lhs.int > rhs.int },
-                        .lt_equal => Value{ .bool = lhs.int <= rhs.int },
-                        .gt_equal => Value{ .bool = lhs.int >= rhs.int },
-                        .equal_equal => Value{ .bool = lhs.int == rhs.int },
-                        .equal_equal_equal => Value{ .bool = lhs.int == rhs.int },
-                        .bang_equal, .lt_gt => Value{ .bool = lhs.int != rhs.int },
-                        .bang_equal_equal => Value{ .bool = lhs.int != rhs.int },
-                        .spaceship => Value{ .int = if (lhs.int < rhs.int) @as(i64, -1) else if (lhs.int > rhs.int) @as(i64, 1) else @as(i64, 0) },
-                        else => Value.null,
-                    };
+                // a chain's left spine (`1 + 1 + ...`) folds in a loop, the
+                // operands evaluated in the recursion's order
+                var spine: std.ArrayListUnmanaged(u32) = .empty;
+                defer spine.deinit(self.allocator);
+                var at = idx;
+                while (self.ast.nodes[at].tag == .binary_op) {
+                    spine.append(self.allocator, at) catch break :blk .null;
+                    at = self.ast.nodes[at].data.lhs;
                 }
-                // string concat in a constant default: 'a' . 'b', and chains.
-                // fold when both operands are concrete scalars; otherwise defer
-                // (an operand is a constant sentinel resolved at call time)
-                if (tok.tag == .dot) {
-                    if (constScalarToStr(self, lhs)) |ls| {
-                        if (constScalarToStr(self, rhs)) |rs| {
-                            const joined = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ls, rs }) catch break :blk .null;
-                            self.string_allocs.append(self.allocator, joined) catch break :blk .null;
-                            break :blk .{ .string = Value.String.borrowed(joined) };
-                        }
-                    }
-                    break :blk self.makeDeferredExpr(.concat, lhs, rhs);
+                var acc = self.evalConstExpr(at);
+                var i = spine.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const s = self.ast.nodes[spine.items[i]];
+                    acc = self.foldBinaryConst(self.ast.tokens[s.main_token].tag, acc, self.evalConstExpr(s.data.rhs));
                 }
-                // php folds arithmetic that can't raise anything
-                // (zend_binary_op_produces_error): numbers and numeric strings
-                if (foldableNumber(lhs) and foldableNumber(rhs)) switch (tok.tag) {
-                    .plus => break :blk Value.add(lhs, rhs),
-                    .minus => break :blk Value.subtract(lhs, rhs),
-                    .star => break :blk Value.multiply(lhs, rhs),
-                    else => {},
-                };
-                // a compound arithmetic/bitwise expression that didn't fold -
-                // an operand is a deferred constant. defer the whole op
-                const dop: ?bytecode.DeferredExpr.Op = switch (tok.tag) {
-                    .pipe => .bor,
-                    .amp => .band,
-                    .caret => .bxor,
-                    .plus => .add,
-                    .minus => .sub,
-                    .star => .mul,
-                    .slash => .div,
-                    .percent => .mod,
-                    .lt_lt => .shl,
-                    .gt_gt => .shr,
-                    .star_star => .pow,
-                    else => null,
-                };
-                if (dop) |o| break :blk self.makeDeferredExpr(o, lhs, rhs);
-                break :blk .null;
+                break :blk acc;
             },
             .ternary => blk: {
                 // constant-expression ternary default: cond ? then : else.

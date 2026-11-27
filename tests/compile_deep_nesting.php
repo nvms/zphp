@@ -31,6 +31,13 @@ $cases = [
     'parameter default' => 'function g($x = ' . str_repeat('[', 9980) . str_repeat(']', 9980) . ') { return $x; } return g();',
     'dimension chain' => '$a = []; return $a' . str_repeat('[0]', 20000) . ' ?? "missing";',
     'nullsafe chain' => '$a = null; return $a' . str_repeat('?->p', 2000) . ' ?? "null";',
+    // left-nested chains: php's compiler recurses once per operator too
+    'sum chain' => 'return ' . str_repeat('1 + ', 40000) . '1;',
+    'concat chain' => '$a = "xy"; return strlen(' . str_repeat('$a . ', 40000) . '"");',
+    'mixed chain' => '$a = 3; return ' . str_repeat('$a * 2 - $a + ', 10000) . '0;',
+    'and chain' => '$a = 1; return ' . str_repeat('$a && ', 40000) . '"last";',
+    'or chain' => '$a = 0; return ' . str_repeat('$a || ', 40000) . '0;',
+    'constant chain' => 'const SUM = ' . str_repeat('2 + ', 40000) . '1; return SUM;',
 ];
 
 function show($label, $r) {
