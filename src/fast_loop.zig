@@ -444,15 +444,6 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += op_bytes;
                     continue :dispatch _next;
                 },
-                .constant_w => {
-                    const idx = std.mem.readInt(u32, code[ip..][0..4], .big);
-                    ip += 4;
-                    stack[sp] = consts[idx];
-                    sp += 1;
-                    const _next = readOp(code, ip);
-                    ip += op_bytes;
-                    continue :dispatch _next;
-                },
                 .jump_if_false => {
                     if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
                     const offset = distanceAt(code, ip);
@@ -1840,7 +1831,19 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += op_bytes;
                     continue :dispatch _next;
                 },
-                else => {
+                else => |unhandled| {
+                    // a literal past what u16 reaches, in a function whose
+                    // pool is that large: rare, and a handler of its own
+                    // among the hot ones costs every program a few percent
+                    if (unhandled == .constant_w) {
+                        const idx = std.mem.readInt(u32, code[ip..][0..4], .big);
+                        ip += 4;
+                        stack[sp] = consts[idx];
+                        sp += 1;
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
+                    }
                     frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
