@@ -1520,6 +1520,13 @@ pub const VM = struct {
     // spl_autoload_extensions(), null for php's default ".inc,.php"
     spl_autoload_extensions: ?[]u8 = null,
     autoload_depth: u8 = 0,
+    // the frames an autoload runs start here: php's autoload clears
+    // EG(filename_override), so a constant expression below it is not the
+    // position code above it reports (constExprOverride)
+    override_floor: usize = 0,
+    // the exception last stamped under a constant expression's override,
+    // which the expression's failure leaves as it is
+    override_stamped: ?*PhpObject = null,
     // when a required script does an early `return X` at top level, the
     // return op pops its frame before the require handler runs the merge.
     // require sets this to the about-to-be-popped frame depth before
@@ -4364,6 +4371,8 @@ pub const VM = struct {
         // a chunk freed with the request may come back at the same address
         self.rw_prop_fetch_ip = 0;
         self.rw_prop_fetch_chunk = 0;
+        self.override_floor = 0;
+        self.override_stamped = null;
         self.sensitive_params.clearRetainingCapacity();
         // the request's shared first-class callables go with it
         var fcc_it = self.fcc_cache.valueIterator();
@@ -17116,7 +17125,7 @@ pub const VM = struct {
             // frame above (an error handler for the failed open), is in that
             // require, as php's trace lists it
             if (i + 1 < top and (self.frames[i + 1].func != null or self.frames[i + 1].script_path.len == 0)) try self.appendPendingRequire(arr, i);
-            if (self.frames[i].func) |f| if (f.name.len > 0 and i != self.hidden_trace_frame) {
+            if (self.frames[i].func) |f| if (f.name.len > 0 and i != self.hidden_trace_frame and !isScopedConstExpr(f.name)) {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
                 const call_site: ?SourcePosition = if (self.attributeSiteAt(i)) |s|
                     .{ .file = s.file, .line = s.line }
@@ -17127,7 +17136,7 @@ pub const VM = struct {
                     if (i - 1 == self.hidden_trace_frame and i >= 2) {
                         break :blk if (i - 2 < self.finished_frames) null else self.framePosition(i - 2);
                     }
-                    break :blk self.framePosition(i - 1);
+                    break :blk self.framePosition(self.belowConstExprs(i - 1));
                 } else null;
                 // a generator running as a delegate was reached through the
                 // generators waiting in yield from, which php lists between
@@ -19238,13 +19247,16 @@ pub const VM = struct {
         self.handler_floor = self.handler_count;
         defer self.handler_floor = floor;
         const evaluating = self.frame_count;
+        const stamped = self.override_stamped;
+        self.override_stamped = null;
+        defer self.override_stamped = stamped;
         // a trait's constant naming the class runs the trait's initializer
         // with this class as its scope
         const trait_init: ?[]const u8 = if (self.classes.getPtr(declared)) |cls| cls.trait_const_inits.get(const_name) else null;
         const scope_arg = [_]Value{.{ .string = Value.String.borrowed(declared) }};
         var value = (if (trait_init) |initializer| self.callByName(initializer, &scope_arg) else self.callByName(name, &.{})) catch |err| {
             // the expression belongs to the access, not a frame of its own
-            if (self.pending_exception) |exc| if (exc == .object) {
+            if (self.pending_exception) |exc| if (exc == .object and exc.object != self.override_stamped) {
                 const bare = if (self.functions.get(name)) |f| isBareConstantInitializer(f) else false;
                 try (if (bare) self.stampThrowableBelow(exc.object, evaluating) else self.stampConstExprThrowable(exc.object, evaluating));
             };
@@ -20181,6 +20193,57 @@ pub const VM = struct {
     pub fn currentSourcePosition(self: *VM) SourcePosition {
         if (self.ic) |ic| if (ic.arg_check_site) |site| return site;
         if (self.frame_count == 0) return .{ .file = self.file_path, .line = 0 };
+        // code a constant expression called reports the expression's position
+        if (self.constExprOverride(self.frame_count)) |k| if (k + 1 < self.frame_count) {
+            if (self.framePosition(k)) |at| return at;
+        };
+        return self.executedPosition();
+    }
+
+    // php's EG(filename_override): the class constant or property default
+    // being evaluated below frame `top`, whose file and line everything it
+    // calls reports, until an autoload clears it
+    pub fn constExprOverride(self: *VM, top: usize) ?usize {
+        var i = @min(top, self.frame_count);
+        while (i > self.override_floor) {
+            i -= 1;
+            const func = self.frames[i].func orelse continue;
+            if (func.name.len == 0 or func.name[0] != 0) continue;
+            if (isScopedConstExpr(func.name) and !isBareConstantInitializer(func) and !bareDefaultRunning(&self.frames[i])) return i;
+        }
+        return null;
+    }
+
+    // where the code below frame `top` really is (zend_get_executed_lineno
+    // with no override): initializers have no frame of their own in php,
+    // except a parameter default, which runs in its function
+    fn executedPositionBelow(self: *VM, top: usize) ?SourcePosition {
+        if (top == 0) return null;
+        var fi = top - 1;
+        while (fi > 0) : (fi -= 1) {
+            if (self.frames[fi].native) continue;
+            const func = self.frames[fi].func orelse break;
+            if (func.name.len == 0 or func.name[0] != 0) break;
+            if (bytecode.isParamDefaultInitializerName(func.name)) break;
+        }
+        if (fi < self.finished_frames) return null;
+        return self.framePosition(fi);
+    }
+
+    // the frame that called code running in frame `i`, past the constant
+    // expressions between them, which have no frame in php
+    fn belowConstExprs(self: *const VM, i: usize) usize {
+        var at = i;
+        while (at > 0) {
+            const func = self.frames[at].func orelse break;
+            if (!isScopedConstExpr(func.name)) break;
+            at -= 1;
+        }
+        return at;
+    }
+
+    // the position the running code is at, without the override
+    fn executedPosition(self: *VM) SourcePosition {
         // an initializer (a constant expression: "\x00const...", attribute
         // arguments, deferred defaults) runs for the code that needed its
         // value, which php reports
@@ -27594,6 +27657,9 @@ pub const VM = struct {
         defer self.autoload_depth -= 1;
         try ic.autoloading.append(self.allocator, class_name);
         defer _ = ic.autoloading.pop();
+        const floor = self.override_floor;
+        self.override_floor = self.frame_count;
+        defer self.override_floor = floor;
 
         // spl_perform_autoload: an autoloader may add or remove autoloaders
         // while the walk goes on
@@ -29975,6 +30041,9 @@ pub const VM = struct {
         self.handler_floor = self.handler_count;
         defer self.handler_floor = floor;
         const instantiating = self.frame_count;
+        const stamped = self.override_stamped;
+        self.override_stamped = null;
+        defer self.override_stamped = stamped;
         self.bare_default_failed = false;
         const runAll = struct {
             fn run(vm: *VM, cn: []const u8, initializer: []const u8) RuntimeError!void {
@@ -29986,7 +30055,7 @@ pub const VM = struct {
             // a default that only names a global constant is resolved at the
             // instantiation (zval_update_constant_ex); any other expression
             // is php's constant expression
-            if (self.pending_exception) |exc| if (exc == .object) try (if (self.bare_default_failed) self.stampThrowableBelow(exc.object, instantiating) else self.stampConstExprThrowable(exc.object, instantiating));
+            if (self.pending_exception) |exc| if (exc == .object and exc.object != self.override_stamped) try (if (self.bare_default_failed) self.stampThrowableBelow(exc.object, instantiating) else self.stampConstExprThrowable(exc.object, instantiating));
             // php evaluates the defaults again on the next attempt
             if (self.classes.getPtr(class_name)) |retry| if (!retry.defaults_pending) {
                 retry.defaults_pending = true;
@@ -30252,6 +30321,30 @@ pub const VM = struct {
     }
 
     fn stampThrowableBelow(self: *VM, obj: *PhpObject, top: usize) RuntimeError!void {
+        // created while a constant expression is evaluated: the exception
+        // has the expression's file and line, and its trace starts with
+        // php's "[constant expression]" frame where the code really is
+        // (zend_fetch_debug_backtrace under EG(filename_override))
+        if (self.constExprOverride(top)) |k| if (self.framePosition(k)) |override| {
+            try obj.set(self.allocator, "file", .{ .string = Value.String.borrowed(override.file) });
+            try obj.set(self.allocator, "line", .{ .int = override.line });
+            var trace = try self.traceBelow(top);
+            if (self.executedPositionBelow(top)) |real| if (!std.mem.eql(u8, real.file, override.file) or real.line != override.line) {
+                const entry = try self.allocArray();
+                try entry.set(self.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(real.file) });
+                try entry.set(self.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = real.line });
+                try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed("[constant expression]") });
+                const full = try self.allocArray();
+                try full.append(self.allocator, .{ .array = entry });
+                for (trace.entries.items) |e| try full.append(self.allocator, e.value);
+                self.releaseUnheldArray(trace);
+                trace = full;
+            };
+            self.dropExceptionTraceArgs(trace);
+            try obj.setForScope(self.allocator, "trace", .{ .array = trace }, self.exceptionTraceScope(obj));
+            self.override_stamped = obj;
+            return;
+        };
         // an internal function's frame executes no user code: the frame
         // under it is the one that counts
         var user = top;
