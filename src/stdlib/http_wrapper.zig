@@ -15,6 +15,7 @@ const stream_filters = @import("stream_filters.zig");
 const user_streams = @import("user_streams.zig");
 const network = @import("network.zig");
 const fs = @import("filesystem.zig");
+const uri = @import("uri.zig");
 
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -50,50 +51,32 @@ pub const NOTIFY_COMPLETED = 8;
 pub const NOTIFY_FAILURE = 9;
 pub const NOTIFY_AUTH_RESULT = 10;
 
+// the parts of the request's url (php's php_uri resource), read raw from
+// the parser the context's uri_parser_class option names; they live in
+// `parts`
 const Url = struct {
     scheme: []const u8,
     user: ?[]const u8 = null,
     pass: ?[]const u8 = null,
     host: []const u8 = "",
-    port: u16 = 0,
+    port: i64 = 0,
     path: ?[]const u8 = null,
     query: ?[]const u8 = null,
+    parts: uri.Parts = .{},
+
+    fn deinit(self: *Url, a: std.mem.Allocator) void {
+        self.parts.deinit(a);
+    }
 };
 
-// php_url_parse for the parts the wrapper uses
-fn parseUrl(url: []const u8) ?Url {
-    const colon = std.mem.indexOf(u8, url, "://") orelse return null;
-    var u = Url{ .scheme = url[0..colon] };
-    var rest = url[colon + 3 ..];
-    const auth_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
-    var authority = rest[0..auth_end];
-    rest = rest[auth_end..];
-    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
-        const userinfo = authority[0..at];
-        authority = authority[at + 1 ..];
-        if (std.mem.indexOfScalar(u8, userinfo, ':')) |c| {
-            u.user = userinfo[0..c];
-            u.pass = userinfo[c + 1 ..];
-        } else u.user = userinfo;
-    }
-    if (authority.len > 0 and authority[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
-        u.host = authority[0 .. close + 1];
-        const after = authority[close + 1 ..];
-        if (after.len > 1 and after[0] == ':') u.port = std.fmt.parseUnsigned(u16, after[1..], 10) catch return null;
-    } else if (std.mem.lastIndexOfScalar(u8, authority, ':')) |c| {
-        u.host = authority[0..c];
-        if (c + 1 < authority.len) u.port = std.fmt.parseUnsigned(u16, authority[c + 1 ..], 10) catch return null;
-    } else u.host = authority;
-    if (u.host.len == 0) return null;
-    const frag = std.mem.indexOfScalar(u8, rest, '#') orelse rest.len;
-    rest = rest[0..frag];
-    if (std.mem.indexOfScalar(u8, rest, '?')) |q| {
-        u.query = rest[q + 1 ..];
-        rest = rest[0..q];
-    }
-    if (rest.len > 0) u.path = rest;
-    return u;
+// php_uri_parse_to_struct, silent: null when the url doesn't parse
+fn parseResource(a: std.mem.Allocator, parser: uri.ParserKind, url: []const u8) RuntimeError!?Url {
+    var parts = (try uri.parseToParts(a, parser, url)) orelse return null;
+    const scheme = parts.scheme orelse {
+        parts.deinit(a);
+        return null;
+    };
+    return .{ .scheme = scheme, .user = parts.user, .pass = parts.password, .host = parts.host orelse "", .port = parts.port orelse 0, .path = parts.path, .query = parts.query, .parts = parts };
 }
 
 pub fn contextOption(context: ?*PhpObject, wrapper: []const u8, name: []const u8) ?Value {
@@ -239,7 +222,9 @@ fn openEx(ctx: *NativeContext, label: []const u8, path: []const u8, mode: []cons
         return null;
     }
     const a = ctx.allocator;
-    var resource = parseUrl(path) orelse return null;
+    const uri_parser = try uri.contextParser(ctx, context, "http");
+    var resource = (try parseResource(a, uri_parser, path)) orelse return null;
+    defer resource.deinit(a);
     const header_init = flags & FLAG_HEADER_INIT != 0;
     const redirected = flags & FLAG_REDIRECTED != 0;
     const keep_method = flags & FLAG_KEEP_METHOD != 0;
@@ -332,7 +317,8 @@ fn openEx(ctx: *NativeContext, label: []const u8, path: []const u8, mode: []cons
     if (request_fulluri) {
         try req.appendSlice(a, path);
     } else {
-        try req.appendSlice(a, resource.path orelse "/");
+        const req_path = resource.path orelse "";
+        try req.appendSlice(a, if (req_path.len > 0) req_path else "/");
         if (resource.query) |q| {
             try req.append(a, '?');
             try req.appendSlice(a, q);
@@ -587,11 +573,12 @@ fn openEx(ctx: *NativeContext, label: []const u8, path: []const u8, mode: []cons
                 try new_path.print(a, "{s}://{s}{s}", .{ resource.scheme, resource.host, loc_path.items });
             }
         } else try new_path.appendSlice(a, loc);
-        const new_resource = parseUrl(new_path.items) orelse {
+        var new_resource = (try parseResource(a, uri_parser, new_path.items)) orelse {
             try user_streams.logErrorAt(ctx, options, .{ .code = .InvalidUrl, .wrapper = "http" }, "Invalid redirect URL! {s}", .{new_path.items});
             return null;
         };
-        const default_port: u16 = if (use_ssl) 443 else 80;
+        defer new_resource.deinit(a);
+        const default_port: i64 = if (use_ssl) 443 else 80;
         const same_origin = std.ascii.eqlIgnoreCase(resource.scheme, new_resource.scheme) and std.ascii.eqlIgnoreCase(resource.host, new_resource.host) and
             (if (resource.port != 0) resource.port else default_port) == (if (new_resource.port != 0) new_resource.port else default_port);
         // control characters in the user, password or path refuse the redirect

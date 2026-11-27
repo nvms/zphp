@@ -17,6 +17,7 @@ const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const Args = @import("string_ports.zig").Args;
 const rfc = @import("uri_rfc3986.zig");
 const ww = @import("uri_whatwg.zig");
+const url_mod = @import("url.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -1616,4 +1617,113 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "__debugInfo", 0, debugInfo },
     });
     try vm.classes.put(a, whatwg_class, wu);
+}
+
+// ---- the parsers the stream wrappers take (php_uri_parse_to_struct) -----------------------
+
+// the components a uri_parser_class parser gives the http and ftp wrappers,
+// read raw (PHP_URI_COMPONENT_READ_MODE_RAW)
+pub const Parts = struct {
+    scheme: ?[]u8 = null,
+    user: ?[]u8 = null,
+    password: ?[]u8 = null,
+    host: ?[]u8 = null,
+    port: ?i64 = null,
+    path: ?[]u8 = null,
+    query: ?[]u8 = null,
+    fragment: ?[]u8 = null,
+
+    pub fn deinit(self: *Parts, a: Allocator) void {
+        inline for (.{ "scheme", "user", "password", "host", "path", "query", "fragment" }) |f| {
+            if (@field(self, f)) |s| a.free(s);
+        }
+        self.* = .{};
+    }
+};
+
+pub const ParserKind = enum { parse_url, rfc3986, whatwg };
+
+// php_stream_context_get_uri_parser: the parser a wrapper's uri_parser_class
+// option names (php_uri_get_parser looks the name up exactly; a missing or
+// null option is the legacy parse_url one). anything else is php's
+// ValueError, naming the running function
+pub fn contextParser(ctx: *NativeContext, context: ?*PhpObject, wrapper: []const u8) RuntimeError!ParserKind {
+    const option = @import("http_wrapper.zig").contextOption(context, wrapper, "uri_parser_class") orelse return .parse_url;
+    const v = if (option == .null) return .parse_url else option;
+    if (v == .string) {
+        const name = v.string.bytes();
+        if (std.mem.eql(u8, name, rfc_class)) return .rfc3986;
+        if (std.mem.eql(u8, name, whatwg_class)) return .whatwg;
+        if (std.mem.eql(u8, name, "parse_url")) return .parse_url;
+    }
+    return throwFmt(ctx, "ValueError", "{s}(): Provided stream context has invalid value for the \"uri_parser_class\" option", .{ctx.call_name orelse "main"});
+}
+
+fn dupeOpt(a: Allocator, s: ?[]const u8) !?[]u8 {
+    return if (s) |v| try a.dupe(u8, v) else null;
+}
+
+// php_uri_parse_to_struct with a silent parse: null when the uri is invalid
+pub fn parseToParts(a: Allocator, kind: ParserKind, text: []const u8) !?Parts {
+    var out: Parts = .{};
+    errdefer out.deinit(a);
+    switch (kind) {
+        // php_url_parse_ex2, which replaces control characters itself
+        .parse_url => {
+            const u = url_mod.parse(text) orelse return null;
+            inline for (.{ .{ "scheme", "scheme" }, .{ "user", "user" }, .{ "password", "pass" }, .{ "host", "host" }, .{ "path", "path" }, .{ "query", "query" }, .{ "fragment", "fragment" } }) |f| {
+                if (@field(u, f[1])) |v| {
+                    const copy = try a.dupe(u8, v);
+                    url_mod.replaceControlChars(copy);
+                    @field(out, f[0]) = copy;
+                }
+            }
+            if (u.port != 0) out.port = u.port;
+        },
+        .rfc3986 => {
+            var uri = rfc.parse(a, text) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return null,
+            };
+            defer uri.deinit(a);
+            if (uri.port_text) |p| if (p.len > 0 and portToLong(p) == -1) return null;
+            out.scheme = try dupeOpt(a, uri.scheme);
+            out.user = try dupeOpt(a, rfcUsername(&uri));
+            out.password = try dupeOpt(a, rfcPassword(&uri));
+            out.host = try rfcHost(a, &uri);
+            if (uri.port_text) |p| if (p.len > 0) {
+                out.port = portToLong(p);
+            };
+            out.path = try rfcPath(a, &uri);
+            out.query = try dupeOpt(a, uri.query);
+            out.fragment = try dupeOpt(a, uri.fragment);
+        },
+        .whatwg => {
+            var p = ww.Parser.init(a);
+            defer p.deinit();
+            var url = try ww.parse(&p, null, text) orelse return null;
+            defer url.deinit(a);
+            out.scheme = try a.dupe(u8, url.scheme_name);
+            if (urlHasCredentials(&url)) {
+                out.user = try a.dupe(u8, url.username);
+                out.password = try a.dupe(u8, url.password);
+            }
+            out.host = switch (url.host.type) {
+                .ipv4 => try ww.serializeHostIpv4(a, url.host.ipv4),
+                .ipv6 => blk: {
+                    const inner = try ww.serializeHostIpv6(a, url.host.ipv6);
+                    defer a.free(inner);
+                    break :blk try std.mem.concat(a, u8, &.{ "[", inner, "]" });
+                },
+                .empty => try a.dupe(u8, ""),
+                .undef => null,
+                .domain, .@"opaque" => try a.dupe(u8, url.host.str),
+            };
+            if (url.has_port) out.port = url.port;
+            out.path = try a.dupe(u8, url.path_str);
+            out.query = try dupeOpt(a, url.query);
+            out.fragment = try dupeOpt(a, url.fragment);
+        },
+    }
+    return out;
 }

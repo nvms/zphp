@@ -18,6 +18,7 @@ const se = @import("stream_errors.zig");
 const http = @import("http_wrapper.zig");
 const xp_ssl = @import("xp_ssl.zig");
 const url_mod = @import("url.zig");
+const uri = @import("uri.zig");
 
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -105,7 +106,7 @@ const Resource = struct {
     user: ?[]u8 = null,
     pass: ?[]u8 = null,
     host: []u8 = &.{},
-    port: u16 = 0,
+    port: i64 = 0,
     path: ?[]u8 = null,
 
     fn deinit(self: *Resource, a: std.mem.Allocator) void {
@@ -114,23 +115,21 @@ const Resource = struct {
     }
 };
 
-fn parseResource(a: std.mem.Allocator, path: []const u8) RuntimeError!?Resource {
-    const u = url_mod.parse(path) orelse return null;
-    var r = Resource{ .port = u.port };
+fn parseResource(a: std.mem.Allocator, parser: uri.ParserKind, path: []const u8) RuntimeError!?Resource {
+    var parts = (try uri.parseToParts(a, parser, path)) orelse return null;
+    defer parts.deinit(a);
+    var r = Resource{ .port = parts.port orelse 0 };
     errdefer r.deinit(a);
-    const dup = struct {
-        fn f(al: std.mem.Allocator, v: ?[]const u8) RuntimeError!?[]u8 {
-            const s = v orelse return null;
-            const out = try al.dupe(u8, s);
-            url_mod.replaceControlChars(out);
-            return out;
-        }
-    }.f;
-    r.scheme = try dup(a, u.scheme);
-    r.user = try dup(a, u.user);
-    r.pass = try dup(a, u.pass);
-    r.host = (try dup(a, u.host)) orelse try a.dupe(u8, "");
-    r.path = try dup(a, u.path);
+    r.scheme = parts.scheme;
+    parts.scheme = null;
+    r.user = parts.user;
+    parts.user = null;
+    r.pass = parts.password;
+    parts.password = null;
+    r.host = parts.host orelse try a.dupe(u8, "");
+    parts.host = null;
+    r.path = parts.path;
+    parts.path = null;
     return r;
 }
 
@@ -162,7 +161,8 @@ fn closeQuietly(ctx: *NativeContext, stream: *PhpObject) void {
 // resource comes back for the caller to free either way)
 fn connect(ctx: *NativeContext, path: []const u8, options: i64, context: ?*PhpObject, resource_out: *?Resource) RuntimeError!?Conn {
     const a = ctx.allocator;
-    var resource = (try parseResource(a, path)) orelse return null;
+    const uri_parser = try uri.contextParser(ctx, context, "ftp");
+    var resource = (try parseResource(a, uri_parser, path)) orelse return null;
     if (resource.path == null) {
         resource_out.* = resource;
         return null;
@@ -692,13 +692,14 @@ fn wrapperWarn(ctx: *NativeContext, options: i64, code: se.Code, comptime fmt: [
 // php_stream_ftp_rename: both urls on the same server
 pub fn rename(ctx: *NativeContext, url_from: []const u8, url_to: []const u8, options: i64, context: ?*PhpObject) RuntimeError!bool {
     const a = ctx.allocator;
-    var from = (try parseResource(a, url_from)) orelse return false;
+    const uri_parser = try uri.contextParser(ctx, context, "ftp");
+    var from = (try parseResource(a, uri_parser, url_from)) orelse return false;
     defer from.deinit(a);
-    var to = (try parseResource(a, url_to)) orelse return false;
+    var to = (try parseResource(a, uri_parser, url_to)) orelse return false;
     defer to.deinit(a);
     if (from.scheme == null or to.scheme == null or !std.mem.eql(u8, from.scheme.?, to.scheme.?) or
         !std.mem.eql(u8, from.host, to.host) or
-        (from.port != to.port and @as(u32, from.port) * to.port != 0 and @as(u32, from.port) + to.port != 21) or
+        (from.port != to.port and from.port *% to.port != 0 and from.port +% to.port != 21) or
         from.path == null or to.path == null) return false;
     var resource: ?Resource = null;
     defer if (resource) |*r| r.deinit(a);
