@@ -2532,10 +2532,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     // internal name); a non-hoistable named function binds at runtime via
     // declare_fn at the declaration site, matching PHP
     var cond_id: u16 = 0;
-    if (!self.hoistable and !is_closure) {
-        self.cond_fn_count += 1;
-        cond_id = self.cond_fn_count;
-    }
+    if (!self.hoistable and !is_closure) cond_id = try nextCondId(self);
 
     self.functions.appendAssumeCapacity(.{
         .name = name,
@@ -3485,14 +3482,21 @@ const ClassShape = struct {
 
 // a class-like declaration that php doesn't bind while compiling: its
 // functions wait for declare_methods, run just before the declaration. returns
+// the id a conditional declaration's declare_fn names (a u16 operand): a
+// file with more fails to compile rather than give two the same id
+fn nextCondId(self: *Compiler) Error!u16 {
+    if (self.cond_fn_count == std.math.maxInt(u16)) return self.fail(self.tokenAtOffset(self.current_source_offset), "File too large to compile: it declares too many functions and classes conditionally; split it into smaller files");
+    self.cond_fn_count += 1;
+    return self.cond_fn_count;
+}
+
 // the cond id to restore
-fn enterClassCond(self: *Compiler) u16 {
+fn enterClassCond(self: *Compiler) Error!u16 {
     const saved = self.class_cond_id;
     if (self.class_decl_hoistable) {
         self.class_cond_id = 0;
     } else {
-        self.cond_fn_count += 1;
-        self.class_cond_id = self.cond_fn_count;
+        self.class_cond_id = try nextCondId(self);
     }
     self.class_decl_hoistable = true;
     return saved;
@@ -3505,7 +3509,7 @@ fn emitDeclareMethods(self: *Compiler) Error!void {
 }
 
 pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const saved_cond = enterClassCond(self);
+    const saved_cond = try enterClassCond(self);
     defer self.class_cond_id = saved_cond;
     const unqualified = self.ast.tokenSlice(node.main_token);
     if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as a class name as it is reserved", .{unqualified});
@@ -4296,7 +4300,7 @@ fn warnUnderscoreName(self: *Compiler, token: u32, comptime kind: []const u8) Er
 }
 
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const saved_cond = enterClassCond(self);
+    const saved_cond = try enterClassCond(self);
     defer self.class_cond_id = saved_cond;
     const unqualified = self.ast.tokenSlice(node.main_token);
     if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as an interface name as it is reserved", .{unqualified});
@@ -4566,7 +4570,7 @@ fn compileTraitConstantValue(self: *Compiler, trait_name: []const u8, member: As
 }
 
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const saved_cond = enterClassCond(self);
+    const saved_cond = try enterClassCond(self);
     defer self.class_cond_id = saved_cond;
     const unqualified = self.ast.tokenSlice(node.main_token);
     if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as a trait name as it is reserved", .{unqualified});
@@ -4887,7 +4891,7 @@ fn checkEnumMembers(self: *Compiler, enum_name: []const u8, enum_tok: u32, backe
 }
 
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const saved_cond = enterClassCond(self);
+    const saved_cond = try enterClassCond(self);
     defer self.class_cond_id = saved_cond;
     try warnUnderscoreName(self, node.main_token, "an enum name");
     const enum_name = self.declaredName(self.ast.tokenSlice(node.main_token));

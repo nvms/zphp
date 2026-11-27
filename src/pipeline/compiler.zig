@@ -959,7 +959,7 @@ pub const Compiler = struct {
     }
 
     // the last token starting at or before a source offset
-    fn tokenAtOffset(self: *const Compiler, offset: u32) u32 {
+    pub fn tokenAtOffset(self: *const Compiler, offset: u32) u32 {
         const tokens = self.ast.tokens;
         var lo: usize = 0;
         var hi: usize = tokens.len;
