@@ -2083,4 +2083,3 @@ fn bindDecodedArrayReference(ctx: *NativeContext, source: *PhpArray, source_key:
     }
     ctx.vm.array_ref_active = true;
 }
-
