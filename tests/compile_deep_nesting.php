@@ -31,6 +31,7 @@ $cases = [
     'parameter default' => 'function g($x = ' . str_repeat('[', 9980) . str_repeat(']', 9980) . ') { return $x; } return g();',
     'dimension chain' => '$a = []; return $a' . str_repeat('[0]', 20000) . ' ?? "missing";',
     'nullsafe chain' => '$a = null; return $a' . str_repeat('?->p', 2000) . ' ?? "null";',
+    'nested destructuring' => str_repeat('[', 3000) . '$x' . str_repeat(']', 3000) . ' = ' . str_repeat('[', 3000) . '"unpacked"' . str_repeat(']', 3000) . '; return $x;',
     // left-nested chains: php's compiler recurses once per operator too
     'sum chain' => 'return ' . str_repeat('1 + ', 40000) . '1;',
     'concat chain' => '$a = "xy"; return strlen(' . str_repeat('$a . ', 40000) . '"");',

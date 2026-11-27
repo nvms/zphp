@@ -1700,6 +1700,7 @@ pub const Compiler = struct {
     // ==================================================================
 
     pub fn compileDestructure(self: *Compiler, target: Ast.Node) Error!void {
+        if (stack_grow.needed()) return stack_grow.call(compileDestructure, .{ self, target }) orelse self.stackExhausted();
         for (self.ast.extraSlice(target.data.lhs)) |slot| {
             if (slot != 0) break;
         } else return self.fail(target.main_token, "Cannot use empty list");

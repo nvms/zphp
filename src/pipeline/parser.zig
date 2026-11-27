@@ -3105,6 +3105,7 @@ const Parser = struct {
     }
 
     fn parseParam(self: *Parser) Error!u32 {
+        if (stack_grow.needed()) return stack_grow.callAlways(parseParam, .{self}) orelse self.outOfStack();
         try self.parseAttributes();
         // constructor property promotion: visibility keyword before param
         // read-side promotion: 0 = none, 1 = public, 2 = protected, 3 = private

@@ -1531,6 +1531,7 @@ fn compileCoalesceContainer(self: *Compiler, node_idx: u32) Error!void {
 }
 
 fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
+    if (stack_grow.needed()) return stack_grow.call(compileCoalesceFetch, .{ self, node_idx }) orelse self.stackExhausted();
     const n = self.ast.nodes[node_idx];
     if (n.tag == .array_access) {
         try compileCoalesceContainer(self, n.data.lhs);
