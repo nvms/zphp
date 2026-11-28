@@ -631,12 +631,14 @@ test "the account counts, limits and rebases" {
     try std.testing.expectEqual(@as(usize, 2 << 20), account.realUsage());
     // past the soft limit: let through, the exhaustion left pending
     const second = try a.alloc(u8, 3 << 20);
-    try std.testing.expectEqual(@as(?usize, 3 << 20), account.refused);
+    // a huge block takes whole pages, or whole chunks on windows
+    const huge_block: usize = if (huge_granularity == chunk_size) 4 << 20 else 3 << 20;
+    try std.testing.expectEqual(@as(?usize, huge_block), account.refused);
     // a huge block is mapped beside the chunks
-    try std.testing.expectEqual(@as(usize, 5 << 20), account.realUsage());
+    try std.testing.expectEqual(@as(usize, (2 << 20) + huge_block), account.realUsage());
     // past the hard limit (twice the soft one): refused
     try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 5 << 20));
-    try std.testing.expectEqual(@as(?usize, 3 << 20), account.refused);
+    try std.testing.expectEqual(@as(?usize, huge_block), account.refused);
     account.reporting = true;
     const third = try a.alloc(u8, 8);
     a.free(third);
